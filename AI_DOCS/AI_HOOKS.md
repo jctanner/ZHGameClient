@@ -85,9 +85,10 @@ Messages:
 3. `EventBatch`
 4. `IntentBatch`
 5. `ActionAck`
-6. `Health/Ping`
-7. `SessionState` (shell/menu/lobby/game-setup state)
-8. `SessionCommand`
+6. `ExecutionResult` (optional rich result payload for executed actions)
+7. `Ping` / `Pong`
+8. `SessionState` (shell/menu/lobby/game-setup state)
+9. `SessionCommand`
 
 `Intent` examples:
 
@@ -104,12 +105,14 @@ Messages:
 2. `Menu.Click { controlId }`
 3. `Menu.SetText { controlId, text }`
 4. `Lobby.ListPlayers {}`
-5. `Lobby.Join { roomId|roomName }`
+5. `Lobby.Join { room_id|room_name }`
 6. `Lobby.Leave {}`
 7. `Lobby.SetReady { ready }`
 8. `GameSetup.GetSettings {}`
 9. `GameSetup.SetSetting { key, value }`
 10. `GameSetup.GetPlayers {}`
+11. `Menu.ListControls { kind, include_hidden }`
+12. `Game.Query { path, player_index? }`
 
 ## Command Execution Strategy
 

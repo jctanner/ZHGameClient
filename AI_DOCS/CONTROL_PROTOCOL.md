@@ -32,6 +32,11 @@ Every message should include:
 4. `source` (optional: `controller|adapter`)
 5. `exec` (optional: `serial|parallel`, default `serial`)
 
+Naming convention:
+
+1. Top-level envelope fields and most `args` keys use `snake_case`.
+2. Existing adapter command payloads may require legacy keys where implemented (for example `controlId` for `Menu.Click` / `Menu.SetText`).
+
 ## Core Message Types
 
 Requests from controller:
@@ -39,10 +44,9 @@ Requests from controller:
 1. `Hello`
 2. `SessionCommand`
 3. `IntentBatch`
-4. `Query`
-5. `Ping`
-6. `Subscribe`
-7. `Unsubscribe`
+4. `Ping`
+5. `Subscribe`
+6. `Unsubscribe`
 
 Responses/events from adapter:
 
@@ -84,23 +88,43 @@ Supported `cmd` values (v1):
 2. `Menu.Open`
 3. `Menu.Click`
 4. `Menu.SetText`
-5. `Lobby.ListPlayers`
-6. `Lobby.Join`
-7. `Lobby.Leave`
-8. `Lobby.SetReady`
-9. `GameSetup.GetSettings`
-10. `GameSetup.SetSetting`
-11. `GameSetup.GetPlayers`
-12. `Chat.Send`
-13. `Game.Query`
-14. `Game.QueueUnit`
-15. `Game.BuildWorker`
-16. `Game.FindSupplySources`
-17. `Game.FindBuildLocationNearSupply`
-18. `Game.DozerConstruct`
-19. `Game.BuildSupplyStashAuto`
-20. `Game.BuildSupplyStashSmart`
-21. `Game.BuildBarracksSmart`
+5. `Menu.ListControls`
+6. `Lobby.ListPlayers`
+7. `Lobby.Join`
+8. `Lobby.Leave`
+9. `Lobby.SetReady`
+10. `GameSetup.GetSettings`
+11. `GameSetup.SetSetting`
+12. `GameSetup.GetPlayers`
+13. `Chat.Send`
+14. `Game.Query`
+15. `Game.QueueUnit`
+16. `Game.BuildWorker`
+17. `Game.FindSupplySources`
+18. `Game.FindBuildLocationNearSupply`
+19. `Game.DozerConstruct`
+20. `Game.BuildSupplyStashAuto`
+21. `Game.BuildSupplyStashSmart`
+22. `Game.BuildBarracksSmart`
+
+`Lobby.Join` args:
+
+1. `room_name` (optional string)
+2. `room_id` (optional string/int)
+
+`Menu.Click` args:
+
+1. `controlId` (string; legacy key required by current adapter implementation)
+
+`Menu.SetText` args:
+
+1. `controlId` (string; legacy key required by current adapter implementation)
+2. `text` (string)
+
+`Menu.ListControls` args:
+
+1. `kind` (`all|button|text_entry`, optional; default `button`)
+2. `include_hidden` (optional bool, default `false`)
 
 `Chat.Send` args:
 
@@ -172,21 +196,25 @@ Use for match actions:
 }
 ```
 
-## Query
+## Game.Query (via SessionCommand)
 
 Request:
 
 ```json
-{"type":"Query","request_id":"q1","path":"session.players"}
+{"type":"SessionCommand","request_id":"q1","cmd":"Game.Query","args":{"path":"game.status"}}
 ```
 
 Common `path` values:
 
-1. `session.state`
-2. `session.players`
-3. `session.settings`
+1. `game.status`
+2. `game.summary`
+3. `game.all`
 4. `game.local_player`
-5. `game.resources`
+5. `game.player`
+6. `game.players`
+7. `game.faction`
+8. `game.resources`
+9. `game.units`
 
 ## Acknowledgements
 
@@ -249,13 +277,14 @@ Adapter should enforce:
 
 ## Minimal CLI Mapping (suggested)
 
-1. `zhctl hello`
-2. `zhctl session status`
-3. `zhctl lobby players`
-4. `zhctl lobby join --room "X"`
-5. `zhctl lobby ready --on`
-6. `zhctl setup set --key map --value "Tournament Desert"`
-7. `zhctl chat send --scope everyone --text "hello from controller"`
+Current Python CLI examples:
+
+1. `python .\ZHGameClient\scripts\ai\zhctl.py hello`
+2. `python .\ZHGameClient\scripts\ai\zhctl.py status --pretty`
+3. `python .\ZHGameClient\scripts\ai\zhctl.py list-controls --kind button`
+4. `python .\ZHGameClient\scripts\ai\zhctl.py menu-click --control-id "MainMenu.wnd:ButtonMultiplayer"`
+5. `python .\ZHGameClient\scripts\ai\zhctl.py chat-send --scope everyone --text "hello from controller"`
+6. `python .\ZHGameClient\scripts\ai\zhctl.py query --path game.resources --pretty`
 
 ## CLI Modes (required)
 
@@ -268,9 +297,9 @@ Support two user-facing modes:
 
 Examples:
 
-1. `zhctl lobby join --room "My Lobby"`
-2. `zhctl setup set --key map --value "Tournament Desert"`
-3. `zhctl chat send --scope everyone --text "hello"`
+1. `python .\ZHGameClient\scripts\ai\zhctl.py menu-click --control-id "MainMenu.wnd:ButtonMultiplayer"`
+2. `python .\ZHGameClient\scripts\ai\zhctl.py query --path game.status --pretty`
+3. `python .\ZHGameClient\scripts\ai\zhctl.py chat-send --scope everyone --text "hello"`
 
 Behavior:
 
@@ -281,7 +310,7 @@ Behavior:
 
 Entry:
 
-1. `zhctl shell`
+1. Not implemented in current `zhctl.py` (planned).
 
 Shell capabilities:
 
