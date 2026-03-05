@@ -66,3 +66,9 @@ build.ninja
 ## Python
 __pycache__/
 *.pyc
+
+## Local/generated patch artifacts
+/logs/
+/Patch/private/genonlineserver/crcfiles/GeneralsOnlineZH.exe
+/Patch/public_html/updater/*.gopatch
+/Patch/public_html/v*.zip
