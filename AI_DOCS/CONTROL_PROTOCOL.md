@@ -92,11 +92,54 @@ Supported `cmd` values (v1):
 10. `GameSetup.SetSetting`
 11. `GameSetup.GetPlayers`
 12. `Chat.Send`
+13. `Game.Query`
+14. `Game.QueueUnit`
+15. `Game.BuildWorker`
+16. `Game.FindSupplySources`
+17. `Game.FindBuildLocationNearSupply`
+18. `Game.DozerConstruct`
+19. `Game.BuildSupplyStashAuto`
+20. `Game.BuildSupplyStashSmart`
 
 `Chat.Send` args:
 
 1. `text` (string)
 2. `scope` (`players|allies|everyone`)
+
+`Game.FindSupplySources` args:
+
+1. `player_index` (optional int, default local player)
+2. `minimum_cash` (optional int, default `1`)
+
+`Game.FindBuildLocationNearSupply` args:
+
+1. `player_index` (optional int, default local player)
+2. `worker_object_id` (optional int, default first dozer/worker)
+3. `supply_source_id` (optional int, default closest supply source to worker)
+4. `building_template` (string, default `GLASupplyStash`)
+5. `minimum_cash` (optional int, default `1`)
+
+`Game.DozerConstruct` args:
+
+1. Same args as `Game.FindBuildLocationNearSupply`
+
+`Game.BuildSupplyStashAuto` args:
+
+1. `player_index` (optional int, default local player)
+2. `worker_object_id` (optional int, default first idle dozer/worker)
+3. `building_template` (optional override; otherwise inferred from faction)
+4. `minimum_cash` (optional int, default `1`)
+
+`Game.BuildSupplyStashSmart` args:
+
+1. Same args as `Game.BuildSupplyStashAuto`
+2. Optional `supply_source_id` (int) to force a specific supply dock/source
+
+`Game.BuildSupplyStashSmart` behavior:
+
+1. Try immediate construct near closest supply source.
+2. If blocked by unrevealed shroud, issue a move order for the selected worker/dozer toward that supply area.
+3. Return success for the move order; call again after reveal to complete build.
 
 ## In-Game Intent Batch
 

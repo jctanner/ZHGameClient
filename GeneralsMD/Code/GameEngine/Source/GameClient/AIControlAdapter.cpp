@@ -9,6 +9,7 @@
 #include "Common/ThingFactory.h"
 #include "Common/ThingTemplate.h"
 #include "Common/BuildAssistant.h"
+#include "Common/KindOf.h"
 #include "GameClient/GameWindow.h"
 #include "GameClient/GameWindowManager.h"
 #include "GameClient/Gadget.h"
@@ -16,8 +17,12 @@
 #include "GameClient/LanguageFilter.h"
 #include "GameClient/KeyDefs.h"
 #include "GameClient/Shell.h"
+#include "GameClient/TerrainVisual.h"
+#include "GameLogic/AI.h"
 #include "GameLogic/GameLogic.h"
+#include "GameLogic/Module/AIUpdate.h"
 #include "GameLogic/Module/ProductionUpdate.h"
+#include "GameLogic/Module/SupplyWarehouseDockUpdate.h"
 #include "GameNetwork/GameInfo.h"
 #include "GameNetwork/NetworkInterface.h"
 #include "GameNetwork/GeneralsOnline/json.hpp"
@@ -31,6 +36,8 @@
 #include <cstring>
 #include <algorithm>
 #include <cctype>
+#include <cmath>
+#include <unordered_map>
 
 namespace
 {
@@ -54,6 +61,7 @@ namespace
 		void reset()
 		{
 			m_lineBuffer.clear();
+			m_lastAutoSupplySourceByPlayer.clear();
 			resetClientConnection();
 		}
 
@@ -81,6 +89,7 @@ namespace
 		bool m_hasClient;
 		std::string m_lineBuffer;
 		std::string m_sessionId;
+		std::unordered_map<Int, Int> m_lastAutoSupplySourceByPlayer;
 
 		void ensurePipeCreated()
 		{
@@ -377,7 +386,16 @@ namespace
 					{"protocol", "zh-ai-control-v1"},
 					{"adapter_version", "0.1.0"},
 					{"session_id", m_sessionId},
-					{"capabilities", nlohmann::json::array({"session", "menu_click", "menu_set_text", "chat_send", "game_query", "game_queue_unit"})}
+					{"capabilities", nlohmann::json::array({
+						"session",
+						"menu_click",
+						"menu_set_text",
+						"chat_send",
+						"game_query",
+						"game_queue_unit",
+						"game_supply_build",
+						"game_supply_build_smart"
+					})}
 				};
 				sendJsonLine(reply);
 				return;
@@ -492,6 +510,68 @@ namespace
 					return;
 				}
 
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.FindSupplySources")
+			{
+				nlohmann::json result;
+				std::string reason;
+				if (!executeGameFindSupplySources(message, result, reason))
+				{
+					sendQueryError(requestId, "invalid_state", reason.c_str());
+					return;
+				}
+				sendQueryResult(requestId, result);
+				return;
+			}
+
+			if (cmd == "Game.FindBuildLocationNearSupply")
+			{
+				nlohmann::json result;
+				std::string reason;
+				if (!executeGameFindBuildLocationNearSupply(message, result, reason))
+				{
+					sendQueryError(requestId, "invalid_state", reason.c_str());
+					return;
+				}
+				sendQueryResult(requestId, result);
+				return;
+			}
+
+			if (cmd == "Game.DozerConstruct")
+			{
+				std::string reason;
+				if (!executeGameDozerConstruct(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.BuildSupplyStashAuto")
+			{
+				std::string reason;
+				if (!executeGameBuildSupplyStashAuto(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.BuildSupplyStashSmart")
+			{
+				std::string reason;
+				if (!executeGameBuildSupplyStashSmart(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
 				sendActionAck(requestId, true);
 				return;
 			}
@@ -711,6 +791,462 @@ namespace
 			return ctx.found;
 		}
 
+		struct WorkerSearchContext
+		{
+			Object* firstDozer;
+			Object* firstIdleDozer;
+		};
+
+		static void findWorkerCallback(Object* obj, void* userData)
+		{
+			if (obj == nullptr || userData == nullptr)
+			{
+				return;
+			}
+			if (obj->isEffectivelyDead())
+			{
+				return;
+			}
+			if (!obj->isKindOf(KINDOF_DOZER))
+			{
+				return;
+			}
+
+			WorkerSearchContext* ctx = static_cast<WorkerSearchContext*>(userData);
+			if (ctx->firstDozer == nullptr)
+			{
+				ctx->firstDozer = obj;
+			}
+			if (ctx->firstIdleDozer == nullptr)
+			{
+				AIUpdateInterface* ai = obj->getAI();
+				if (ai != nullptr && ai->isIdle())
+				{
+					ctx->firstIdleDozer = obj;
+				}
+			}
+		}
+
+		Object* resolveWorkerFromArgs(Player* player, const nlohmann::json& message, bool requireIdle, std::string& reason)
+		{
+			if (player == nullptr)
+			{
+				reason = "player_not_found";
+				return nullptr;
+			}
+			if (TheGameLogic == nullptr)
+			{
+				reason = "logic_not_ready";
+				return nullptr;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				const auto workerIdIt = argsIt->find("worker_object_id");
+				if (workerIdIt != argsIt->end() && workerIdIt->is_number_integer())
+				{
+					const Int workerId = workerIdIt->get<Int>();
+					if (workerId <= 0)
+					{
+						reason = "invalid_worker_object_id";
+						return nullptr;
+					}
+
+					Object* worker = TheGameLogic->findObjectByID(static_cast<ObjectID>(workerId));
+					if (worker == nullptr)
+					{
+						reason = "worker_not_found";
+						return nullptr;
+					}
+					if (worker->getControllingPlayer() != player)
+					{
+						reason = "worker_not_owned";
+						return nullptr;
+					}
+					if (!worker->isKindOf(KINDOF_DOZER))
+					{
+						reason = "worker_not_dozer";
+						return nullptr;
+					}
+					if (requireIdle)
+					{
+						AIUpdateInterface* ai = worker->getAI();
+						if (ai == nullptr || !ai->isIdle())
+						{
+							reason = "worker_not_idle";
+							return nullptr;
+						}
+					}
+					return worker;
+				}
+			}
+
+			WorkerSearchContext ctx = { nullptr, nullptr };
+			player->iterateObjects(findWorkerCallback, &ctx);
+			if (requireIdle)
+			{
+				if (ctx.firstIdleDozer == nullptr)
+				{
+					reason = "idle_worker_not_found";
+					return nullptr;
+				}
+				return ctx.firstIdleDozer;
+			}
+			if (ctx.firstDozer == nullptr)
+			{
+				reason = "worker_not_found";
+				return nullptr;
+			}
+			return ctx.firstDozer;
+		}
+
+		struct SupplySourceInfo
+		{
+			Object* source;
+			Int boxesStored;
+			Int cashValue;
+		};
+
+		bool collectSupplySources(Int minimumCash, std::vector<SupplySourceInfo>& outSources)
+		{
+			if (TheGameLogic == nullptr || TheNameKeyGenerator == nullptr)
+			{
+				return false;
+			}
+
+			const NameKeyType warehouseKey = TheNameKeyGenerator->nameToKey("SupplyWarehouseDockUpdate");
+			for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
+			{
+				if (obj->isEffectivelyDead())
+				{
+					continue;
+				}
+
+				SupplyWarehouseDockUpdate* warehouse = (SupplyWarehouseDockUpdate*)obj->findUpdateModule(warehouseKey);
+				if (warehouse == nullptr)
+				{
+					continue;
+				}
+
+				const Int boxes = warehouse->getBoxesStored();
+				const Int cash = boxes * static_cast<Int>(TheGlobalData->m_baseValuePerSupplyBox);
+				if (cash < minimumCash)
+				{
+					continue;
+				}
+
+				outSources.push_back({ obj, boxes, cash });
+			}
+
+			return true;
+		}
+
+		static Real distanceSq2D(const Coord3D* a, const Coord3D* b)
+		{
+			const Real dx = a->x - b->x;
+			const Real dy = a->y - b->y;
+			return dx * dx + dy * dy;
+		}
+
+		static bool isSupplyDropoffTemplateName(const std::string& templateName)
+		{
+			if (!containsIgnoreCase(templateName, "supply"))
+			{
+				return false;
+			}
+			if (containsIgnoreCase(templateName, "stash") ||
+				containsIgnoreCase(templateName, "center") ||
+				containsIgnoreCase(templateName, "dropzone"))
+			{
+				return true;
+			}
+			return false;
+		}
+
+		struct NearbySupplyDropoffSearchContext
+		{
+			const Coord3D* sourcePos;
+			Real maxDistSq;
+			NameKeyType centerDockKey;
+			bool found;
+		};
+
+		static void findNearbySupplyDropoffCallback(Object* obj, void* userData)
+		{
+			if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+			{
+				return;
+			}
+			if (!obj->isKindOf(KINDOF_STRUCTURE))
+			{
+				return;
+			}
+			if (obj->isKindOf(KINDOF_FS_SUPPLY_CENTER) || obj->isKindOf(KINDOF_FS_SUPPLY_DROPZONE))
+			{
+				NearbySupplyDropoffSearchContext* ctx = static_cast<NearbySupplyDropoffSearchContext*>(userData);
+				const Coord3D* pos = obj->getPosition();
+				if (ctx->sourcePos != nullptr && pos != nullptr && distanceSq2D(ctx->sourcePos, pos) <= ctx->maxDistSq)
+				{
+					ctx->found = true;
+				}
+				return;
+			}
+			const ThingTemplate* tt = obj->getTemplate();
+			if (tt == nullptr)
+			{
+				return;
+			}
+			const std::string name = tt->getName().str();
+			if (!isSupplyDropoffTemplateName(name))
+			{
+				NearbySupplyDropoffSearchContext* ctx = static_cast<NearbySupplyDropoffSearchContext*>(userData);
+				if (ctx->centerDockKey != NAMEKEY_INVALID && obj->findUpdateModule(ctx->centerDockKey) == nullptr)
+				{
+					return;
+				}
+			}
+			NearbySupplyDropoffSearchContext* ctx = static_cast<NearbySupplyDropoffSearchContext*>(userData);
+			const Coord3D* pos = obj->getPosition();
+			if (ctx->sourcePos == nullptr || pos == nullptr)
+			{
+				return;
+			}
+			if (distanceSq2D(ctx->sourcePos, pos) <= ctx->maxDistSq)
+			{
+				ctx->found = true;
+			}
+		}
+
+		static bool hasNearbyOwnedSupplyDropoff(Player* player, Object* supplySource, Real maxDistance)
+		{
+			if (player == nullptr || supplySource == nullptr)
+			{
+				return false;
+			}
+			NameKeyType centerDockKey = NAMEKEY_INVALID;
+			if (TheNameKeyGenerator != nullptr)
+			{
+				centerDockKey = TheNameKeyGenerator->nameToKey("SupplyCenterDockUpdate");
+			}
+			NearbySupplyDropoffSearchContext ctx = {
+				supplySource->getPosition(),
+				maxDistance * maxDistance,
+				centerDockKey,
+				false
+			};
+			player->iterateObjects(findNearbySupplyDropoffCallback, &ctx);
+			return ctx.found;
+		}
+
+		Object* chooseClosestSupplySource(
+			const std::vector<SupplySourceInfo>& sources,
+			const Coord3D* origin,
+			Player* player,
+			bool preferUnclaimed,
+			Int avoidSourceId = -1)
+		{
+			Object* best = nullptr;
+			Real bestDistSq = 0.0f;
+			Object* bestUnclaimed = nullptr;
+			Real bestUnclaimedDistSq = 0.0f;
+
+			for (const SupplySourceInfo& info : sources)
+			{
+				if (info.source == nullptr || info.source->getPosition() == nullptr)
+				{
+					continue;
+				}
+				if (avoidSourceId > 0 && static_cast<Int>(info.source->getID()) == avoidSourceId)
+				{
+					continue;
+				}
+				const Real distSq = distanceSq2D(info.source->getPosition(), origin);
+				if (best == nullptr || distSq < bestDistSq)
+				{
+					best = info.source;
+					bestDistSq = distSq;
+				}
+
+				if (!preferUnclaimed)
+				{
+					continue;
+				}
+				if (hasNearbyOwnedSupplyDropoff(player, info.source, 650.0f))
+				{
+					continue;
+				}
+				if (bestUnclaimed == nullptr || distSq < bestUnclaimedDistSq)
+				{
+					bestUnclaimed = info.source;
+					bestUnclaimedDistSq = distSq;
+				}
+			}
+
+			if (bestUnclaimed != nullptr)
+			{
+				return bestUnclaimed;
+			}
+			return best;
+		}
+
+		bool findBuildLocationNearSupply(Player* player, Object* worker, Object* supplySource, const ThingTemplate* buildingTemplate, Coord3D& outLocation, Real& outAngle)
+		{
+			if (player == nullptr || worker == nullptr || supplySource == nullptr || buildingTemplate == nullptr || TheBuildAssistant == nullptr)
+			{
+				return false;
+			}
+
+			const Coord3D* supplyPos = supplySource->getPosition();
+			if (supplyPos == nullptr)
+			{
+				return false;
+			}
+
+			const Real placeAngle = buildingTemplate->getPlacementViewAngle();
+			const Real baseRadius = supplySource->getGeometryInfo().getBoundingCircleRadius() + 20.0f;
+			const UnsignedInt legalOpts =
+				BuildAssistant::TERRAIN_RESTRICTIONS |
+				BuildAssistant::CLEAR_PATH |
+				BuildAssistant::NO_OBJECT_OVERLAP |
+				BuildAssistant::SHROUD_REVEALED;
+			const Coord3D* workerPos = worker->getPosition();
+
+			bool found = false;
+			Real bestDistSq = 0.0f;
+			Coord3D best = *supplyPos;
+			best.z = 0.0f;
+
+			for (Real ring = baseRadius; ring <= baseRadius + 450.0f; ring += 20.0f)
+			{
+				for (Int i = 0; i < 36; ++i)
+				{
+					const Real theta = static_cast<Real>(i) * (6.28318530717958647692f / 36.0f);
+					Coord3D candidate = *supplyPos;
+					candidate.x += std::cos(theta) * ring;
+					candidate.y += std::sin(theta) * ring;
+					candidate.z = 0.0f;
+
+					if (TheBuildAssistant->isLocationLegalToBuild(&candidate, buildingTemplate, placeAngle, legalOpts, worker, nullptr) != LBC_OK)
+					{
+						continue;
+					}
+
+					const Real distSq = workerPos != nullptr ? distanceSq2D(&candidate, workerPos) : 0.0f;
+					if (!found || distSq < bestDistSq)
+					{
+						found = true;
+						bestDistSq = distSq;
+						best = candidate;
+					}
+				}
+			}
+
+			if (TheTerrainVisual != nullptr)
+			{
+				TheTerrainVisual->removeAllBibs();
+			}
+
+			if (!found)
+			{
+				return false;
+			}
+
+			outLocation = best;
+			outAngle = placeAngle;
+			return true;
+		}
+
+		std::string inferSupplyBuildingTemplateForPlayer(const Player* player, Object* worker = nullptr) const
+		{
+			if (player == nullptr || TheThingFactory == nullptr)
+			{
+				return std::string();
+			}
+
+			auto canBuildTemplate = [&](const std::string& templateName) -> bool
+			{
+				if (templateName.empty())
+				{
+					return false;
+				}
+				if (worker == nullptr || TheBuildAssistant == nullptr)
+				{
+					return true;
+				}
+				const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(templateName.c_str()), false);
+				if (tt == nullptr)
+				{
+					return false;
+				}
+				return TheBuildAssistant->isPossibleToMakeUnit(worker, tt) == TRUE;
+			};
+
+			const std::string side = player->getSide().str();
+			const std::string baseSide = player->getBaseSide().str();
+			if (containsIgnoreCase(side, "gla") || containsIgnoreCase(baseSide, "gla"))
+			{
+				if (canBuildTemplate("GLASupplyStash"))
+				{
+					return "GLASupplyStash";
+				}
+			}
+			if (containsIgnoreCase(side, "china") || containsIgnoreCase(baseSide, "china"))
+			{
+				if (canBuildTemplate("ChinaSupplyCenter"))
+				{
+					return "ChinaSupplyCenter";
+				}
+			}
+			if (containsIgnoreCase(side, "america") || containsIgnoreCase(baseSide, "america") || containsIgnoreCase(side, "usa") || containsIgnoreCase(baseSide, "usa"))
+			{
+				if (canBuildTemplate("AmericaSupplyCenter"))
+				{
+					return "AmericaSupplyCenter";
+				}
+			}
+
+			const char* knownCandidates[] = {
+				"GLASupplyStash",
+				"GLASupplyCenter",
+				"ChinaSupplyCenter",
+				"AmericaSupplyCenter"
+			};
+			for (const char* candidate : knownCandidates)
+			{
+				if (canBuildTemplate(candidate))
+				{
+					return candidate;
+				}
+			}
+
+			if (worker != nullptr && TheBuildAssistant != nullptr)
+			{
+				for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
+				{
+					const std::string name = tt->getName().str();
+					if (!containsIgnoreCase(name, "supply"))
+					{
+						continue;
+					}
+					if (!containsIgnoreCase(name, "stash") && !containsIgnoreCase(name, "center"))
+					{
+						continue;
+					}
+					if (containsIgnoreCase(name, "dock") || containsIgnoreCase(name, "warehouse"))
+					{
+						continue;
+					}
+					if (TheBuildAssistant->isPossibleToMakeUnit(worker, tt) != TRUE)
+					{
+						continue;
+					}
+					return name;
+				}
+			}
+			return std::string();
+		}
+
 		bool executeGameQueueUnit(const nlohmann::json& message, std::string& reason)
 		{
 			if (TheThingFactory == nullptr)
@@ -907,6 +1443,552 @@ namespace
 				}
 			}
 			return false;
+		}
+
+		bool executeGameFindSupplySources(const nlohmann::json& message, nlohmann::json& result, std::string& reason)
+		{
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			Int minimumCash = 1;
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				const auto minCashIt = argsIt->find("minimum_cash");
+				if (minCashIt != argsIt->end() && minCashIt->is_number_integer())
+				{
+					minimumCash = minCashIt->get<Int>();
+				}
+			}
+
+			std::vector<SupplySourceInfo> sources;
+			if (!collectSupplySources(minimumCash, sources))
+			{
+				reason = "supply_scan_not_ready";
+				return false;
+			}
+
+			nlohmann::json rows = nlohmann::json::array();
+			for (const SupplySourceInfo& info : sources)
+			{
+				const Coord3D* pos = info.source->getPosition();
+				rows.push_back(nlohmann::json{
+					{"object_id", static_cast<Int>(info.source->getID())},
+					{"owner_player_index", info.source->getControllingPlayer() != nullptr ? info.source->getControllingPlayer()->getPlayerIndex() : -1},
+					{"template_name", info.source->getTemplate() != nullptr ? info.source->getTemplate()->getName().str() : ""},
+					{"boxes_stored", info.boxesStored},
+					{"cash_value", info.cashValue},
+					{"x", pos != nullptr ? pos->x : 0.0f},
+					{"y", pos != nullptr ? pos->y : 0.0f},
+					{"z", pos != nullptr ? pos->z : 0.0f}
+				});
+			}
+
+			result = nlohmann::json{
+				{"player_index", player->getPlayerIndex()},
+				{"minimum_cash", minimumCash},
+				{"count", rows.size()},
+				{"sources", rows}
+			};
+			return true;
+		}
+
+		bool executeGameFindBuildLocationNearSupply(const nlohmann::json& message, nlohmann::json& result, std::string& reason)
+		{
+			if (TheThingFactory == nullptr)
+			{
+				reason = "thing_factory_not_ready";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			Object* worker = resolveWorkerFromArgs(player, message, false, reason);
+			if (worker == nullptr)
+			{
+				return false;
+			}
+
+			std::string buildingTemplateName;
+			Int minimumCash = 1;
+			Int requestedSupplyId = -1;
+			Int avoidSupplyId = -1;
+			bool rememberSelectedSupply = false;
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				const std::string requestedTemplate = getJsonString(*argsIt, "building_template");
+				if (!requestedTemplate.empty())
+				{
+					buildingTemplateName = requestedTemplate;
+				}
+				const auto minCashIt = argsIt->find("minimum_cash");
+				if (minCashIt != argsIt->end() && minCashIt->is_number_integer())
+				{
+					minimumCash = minCashIt->get<Int>();
+				}
+				const auto sourceIdIt = argsIt->find("supply_source_id");
+				if (sourceIdIt != argsIt->end() && sourceIdIt->is_number_integer())
+				{
+					requestedSupplyId = sourceIdIt->get<Int>();
+				}
+				const auto avoidIdIt = argsIt->find("avoid_supply_source_id");
+				if (avoidIdIt != argsIt->end() && avoidIdIt->is_number_integer())
+				{
+					avoidSupplyId = avoidIdIt->get<Int>();
+				}
+				const auto rememberIt = argsIt->find("remember_supply_choice");
+				if (rememberIt != argsIt->end() && rememberIt->is_boolean())
+				{
+					rememberSelectedSupply = rememberIt->get<bool>();
+				}
+			}
+
+			if (buildingTemplateName.empty())
+			{
+				buildingTemplateName = inferSupplyBuildingTemplateForPlayer(player, worker);
+			}
+			if (buildingTemplateName.empty())
+			{
+				reason = "supply_building_template_unknown";
+				return false;
+			}
+
+			const ThingTemplate* buildingTemplate = TheThingFactory->findTemplate(AsciiString(buildingTemplateName.c_str()), false);
+			if (buildingTemplate == nullptr)
+			{
+				reason = "building_template_not_found";
+				return false;
+			}
+
+			std::vector<SupplySourceInfo> sources;
+			if (!collectSupplySources(minimumCash, sources))
+			{
+				reason = "supply_scan_not_ready";
+				return false;
+			}
+			if (sources.empty())
+			{
+				reason = "supply_source_not_found";
+				return false;
+			}
+
+			Object* selectedSupply = nullptr;
+			if (requestedSupplyId > 0)
+			{
+				for (const SupplySourceInfo& info : sources)
+				{
+					if (static_cast<Int>(info.source->getID()) == requestedSupplyId)
+					{
+						selectedSupply = info.source;
+						break;
+					}
+				}
+				if (selectedSupply == nullptr)
+				{
+					reason = "supply_source_not_found";
+					return false;
+				}
+			}
+			else
+			{
+				selectedSupply = chooseClosestSupplySource(sources, worker->getPosition(), player, true, avoidSupplyId);
+				if (selectedSupply == nullptr)
+				{
+					reason = "supply_source_not_found";
+					return false;
+				}
+			}
+
+			Coord3D location;
+			Real angle = 0.0f;
+			if (!findBuildLocationNearSupply(player, worker, selectedSupply, buildingTemplate, location, angle))
+			{
+				reason = "no_legal_build_location";
+				return false;
+			}
+
+			result = nlohmann::json{
+				{"player_index", player->getPlayerIndex()},
+				{"worker_object_id", static_cast<Int>(worker->getID())},
+				{"supply_source_id", static_cast<Int>(selectedSupply->getID())},
+				{"building_template", buildingTemplateName},
+				{"angle", angle},
+				{"location", nlohmann::json{{"x", location.x}, {"y", location.y}, {"z", location.z}}}
+			};
+			if (rememberSelectedSupply)
+			{
+				m_lastAutoSupplySourceByPlayer[player->getPlayerIndex()] = static_cast<Int>(selectedSupply->getID());
+			}
+			return true;
+		}
+
+		bool executeGameDozerConstruct(const nlohmann::json& message, std::string& reason)
+		{
+			nlohmann::json buildResult;
+			if (!executeGameFindBuildLocationNearSupply(message, buildResult, reason))
+			{
+				return false;
+			}
+
+			if (TheGameLogic == nullptr || TheThingFactory == nullptr || TheBuildAssistant == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			const std::string buildingTemplateName = argsIt != message.end() && argsIt->is_object()
+				? getJsonString(*argsIt, "building_template")
+				: std::string();
+			const std::string finalTemplateName = !buildingTemplateName.empty()
+				? buildingTemplateName
+				: buildResult.value("building_template", std::string());
+
+			const ThingTemplate* buildingTemplate = TheThingFactory->findTemplate(AsciiString(finalTemplateName.c_str()), false);
+			if (buildingTemplate == nullptr)
+			{
+				reason = "building_template_not_found";
+				return false;
+			}
+
+			const Int workerId = buildResult.value("worker_object_id", 0);
+			if (workerId <= 0)
+			{
+				reason = "worker_not_found";
+				return false;
+			}
+			Object* worker = TheGameLogic->findObjectByID(static_cast<ObjectID>(workerId));
+			if (worker == nullptr)
+			{
+				reason = "worker_not_found";
+				return false;
+			}
+
+			const auto loc = buildResult["location"];
+			Coord3D location;
+			location.x = loc.value("x", 0.0f);
+			location.y = loc.value("y", 0.0f);
+			location.z = 0.0f;
+			const Real angle = buildResult.value("angle", buildingTemplate->getPlacementViewAngle());
+
+			Player* player = worker->getControllingPlayer();
+			if (player == nullptr)
+			{
+				reason = "player_not_found";
+				return false;
+			}
+
+			const Money* wallet = player->getMoney();
+			const UnsignedInt currentMoney = wallet != nullptr ? wallet->countMoney() : 0u;
+			if (buildingTemplate->calcCostToBuild(player) > currentMoney)
+			{
+				reason = "no_money";
+				return false;
+			}
+
+			const UnsignedInt legalOpts =
+				BuildAssistant::TERRAIN_RESTRICTIONS |
+				BuildAssistant::CLEAR_PATH |
+				BuildAssistant::NO_OBJECT_OVERLAP |
+				BuildAssistant::SHROUD_REVEALED;
+			const LegalBuildCode preLegal = TheBuildAssistant->isLocationLegalToBuild(&location, buildingTemplate, angle, legalOpts, worker, nullptr);
+			if (preLegal != LBC_OK)
+			{
+				switch (preLegal)
+				{
+				case LBC_SHROUD:
+					reason = "blocked_by_shroud";
+					break;
+				case LBC_OBJECTS_IN_THE_WAY:
+					reason = "blocked_by_objects";
+					break;
+				case LBC_NO_CLEAR_PATH:
+					reason = "no_clear_path";
+					break;
+				case LBC_TOO_CLOSE_TO_SUPPLIES:
+					reason = "too_close_to_supply";
+					break;
+				case LBC_RESTRICTED_TERRAIN:
+				case LBC_NOT_FLAT_ENOUGH:
+				default:
+					reason = "no_legal_build_location";
+					break;
+				}
+				return false;
+			}
+
+			if (TheBuildAssistant->buildObjectNow(worker, buildingTemplate, &location, angle, player) == nullptr)
+			{
+				// Diagnose common failure conditions from the live state after failed construct attempt.
+				const CanMakeType canMake = TheBuildAssistant->canMakeUnit(worker, buildingTemplate);
+				switch (canMake)
+				{
+				case CANMAKE_NO_PREREQ:
+					reason = "no_prereq";
+					return false;
+				case CANMAKE_NO_MONEY:
+					reason = "no_money";
+					return false;
+				case CANMAKE_FACTORY_IS_DISABLED:
+					reason = "factory_disabled";
+					return false;
+				default:
+					break;
+				}
+
+				const LegalBuildCode postLegal = TheBuildAssistant->isLocationLegalToBuild(&location, buildingTemplate, angle, legalOpts, worker, nullptr);
+				switch (postLegal)
+				{
+				case LBC_SHROUD:
+					reason = "blocked_by_shroud";
+					return false;
+				case LBC_OBJECTS_IN_THE_WAY:
+					reason = "blocked_by_objects";
+					return false;
+				case LBC_NO_CLEAR_PATH:
+					reason = "no_clear_path";
+					return false;
+				case LBC_TOO_CLOSE_TO_SUPPLIES:
+					reason = "too_close_to_supply";
+					return false;
+				default:
+					break;
+				}
+
+				reason = "construct_failed";
+				return false;
+			}
+
+			return true;
+		}
+
+		bool executeGameBuildSupplyStashAuto(const nlohmann::json& message, std::string& reason)
+		{
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			Object* idleWorker = resolveWorkerFromArgs(player, message, true, reason);
+			if (idleWorker == nullptr)
+			{
+				return false;
+			}
+
+			std::string buildingTemplateName;
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				buildingTemplateName = getJsonString(*argsIt, "building_template");
+			}
+			if (buildingTemplateName.empty())
+			{
+				buildingTemplateName = inferSupplyBuildingTemplateForPlayer(player, idleWorker);
+			}
+			if (buildingTemplateName.empty())
+			{
+				reason = "supply_building_template_unknown";
+				return false;
+			}
+
+			nlohmann::json bridged = message;
+			nlohmann::json bridgedArgs = nlohmann::json::object();
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				bridgedArgs = *argsIt;
+			}
+			bridgedArgs["building_template"] = buildingTemplateName;
+			bridgedArgs["remember_supply_choice"] = true;
+			const auto lastSupplyIt = m_lastAutoSupplySourceByPlayer.find(player->getPlayerIndex());
+			if (lastSupplyIt != m_lastAutoSupplySourceByPlayer.end() && lastSupplyIt->second > 0)
+			{
+				bridgedArgs["avoid_supply_source_id"] = lastSupplyIt->second;
+			}
+			bridgedArgs["worker_object_id"] = static_cast<Int>(idleWorker->getID());
+			bridged["args"] = bridgedArgs;
+
+			return executeGameDozerConstruct(bridged, reason);
+		}
+
+		bool executeGameBuildSupplyStashSmart(const nlohmann::json& message, std::string& reason)
+		{
+			// First try the normal auto-build path.
+			std::string buildReason;
+			if (executeGameBuildSupplyStashAuto(message, buildReason))
+			{
+				return true;
+			}
+
+			// If failure is unrelated to placement/movement legality, surface it as-is.
+			if (buildReason != "no_legal_build_location" &&
+				buildReason != "construct_failed" &&
+				buildReason != "blocked_by_shroud" &&
+				buildReason != "blocked_by_objects" &&
+				buildReason != "no_clear_path" &&
+				buildReason != "too_close_to_supply")
+			{
+				reason = buildReason;
+				return false;
+			}
+
+			if (TheThingFactory == nullptr || TheGameLogic == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			std::string buildingTemplateName;
+			Int minimumCash = 1;
+			Int requestedSupplyId = -1;
+			Int avoidSupplyId = -1;
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				buildingTemplateName = getJsonString(*argsIt, "building_template");
+				const auto minCashIt = argsIt->find("minimum_cash");
+				if (minCashIt != argsIt->end() && minCashIt->is_number_integer())
+				{
+					minimumCash = minCashIt->get<Int>();
+				}
+				const auto sourceIdIt = argsIt->find("supply_source_id");
+				if (sourceIdIt != argsIt->end() && sourceIdIt->is_number_integer())
+				{
+					requestedSupplyId = sourceIdIt->get<Int>();
+				}
+			}
+			if (requestedSupplyId <= 0)
+			{
+				const auto lastSupplyIt = m_lastAutoSupplySourceByPlayer.find(player->getPlayerIndex());
+				if (lastSupplyIt != m_lastAutoSupplySourceByPlayer.end() && lastSupplyIt->second > 0)
+				{
+					avoidSupplyId = lastSupplyIt->second;
+				}
+			}
+
+			Object* worker = resolveWorkerFromArgs(player, message, false, reason);
+			if (worker == nullptr)
+			{
+				return false;
+			}
+			if (buildingTemplateName.empty())
+			{
+				buildingTemplateName = inferSupplyBuildingTemplateForPlayer(player, worker);
+			}
+			if (buildingTemplateName.empty())
+			{
+				reason = "supply_building_template_unknown";
+				return false;
+			}
+
+			std::vector<SupplySourceInfo> sources;
+			if (!collectSupplySources(minimumCash, sources))
+			{
+				reason = "supply_scan_not_ready";
+				return false;
+			}
+			if (sources.empty())
+			{
+				reason = "supply_source_not_found";
+				return false;
+			}
+
+			Object* selectedSupply = nullptr;
+			if (requestedSupplyId > 0)
+			{
+				for (const SupplySourceInfo& info : sources)
+				{
+					if (static_cast<Int>(info.source->getID()) == requestedSupplyId)
+					{
+						selectedSupply = info.source;
+						break;
+					}
+				}
+				if (selectedSupply == nullptr)
+				{
+					reason = "supply_source_not_found";
+					return false;
+				}
+			}
+			else
+			{
+				selectedSupply = chooseClosestSupplySource(sources, worker->getPosition(), player, true, avoidSupplyId);
+				if (selectedSupply == nullptr)
+				{
+					reason = "supply_source_not_found";
+					return false;
+				}
+			}
+			m_lastAutoSupplySourceByPlayer[player->getPlayerIndex()] = static_cast<Int>(selectedSupply->getID());
+
+			const ThingTemplate* buildingTemplate = TheThingFactory->findTemplate(AsciiString(buildingTemplateName.c_str()), false);
+			if (buildingTemplate == nullptr)
+			{
+				reason = "building_template_not_found";
+				return false;
+			}
+
+			Coord3D revealPos;
+			Real revealAngle = 0.0f;
+			if (findBuildLocationNearSupply(player, worker, selectedSupply, buildingTemplate, revealPos, revealAngle))
+			{
+				// Placement should now be legal; retry construct immediately.
+				std::string retryReason;
+				if (executeGameBuildSupplyStashAuto(message, retryReason))
+				{
+					return true;
+				}
+				reason = retryReason;
+				return false;
+			}
+
+			const Coord3D* supplyPos = selectedSupply->getPosition();
+			if (supplyPos == nullptr)
+			{
+				reason = "supply_source_not_found";
+				return false;
+			}
+
+			AIUpdateInterface* ai = worker->getAI();
+			if (ai == nullptr)
+			{
+				reason = "worker_no_ai";
+				return false;
+			}
+
+			// Move toward the supply zone to reveal shroud near likely stash placements.
+			Coord3D target = *supplyPos;
+			const Coord3D* workerPos = worker->getPosition();
+			if (workerPos != nullptr)
+			{
+				Real dx = supplyPos->x - workerPos->x;
+				Real dy = supplyPos->y - workerPos->y;
+				const Real lenSq = dx * dx + dy * dy;
+				if (lenSq > 1.0f)
+				{
+					const Real invLen = 1.0f / std::sqrt(lenSq);
+					const Real stopDist = selectedSupply->getGeometryInfo().getBoundingCircleRadius() + 140.0f;
+					target.x = supplyPos->x - dx * invLen * stopDist;
+					target.y = supplyPos->y - dy * invLen * stopDist;
+				}
+			}
+			target.z = 0.0f;
+			ai->aiMoveToPosition(&target, CMD_FROM_AI);
+			return true;
 		}
 
 		nlohmann::json buildPlayerDetails(Player* player) const
