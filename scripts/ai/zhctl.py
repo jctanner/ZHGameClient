@@ -39,6 +39,13 @@ def _compact_json(obj: Any) -> str:
     return json.dumps(obj, separators=(",", ":"))
 
 
+def _print_json(obj: Any, pretty: bool) -> None:
+    if pretty:
+        print(json.dumps(obj, indent=2))
+    else:
+        print(_compact_json(obj))
+
+
 @dataclass
 class PipeConnection:
     stream: Any
@@ -173,7 +180,7 @@ def cmd_hello(args: argparse.Namespace) -> int:
     conn = open_pipe(args.pipe_name, args.timeout_ms)
     try:
         resp = send_hello(conn, args.timeout_ms)
-        print(_compact_json(resp))
+        _print_json(resp, args.pretty)
         return 0
     finally:
         conn.close()
@@ -193,7 +200,7 @@ def cmd_send(args: argparse.Namespace) -> int:
     try:
         send_hello(conn, args.timeout_ms)
         resp = send_session_command(conn, args.session_cmd, args_obj, args.timeout_ms)
-        print(_compact_json(resp))
+        _print_json(resp, args.pretty)
         return 0
     finally:
         conn.close()
@@ -206,7 +213,7 @@ def cmd_menu_click(args: argparse.Namespace) -> int:
     try:
         send_hello(conn, args.timeout_ms)
         resp = send_session_command(conn, "Menu.Click", {"controlId": args.control_id}, args.timeout_ms)
-        print(_compact_json(resp))
+        _print_json(resp, args.pretty)
         return 0
     finally:
         conn.close()
@@ -226,7 +233,7 @@ def cmd_menu_set_text(args: argparse.Namespace) -> int:
             {"controlId": args.control_id, "text": args.text},
             args.timeout_ms,
         )
-        print(_compact_json(resp))
+        _print_json(resp, args.pretty)
         return 0
     finally:
         conn.close()
@@ -244,7 +251,7 @@ def cmd_lan_click(args: argparse.Namespace) -> int:
     try:
         send_hello(conn, args.timeout_ms)
         resp = send_session_command(conn, "Menu.Click", {"controlId": control_id}, args.timeout_ms)
-        print(_compact_json(resp))
+        _print_json(resp, args.pretty)
         return 0
     finally:
         conn.close()
@@ -263,7 +270,7 @@ def cmd_main_click(args: argparse.Namespace) -> int:
     try:
         send_hello(conn, args.timeout_ms)
         resp = send_session_command(conn, "Menu.Click", {"controlId": control_id}, args.timeout_ms)
-        print(_compact_json(resp))
+        _print_json(resp, args.pretty)
         return 0
     finally:
         conn.close()
@@ -281,7 +288,7 @@ def cmd_lan_name_set(args: argparse.Namespace) -> int:
             {"controlId": "LanLobbyMenu.wnd:TextEntryPlayerName", "text": args.text},
             args.timeout_ms,
         )
-        print(_compact_json(resp))
+        _print_json(resp, args.pretty)
         return 0
     finally:
         conn.close()
@@ -296,7 +303,7 @@ def cmd_list_controls(args: argparse.Namespace) -> int:
             "include_hidden": args.include_hidden,
         }
         resp = send_session_command(conn, "Menu.ListControls", req_args, args.timeout_ms)
-        print(_compact_json(resp))
+        _print_json(resp, args.pretty)
         return 0
     finally:
         conn.close()
@@ -314,7 +321,45 @@ def cmd_chat_send(args: argparse.Namespace) -> int:
             {"text": args.text, "scope": args.scope},
             args.timeout_ms,
         )
-        print(_compact_json(resp))
+        _print_json(resp, args.pretty)
+        return 0
+    finally:
+        conn.close()
+
+
+def cmd_query(args: argparse.Namespace) -> int:
+    conn = open_pipe(args.pipe_name, args.timeout_ms)
+    try:
+        send_hello(conn, args.timeout_ms)
+        req_args: dict[str, Any] = {"path": args.path}
+        if args.player_index is not None:
+            req_args["player_index"] = args.player_index
+        resp = send_session_command(
+            conn,
+            "Game.Query",
+            req_args,
+            args.timeout_ms,
+        )
+        _print_json(resp, args.pretty)
+        return 0
+    finally:
+        conn.close()
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    conn = open_pipe(args.pipe_name, args.timeout_ms)
+    try:
+        send_hello(conn, args.timeout_ms)
+        req_args: dict[str, Any] = {"path": "game.status"}
+        if args.player_index is not None:
+            req_args["player_index"] = args.player_index
+        resp = send_session_command(
+            conn,
+            "Game.Query",
+            req_args,
+            args.timeout_ms,
+        )
+        _print_json(resp, args.pretty)
         return 0
     finally:
         conn.close()
@@ -358,6 +403,8 @@ def build_parser() -> argparse.ArgumentParser:
             "menu-set-text",
             "list-controls",
             "chat-send",
+            "query",
+            "status",
             "main-click",
             "lan-click",
             "lan-name-set",
@@ -367,6 +414,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--pipe-name", default="zh_ai_control")
     parser.add_argument("--timeout-ms", type=int, default=8000)
+    parser.add_argument("--pretty", action="store_true")
     parser.add_argument("--exe-path", default="")
     parser.add_argument("--exe-args", nargs="*", default=[])
     parser.add_argument("--session-cmd", default="")
@@ -381,6 +429,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--kind", choices=["all", "button", "text_entry"], default="button")
     parser.add_argument("--include-hidden", action="store_true")
     parser.add_argument("--scope", choices=["players", "allies", "everyone"], default="everyone")
+    parser.add_argument(
+        "--path",
+        choices=[
+            "game.status",
+            "game.summary",
+            "game.all",
+            "game.local_player",
+            "game.player",
+            "game.players",
+            "game.faction",
+            "game.resources",
+            "game.units",
+        ],
+        default="game.status",
+    )
+    parser.add_argument("--player-index", type=int, default=None)
     parser.add_argument("--args-json", default="{}")
     parser.add_argument("--delay-ms", type=int, default=1000)
     parser.add_argument(
@@ -403,6 +467,8 @@ def main() -> int:
         "menu-set-text": cmd_menu_set_text,
         "list-controls": cmd_list_controls,
         "chat-send": cmd_chat_send,
+        "query": cmd_query,
+        "status": cmd_status,
         "main-click": cmd_main_click,
         "lan-click": cmd_lan_click,
         "lan-name-set": cmd_lan_name_set,

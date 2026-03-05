@@ -5,6 +5,7 @@
 #include "Common/NameKeyGenerator.h"
 #include "Common/Player.h"
 #include "Common/PlayerList.h"
+#include "Common/PlayerTemplate.h"
 #include "GameClient/GameWindow.h"
 #include "GameClient/GameWindowManager.h"
 #include "GameClient/Gadget.h"
@@ -330,6 +331,18 @@ namespace
 			sendJsonLine(reply);
 		}
 
+		void sendQueryError(const std::string& requestId, const char* code, const char* reason)
+		{
+			nlohmann::json reply = {
+				{"type", "QueryResult"},
+				{"request_id", requestId},
+				{"ok", false},
+				{"code", code != nullptr ? code : "invalid_state"},
+				{"reason", reason != nullptr ? reason : "query_failed"}
+			};
+			sendJsonLine(reply);
+		}
+
 		void handleMessage(const std::string& line)
 		{
 			const nlohmann::json message = nlohmann::json::parse(line, nullptr, false);
@@ -357,7 +370,7 @@ namespace
 					{"protocol", "zh-ai-control-v1"},
 					{"adapter_version", "0.1.0"},
 					{"session_id", m_sessionId},
-					{"capabilities", nlohmann::json::array({"session", "menu_click", "menu_set_text", "chat_send"})}
+					{"capabilities", nlohmann::json::array({"session", "menu_click", "menu_set_text", "chat_send", "game_query"})}
 				};
 				sendJsonLine(reply);
 				return;
@@ -436,7 +449,235 @@ namespace
 				return;
 			}
 
+			if (cmd == "Game.Query")
+			{
+				nlohmann::json result;
+				std::string reason;
+				if (!executeGameQuery(message, result, reason))
+				{
+					sendQueryError(requestId, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendQueryResult(requestId, result);
+				return;
+			}
+
 			sendActionAck(requestId, false, "unsupported_cmd", "unsupported_session_command");
+		}
+
+		nlohmann::json buildLocalPlayerSummary(const Player* player) const
+		{
+			const PlayerType playerType = player->getPlayerType();
+			const bool isAi = (playerType == PLAYER_COMPUTER);
+			nlohmann::json local = {
+				{"player_index", player->getPlayerIndex()},
+				{"player_name_key", KEYNAME(player->getPlayerNameKey()).str()},
+				{"side", player->getSide().str()},
+				{"base_side", player->getBaseSide().str()},
+				{"rank_level", player->getRankLevel()},
+				{"player_type", static_cast<Int>(playerType)},
+				{"player_type_name", isAi ? "computer" : "human"},
+				{"is_ai", isAi}
+			};
+
+			const PlayerTemplate* playerTemplate = player->getPlayerTemplate();
+			if (playerTemplate != nullptr)
+			{
+				local["template_name"] = playerTemplate->getName().str();
+				local["template_side"] = playerTemplate->getSide().str();
+				local["template_base_side"] = playerTemplate->getBaseSide().str();
+			}
+
+			return local;
+		}
+
+		Player* getPlayerByIndex(Int playerIndex) const
+		{
+			if (ThePlayerList == nullptr)
+			{
+				return nullptr;
+			}
+
+			const Int count = ThePlayerList->getPlayerCount();
+			for (Int i = 0; i < count; ++i)
+			{
+				Player* player = ThePlayerList->getNthPlayer(i);
+				if (player != nullptr && player->getPlayerIndex() == playerIndex)
+				{
+					return player;
+				}
+			}
+			return nullptr;
+		}
+
+		nlohmann::json buildPlayerDetails(Player* player) const
+		{
+			return nlohmann::json{
+				{"player", buildLocalPlayerSummary(player)},
+				{"resources", buildResourcesSummary(player)},
+				{"units", buildUnitCountsSummary(player)}
+			};
+		}
+
+		nlohmann::json buildResourcesSummary(const Player* player) const
+		{
+			UnsignedInt money = 0u;
+			const Money* wallet = player->getMoney();
+			if (wallet != nullptr)
+			{
+				money = wallet->countMoney();
+			}
+
+			return nlohmann::json{
+				{"money", money},
+				{"skill_points", player->getSkillPoints()},
+				{"science_purchase_points", player->getSciencePurchasePoints()},
+				{"rank_level", player->getRankLevel()}
+			};
+		}
+
+		nlohmann::json buildUnitCountsSummary(Player* player) const
+		{
+			const KindOfMaskType none = KINDOFMASK_NONE;
+			const KindOfMaskType structureMask = MAKE_KINDOF_MASK(KINDOF_STRUCTURE);
+			const KindOfMaskType infantryMask = MAKE_KINDOF_MASK(KINDOF_INFANTRY);
+			const KindOfMaskType vehicleMask = MAKE_KINDOF_MASK(KINDOF_VEHICLE);
+			const KindOfMaskType aircraftMask = MAKE_KINDOF_MASK(KINDOF_AIRCRAFT);
+			const KindOfMaskType dozerMask = MAKE_KINDOF_MASK(KINDOF_DOZER);
+			const KindOfMaskType harvesterMask = MAKE_KINDOF_MASK(KINDOF_HARVESTER);
+
+			return nlohmann::json{
+				{"buildings", player->countBuildings()},
+				{"units_total", player->countObjects(none, structureMask)},
+				{"infantry", player->countObjects(infantryMask, none)},
+				{"vehicles", player->countObjects(vehicleMask, none)},
+				{"aircraft", player->countObjects(aircraftMask, none)},
+				{"dozers", player->countObjects(dozerMask, none)},
+				{"harvesters", player->countObjects(harvesterMask, none)},
+				{"objects_total", player->countObjects(none, none)}
+			};
+		}
+
+		bool executeGameQuery(const nlohmann::json& message, nlohmann::json& result, std::string& reason)
+		{
+			if (ThePlayerList == nullptr)
+			{
+				reason = "player_state_not_ready";
+				return false;
+			}
+
+			Player* localPlayer = ThePlayerList->getLocalPlayer();
+			if (localPlayer == nullptr)
+			{
+				reason = "local_player_missing";
+				return false;
+			}
+
+			std::string path = "game.status";
+			bool hasPlayerIndex = false;
+			Int requestedPlayerIndex = -1;
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				const std::string requestedPath = getJsonString(*argsIt, "path");
+				if (!requestedPath.empty())
+				{
+					path = requestedPath;
+				}
+
+				const auto playerIndexIt = argsIt->find("player_index");
+				if (playerIndexIt != argsIt->end() && playerIndexIt->is_number_integer())
+				{
+					hasPlayerIndex = true;
+					requestedPlayerIndex = playerIndexIt->get<Int>();
+				}
+			}
+
+			Player* selectedPlayer = localPlayer;
+			if (hasPlayerIndex)
+			{
+				selectedPlayer = getPlayerByIndex(requestedPlayerIndex);
+				if (selectedPlayer == nullptr)
+				{
+					reason = "player_not_found";
+					return false;
+				}
+			}
+
+			if (path == "game.local_player")
+			{
+				result = buildLocalPlayerSummary(localPlayer);
+				return true;
+			}
+
+			if (path == "game.resources")
+			{
+				result = buildResourcesSummary(selectedPlayer);
+				return true;
+			}
+
+			if (path == "game.faction")
+			{
+				const PlayerTemplate* playerTemplate = selectedPlayer->getPlayerTemplate();
+				result = nlohmann::json{
+					{"side", selectedPlayer->getSide().str()},
+					{"base_side", selectedPlayer->getBaseSide().str()},
+					{"template_name", playerTemplate != nullptr ? playerTemplate->getName().str() : ""},
+					{"template_side", playerTemplate != nullptr ? playerTemplate->getSide().str() : ""},
+					{"template_base_side", playerTemplate != nullptr ? playerTemplate->getBaseSide().str() : ""},
+					{"player_index", selectedPlayer->getPlayerIndex()}
+				};
+				return true;
+			}
+
+			if (path == "game.units")
+			{
+				result = buildUnitCountsSummary(selectedPlayer);
+				result["player_index"] = selectedPlayer->getPlayerIndex();
+				return true;
+			}
+
+			if (path == "game.player")
+			{
+				result = buildPlayerDetails(selectedPlayer);
+				result["is_local_player"] = (selectedPlayer == localPlayer);
+				return true;
+			}
+
+			if (path == "game.players")
+			{
+				nlohmann::json players = nlohmann::json::array();
+				const Int count = ThePlayerList->getPlayerCount();
+				for (Int i = 0; i < count; ++i)
+				{
+					Player* player = ThePlayerList->getNthPlayer(i);
+					if (player == nullptr)
+					{
+						continue;
+					}
+
+					nlohmann::json row = buildPlayerDetails(player);
+					row["is_local_player"] = (player == localPlayer);
+					players.push_back(row);
+				}
+
+				result = nlohmann::json{
+					{"count", players.size()},
+					{"players", players}
+				};
+				return true;
+			}
+
+			if (path == "game.status" || path == "game.summary" || path == "game.all")
+			{
+				result = buildPlayerDetails(selectedPlayer);
+				result["is_local_player"] = (selectedPlayer == localPlayer);
+				return true;
+			}
+
+			reason = "unsupported_query_path";
+			return false;
 		}
 
 		static const char* classifyControlType(UnsignedInt style)
