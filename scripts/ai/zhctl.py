@@ -365,6 +365,48 @@ def cmd_status(args: argparse.Namespace) -> int:
         conn.close()
 
 
+def cmd_queue_unit(args: argparse.Namespace) -> int:
+    if not args.unit_template:
+        raise ValueError("--unit-template is required for command 'queue-unit'.")
+
+    req_args: dict[str, Any] = {
+        "unit_template": args.unit_template,
+        "producer_kind": args.producer_kind,
+    }
+    if args.player_index is not None:
+        req_args["player_index"] = args.player_index
+    if args.producer_object_id is not None:
+        req_args["producer_object_id"] = args.producer_object_id
+
+    conn = open_pipe(args.pipe_name, args.timeout_ms)
+    try:
+        send_hello(conn, args.timeout_ms)
+        resp = send_session_command(conn, "Game.QueueUnit", req_args, args.timeout_ms)
+        _print_json(resp, args.pretty)
+        return 0
+    finally:
+        conn.close()
+
+
+def cmd_build_worker(args: argparse.Namespace) -> int:
+    req_args: dict[str, Any] = {}
+    if args.player_index is not None:
+        req_args["player_index"] = args.player_index
+    if args.producer_object_id is not None:
+        req_args["producer_object_id"] = args.producer_object_id
+    if args.unit_template:
+        req_args["unit_template"] = args.unit_template
+
+    conn = open_pipe(args.pipe_name, args.timeout_ms)
+    try:
+        send_hello(conn, args.timeout_ms)
+        resp = send_session_command(conn, "Game.BuildWorker", req_args, args.timeout_ms)
+        _print_json(resp, args.pretty)
+        return 0
+    finally:
+        conn.close()
+
+
 def cmd_lobby_mvp(args: argparse.Namespace) -> int:
     if args.exe_path:
         if not os.path.exists(args.exe_path):
@@ -405,6 +447,8 @@ def build_parser() -> argparse.ArgumentParser:
             "chat-send",
             "query",
             "status",
+            "queue-unit",
+            "build-worker",
             "main-click",
             "lan-click",
             "lan-name-set",
@@ -445,6 +489,9 @@ def build_parser() -> argparse.ArgumentParser:
         default="game.status",
     )
     parser.add_argument("--player-index", type=int, default=None)
+    parser.add_argument("--unit-template", default="")
+    parser.add_argument("--producer-object-id", type=int, default=None)
+    parser.add_argument("--producer-kind", choices=["command_center", "any"], default="command_center")
     parser.add_argument("--args-json", default="{}")
     parser.add_argument("--delay-ms", type=int, default=1000)
     parser.add_argument(
@@ -469,6 +516,8 @@ def main() -> int:
         "chat-send": cmd_chat_send,
         "query": cmd_query,
         "status": cmd_status,
+        "queue-unit": cmd_queue_unit,
+        "build-worker": cmd_build_worker,
         "main-click": cmd_main_click,
         "lan-click": cmd_lan_click,
         "lan-name-set": cmd_lan_name_set,

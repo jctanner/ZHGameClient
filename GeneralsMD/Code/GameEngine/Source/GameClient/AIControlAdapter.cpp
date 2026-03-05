@@ -6,6 +6,9 @@
 #include "Common/Player.h"
 #include "Common/PlayerList.h"
 #include "Common/PlayerTemplate.h"
+#include "Common/ThingFactory.h"
+#include "Common/ThingTemplate.h"
+#include "Common/BuildAssistant.h"
 #include "GameClient/GameWindow.h"
 #include "GameClient/GameWindowManager.h"
 #include "GameClient/Gadget.h"
@@ -13,6 +16,8 @@
 #include "GameClient/LanguageFilter.h"
 #include "GameClient/KeyDefs.h"
 #include "GameClient/Shell.h"
+#include "GameLogic/GameLogic.h"
+#include "GameLogic/Module/ProductionUpdate.h"
 #include "GameNetwork/GameInfo.h"
 #include "GameNetwork/NetworkInterface.h"
 #include "GameNetwork/GeneralsOnline/json.hpp"
@@ -24,6 +29,8 @@
 #include <vector>
 #include <string>
 #include <cstring>
+#include <algorithm>
+#include <cctype>
 
 namespace
 {
@@ -370,7 +377,7 @@ namespace
 					{"protocol", "zh-ai-control-v1"},
 					{"adapter_version", "0.1.0"},
 					{"session_id", m_sessionId},
-					{"capabilities", nlohmann::json::array({"session", "menu_click", "menu_set_text", "chat_send", "game_query"})}
+					{"capabilities", nlohmann::json::array({"session", "menu_click", "menu_set_text", "chat_send", "game_query", "game_queue_unit"})}
 				};
 				sendJsonLine(reply);
 				return;
@@ -463,6 +470,32 @@ namespace
 				return;
 			}
 
+			if (cmd == "Game.QueueUnit")
+			{
+				std::string reason;
+				if (!executeGameQueueUnit(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.BuildWorker")
+			{
+				std::string reason;
+				if (!executeGameBuildWorker(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendActionAck(requestId, true);
+				return;
+			}
+
 			sendActionAck(requestId, false, "unsupported_cmd", "unsupported_session_command");
 		}
 
@@ -509,6 +542,371 @@ namespace
 				}
 			}
 			return nullptr;
+		}
+
+		static bool containsIgnoreCase(const std::string& haystack, const char* needle)
+		{
+			if (needle == nullptr || *needle == '\0')
+			{
+				return false;
+			}
+
+			std::string h = haystack;
+			std::string n = needle;
+			std::transform(h.begin(), h.end(), h.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			return h.find(n) != std::string::npos;
+		}
+
+		static std::string inferWorkerTemplateForPlayer(const Player* player)
+		{
+			if (player == nullptr)
+			{
+				return std::string();
+			}
+
+			const std::string side = player->getSide().str();
+			const std::string baseSide = player->getBaseSide().str();
+			if (containsIgnoreCase(side, "gla") || containsIgnoreCase(baseSide, "gla"))
+			{
+				return "GLAInfantryWorker";
+			}
+			if (containsIgnoreCase(side, "china") || containsIgnoreCase(baseSide, "china"))
+			{
+				return "ChinaVehicleDozer";
+			}
+			if (containsIgnoreCase(side, "america") || containsIgnoreCase(baseSide, "america") || containsIgnoreCase(side, "usa") || containsIgnoreCase(baseSide, "usa"))
+			{
+				return "AmericaVehicleDozer";
+			}
+			return std::string();
+		}
+
+		struct ProducerSearchContext
+		{
+			Object* found;
+			bool requireCommandCenter;
+		};
+
+		static void findProducerCallback(Object* obj, void* userData)
+		{
+			if (obj == nullptr || userData == nullptr)
+			{
+				return;
+			}
+
+			ProducerSearchContext* ctx = static_cast<ProducerSearchContext*>(userData);
+			if (ctx->found != nullptr)
+			{
+				return;
+			}
+			if (obj->isEffectivelyDead())
+			{
+				return;
+			}
+			if (ctx->requireCommandCenter && !obj->isKindOf(KINDOF_COMMANDCENTER))
+			{
+				return;
+			}
+
+			ProductionUpdateInterface* production = obj->getProductionUpdateInterface();
+			if (production == nullptr)
+			{
+				return;
+			}
+
+			ctx->found = obj;
+		}
+
+		Player* resolvePlayerFromArgs(const nlohmann::json& message, std::string& reason)
+		{
+			if (ThePlayerList == nullptr)
+			{
+				reason = "player_state_not_ready";
+				return nullptr;
+			}
+
+			Player* player = ThePlayerList->getLocalPlayer();
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				const auto playerIndexIt = argsIt->find("player_index");
+				if (playerIndexIt != argsIt->end() && playerIndexIt->is_number_integer())
+				{
+					player = getPlayerByIndex(playerIndexIt->get<Int>());
+					if (player == nullptr)
+					{
+						reason = "player_not_found";
+						return nullptr;
+					}
+				}
+			}
+
+			if (player == nullptr)
+			{
+				reason = "local_player_missing";
+				return nullptr;
+			}
+			return player;
+		}
+
+		Object* resolveProducerFromArgs(Player* player, const nlohmann::json& message, bool requireCommandCenter, std::string& reason)
+		{
+			if (player == nullptr)
+			{
+				reason = "player_not_found";
+				return nullptr;
+			}
+			if (TheGameLogic == nullptr)
+			{
+				reason = "logic_not_ready";
+				return nullptr;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				const auto producerIdIt = argsIt->find("producer_object_id");
+				if (producerIdIt != argsIt->end() && producerIdIt->is_number_integer())
+				{
+					const Int producerId = producerIdIt->get<Int>();
+					if (producerId <= 0)
+					{
+						reason = "invalid_producer_object_id";
+						return nullptr;
+					}
+
+					Object* producer = TheGameLogic->findObjectByID(static_cast<ObjectID>(producerId));
+					if (producer == nullptr)
+					{
+						reason = "producer_not_found";
+						return nullptr;
+					}
+					if (producer->getControllingPlayer() != player)
+					{
+						reason = "producer_not_owned";
+						return nullptr;
+					}
+					if (requireCommandCenter && !producer->isKindOf(KINDOF_COMMANDCENTER))
+					{
+						reason = "producer_not_command_center";
+						return nullptr;
+					}
+					if (producer->getProductionUpdateInterface() == nullptr)
+					{
+						reason = "producer_not_factory";
+						return nullptr;
+					}
+					return producer;
+				}
+			}
+
+			ProducerSearchContext ctx = { nullptr, requireCommandCenter };
+			player->iterateObjects(findProducerCallback, &ctx);
+			if (ctx.found == nullptr)
+			{
+				reason = requireCommandCenter ? "command_center_not_found" : "producer_not_found";
+				return nullptr;
+			}
+			return ctx.found;
+		}
+
+		bool executeGameQueueUnit(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheThingFactory == nullptr)
+			{
+				reason = "thing_factory_not_ready";
+				return false;
+			}
+			if (TheBuildAssistant == nullptr)
+			{
+				reason = "build_assistant_not_ready";
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			const std::string unitTemplateName = getJsonString(*argsIt, "unit_template");
+			if (unitTemplateName.empty())
+			{
+				reason = "missing_unit_template";
+				return false;
+			}
+
+			const std::string producerKind = getJsonString(*argsIt, "producer_kind");
+			const bool requireCommandCenter = producerKind.empty() || producerKind == "command_center";
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			Object* producer = resolveProducerFromArgs(player, message, requireCommandCenter, reason);
+			if (producer == nullptr)
+			{
+				return false;
+			}
+
+			const ThingTemplate* unitTemplate = TheThingFactory->findTemplate(AsciiString(unitTemplateName.c_str()), false);
+			if (unitTemplate == nullptr)
+			{
+				reason = "unit_template_not_found";
+				return false;
+			}
+
+			ProductionUpdateInterface* production = producer->getProductionUpdateInterface();
+			if (production == nullptr)
+			{
+				reason = "producer_not_factory";
+				return false;
+			}
+
+			const CanMakeType canMake = TheBuildAssistant->canMakeUnit(producer, unitTemplate);
+			if (canMake != CANMAKE_OK)
+			{
+				switch (canMake)
+				{
+				case CANMAKE_NO_PREREQ:
+					reason = "no_prereq";
+					break;
+				case CANMAKE_NO_MONEY:
+					reason = "no_money";
+					break;
+				case CANMAKE_FACTORY_IS_DISABLED:
+					reason = "factory_disabled";
+					break;
+				case CANMAKE_QUEUE_FULL:
+					reason = "queue_full";
+					break;
+				case CANMAKE_PARKING_PLACES_FULL:
+					reason = "parking_full";
+					break;
+				case CANMAKE_MAXED_OUT_FOR_PLAYER:
+					reason = "maxed_out_for_player";
+					break;
+				default:
+					reason = "cannot_make_unit";
+					break;
+				}
+				return false;
+			}
+
+			const ProductionID productionId = production->requestUniqueUnitID();
+			if (!production->queueCreateUnit(unitTemplate, productionId))
+			{
+				reason = "unit_queue_rejected_internal";
+				return false;
+			}
+
+			return true;
+		}
+
+		bool executeGameBuildWorker(const nlohmann::json& message, std::string& reason)
+		{
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			Object* producer = resolveProducerFromArgs(player, message, true, reason);
+			if (producer == nullptr)
+			{
+				return false;
+			}
+
+			std::string unitTemplateName;
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				unitTemplateName = getJsonString(*argsIt, "unit_template");
+			}
+
+			// Explicit template requested: use it directly.
+			if (!unitTemplateName.empty())
+			{
+				nlohmann::json queuedMessage = message;
+				nlohmann::json queueArgs = nlohmann::json::object();
+				if (argsIt != message.end() && argsIt->is_object())
+				{
+					queueArgs = *argsIt;
+				}
+				queueArgs["unit_template"] = unitTemplateName;
+				queueArgs["producer_kind"] = "command_center";
+				queuedMessage["args"] = queueArgs;
+				return executeGameQueueUnit(queuedMessage, reason);
+			}
+
+			// Try best-guess template first.
+			std::vector<std::string> candidates;
+			const std::string inferred = inferWorkerTemplateForPlayer(player);
+			if (!inferred.empty())
+			{
+				candidates.push_back(inferred);
+			}
+			candidates.push_back("GLAInfantryWorker");
+			candidates.push_back("AmericaVehicleDozer");
+			candidates.push_back("ChinaVehicleDozer");
+
+			auto queueCandidate = [&](const std::string& candidateTemplate) -> bool
+			{
+				nlohmann::json queueArgs = nlohmann::json::object();
+				if (argsIt != message.end() && argsIt->is_object())
+				{
+					queueArgs = *argsIt;
+				}
+				queueArgs["unit_template"] = candidateTemplate;
+				queueArgs["producer_kind"] = "command_center";
+				nlohmann::json queuedMessage = message;
+				queuedMessage["args"] = queueArgs;
+				std::string candidateReason;
+				if (executeGameQueueUnit(queuedMessage, candidateReason))
+				{
+					return true;
+				}
+				reason = candidateReason;
+				return false;
+			};
+
+			for (const std::string& candidate : candidates)
+			{
+				if (candidate.empty())
+				{
+					continue;
+				}
+				if (queueCandidate(candidate))
+				{
+					return true;
+				}
+			}
+
+			// Fallback scan: pick first Worker/Dozer template that this command center can make.
+			if (TheThingFactory != nullptr && TheBuildAssistant != nullptr)
+			{
+				for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
+				{
+					const std::string templateName = tt->getName().str();
+					if (!containsIgnoreCase(templateName, "worker") && !containsIgnoreCase(templateName, "dozer"))
+					{
+						continue;
+					}
+					if (TheBuildAssistant->canMakeUnit(producer, tt) != CANMAKE_OK)
+					{
+						continue;
+					}
+					if (queueCandidate(templateName))
+					{
+						return true;
+					}
+				}
+			}
+			return false;
 		}
 
 		nlohmann::json buildPlayerDetails(Player* player) const
