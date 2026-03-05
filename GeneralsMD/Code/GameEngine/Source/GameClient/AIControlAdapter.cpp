@@ -3,12 +3,17 @@
 #include "GameClient/AIControlAdapter.h"
 
 #include "Common/NameKeyGenerator.h"
+#include "Common/Player.h"
+#include "Common/PlayerList.h"
 #include "GameClient/GameWindow.h"
 #include "GameClient/GameWindowManager.h"
 #include "GameClient/Gadget.h"
 #include "GameClient/GadgetTextEntry.h"
+#include "GameClient/LanguageFilter.h"
 #include "GameClient/KeyDefs.h"
 #include "GameClient/Shell.h"
+#include "GameNetwork/GameInfo.h"
+#include "GameNetwork/NetworkInterface.h"
 #include "GameNetwork/GeneralsOnline/json.hpp"
 #include "Common/AsciiString.h"
 #include "Common/UnicodeString.h"
@@ -352,7 +357,7 @@ namespace
 					{"protocol", "zh-ai-control-v1"},
 					{"adapter_version", "0.1.0"},
 					{"session_id", m_sessionId},
-					{"capabilities", nlohmann::json::array({"session", "menu_click", "menu_set_text"})}
+					{"capabilities", nlohmann::json::array({"session", "menu_click", "menu_set_text", "chat_send"})}
 				};
 				sendJsonLine(reply);
 				return;
@@ -415,6 +420,19 @@ namespace
 			if (cmd == "Menu.ListControls")
 			{
 				sendQueryResult(requestId, buildControlsInventory(message));
+				return;
+			}
+
+			if (cmd == "Chat.Send")
+			{
+				std::string reason;
+				if (!executeChatSend(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendActionAck(requestId, true);
 				return;
 			}
 
@@ -539,6 +557,99 @@ namespace
 				{"controls", controls}
 			};
 			return result;
+		}
+
+		bool executeChatSend(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheNetwork == nullptr)
+			{
+				reason = "network_not_ready";
+				return false;
+			}
+			if (ThePlayerList == nullptr || TheNameKeyGenerator == nullptr)
+			{
+				reason = "player_state_not_ready";
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			const std::string text = getJsonString(*argsIt, "text");
+			std::string scope = getJsonString(*argsIt, "scope");
+			if (scope.empty())
+			{
+				scope = "everyone";
+			}
+
+			AsciiString asciiText(text.c_str());
+			UnicodeString msg;
+			msg.translate(asciiText);
+			msg.trim();
+			if (msg.isEmpty())
+			{
+				reason = "missing_text";
+				return false;
+			}
+
+			const Player* localPlayer = ThePlayerList->getLocalPlayer();
+			if (localPlayer == nullptr)
+			{
+				reason = "local_player_missing";
+				return false;
+			}
+
+			Int playerMask = 0;
+			AsciiString playerName;
+			for (Int i = 0; i < MAX_SLOTS; ++i)
+			{
+				playerName.format("player%d", i);
+				const Player* player = ThePlayerList->findPlayerWithNameKey(TheNameKeyGenerator->nameToKey(playerName));
+				if (player == nullptr)
+				{
+					continue;
+				}
+
+				if (scope == "everyone")
+				{
+					if (TheGameInfo == nullptr || !TheGameInfo->getConstSlot(i)->isMuted())
+					{
+						playerMask |= (1 << i);
+					}
+				}
+				else if (scope == "allies")
+				{
+					if ((player->getRelationship(localPlayer->getDefaultTeam()) == ALLIES &&
+						localPlayer->getRelationship(player->getDefaultTeam()) == ALLIES) || player == localPlayer)
+					{
+						playerMask |= (1 << i);
+					}
+				}
+				else if (scope == "players")
+				{
+					if (player == localPlayer)
+					{
+						playerMask |= (1 << i);
+					}
+				}
+				else
+				{
+					reason = "invalid_scope";
+					return false;
+				}
+			}
+
+			if (TheLanguageFilter != nullptr)
+			{
+				TheLanguageFilter->filterLine(msg);
+			}
+
+			TheNetwork->sendChat(msg, playerMask);
+			return true;
 		}
 
 		bool executeMenuClick(const nlohmann::json& message, std::string& reason)

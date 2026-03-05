@@ -89,3 +89,11 @@ Include hidden controls and text entries:
 ```powershell
 python .\scripts\ai\zhctl.py list-controls --kind all --include-hidden
 ```
+
+Send in-game chat:
+
+```powershell
+python .\scripts\ai\zhctl.py chat-send --scope everyone --text "hello from controller"
+python .\scripts\ai\zhctl.py chat-send --scope allies --text "team chat"
+python .\scripts\ai\zhctl.py chat-send --scope players --text "self chat"
+```
