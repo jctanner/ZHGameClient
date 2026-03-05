@@ -1,6 +1,14 @@
-$patchDirectoryPath = "Patch"  
-$buildDir = "build\win32-vcpkg\GeneralsMD\Release";
-$buildVer = 1;
+param(
+    [int]$BuildVer = 1,
+    [string]$BuildDir = "build\win32-vcpkg\GeneralsMD\Release",
+    [string]$PatchDirectoryPath = "Patch"
+)
+
+$ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
+
+$buildDir = (Resolve-Path $BuildDir).Path
+$patchDirectoryPath = $PatchDirectoryPath
 
 $crcFilesDir = "$patchDirectoryPath/private/genonlineserver/crcfiles"
 $installerDir = "$patchDirectoryPath/public_html"
@@ -20,25 +28,56 @@ else
 }
 
 # make our folder structure
-New-Item -ItemType Directory -Path "$crcFilesDir"
-New-Item -ItemType Directory -Path "$updaterDir"
-New-Item -ItemType Directory -Path "$workingDir"
+New-Item -ItemType Directory -Path "$crcFilesDir" -Force | Out-Null
+New-Item -ItemType Directory -Path "$installerDir" -Force | Out-Null
+New-Item -ItemType Directory -Path "$updaterDir" -Force | Out-Null
+New-Item -ItemType Directory -Path "$workingDir" -Force | Out-Null
 
-# Copy runtime libraries and release exe to working dir
-Copy-Item -Path "$buildDir\crashpad_handler.exe" -Destination $workingDir
-Copy-Item -Path "$buildDir\discord-rpc.dll" -Destination $workingDir
-Copy-Item -Path "$buildDir\discord-rpc-LICENSE.txt" -Destination $workingDir
-Copy-Item -Path "$buildDir\GeneralsOnlineZH.exe" -Destination $workingDir
+function Copy-IfExists {
+   param(
+      [string]$Path,
+      [string]$Destination
+   )
+   if (Test-Path -LiteralPath $Path) {
+      Copy-Item -Path $Path -Destination $Destination -Force
+      return $true
+   }
+   return $false
+}
+
+$exePath = Join-Path $buildDir "GeneralsOnlineZH.exe"
+if (!(Test-Path -LiteralPath $exePath)) {
+   throw "Required build artifact is missing: $exePath"
+}
+
+# Preserve upstream runtime dependencies required by the current build.
+foreach ($runtimeName in @("crashpad_handler.exe", "discord-rpc.dll", "discord-rpc-LICENSE.txt")) {
+   Copy-Item -Path (Join-Path $buildDir $runtimeName) -Destination $workingDir -Force
+}
+
+# Copy optional legacy runtime dependencies and required EXE to working dir.
+$optionalRuntime = @("libcurl.dll", "zlib1.dll")
+foreach ($runtimeName in $optionalRuntime) {
+   $runtimePath = Join-Path $buildDir $runtimeName
+   if (-not (Copy-IfExists -Path $runtimePath -Destination $workingDir)) {
+      Write-Warning "Optional runtime not found, skipping: $runtimePath"
+   }
+}
+Copy-Item -Path $exePath -Destination $workingDir -Force
 
 # package up our patch and installer
-Compress-Archive -Path "$workingDir\*" -DestinationPath "$workingDir\v$buildVer.zip"
+$zipPath = Join-Path $workingDir "v$BuildVer.zip"
+if (Test-Path -LiteralPath $zipPath) {
+   Remove-Item -Path $zipPath -Force
+}
+Compress-Archive -Path "$workingDir\*" -DestinationPath $zipPath
 
 # Copy the patch to the patch directory  
-Copy-Item -Path "$workingDir\v$buildVer.zip" -Destination "$installerDir\v$buildVer.zip"
-Copy-Item -Path "$workingDir\v$buildVer.zip" -Destination "$updaterDir\v$buildVer.gopatch"
+Copy-Item -Path $zipPath -Destination (Join-Path $installerDir "v$BuildVer.zip") -Force
+Copy-Item -Path $zipPath -Destination (Join-Path $updaterDir "v$BuildVer.gopatch") -Force
 
 # copy the exe to crcfiles
-Copy-Item -Path "$buildDir\GeneralsOnlineZH.exe" -Destination "$crcFilesDir"
+Copy-Item -Path $exePath -Destination "$crcFilesDir" -Force
 
 # cleanup working dir
 if (Test-Path $workingDir)

@@ -137,6 +137,7 @@ set(GAMEENGINE_SRC
 #    Include/Common/XferLoad.h
 #    Include/Common/XferSave.h
 #    Include/GameClient/Anim2D.h
+    Include/GameClient/AIControlAdapter.h
     Include/GameClient/AnimateWindowManager.h
     Include/GameClient/CampaignManager.h
 #    Include/GameClient/ChallengeGenerals.h
@@ -684,6 +685,7 @@ set(GAMEENGINE_SRC
 #    Source/GameClient/ClientInstance.cpp
 #    Source/GameClient/Color.cpp
 #    Source/GameClient/Credits.cpp
+    Source/GameClient/AIControlAdapter.cpp
 #    Source/GameClient/Display.cpp
 #    Source/GameClient/DisplayString.cpp
 #    Source/GameClient/DisplayStringManager.cpp
