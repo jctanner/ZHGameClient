@@ -302,6 +302,24 @@ def cmd_list_controls(args: argparse.Namespace) -> int:
         conn.close()
 
 
+def cmd_chat_send(args: argparse.Namespace) -> int:
+    if args.text is None or args.text == "":
+        raise ValueError("--text is required for command 'chat-send'.")
+    conn = open_pipe(args.pipe_name, args.timeout_ms)
+    try:
+        send_hello(conn, args.timeout_ms)
+        resp = send_session_command(
+            conn,
+            "Chat.Send",
+            {"text": args.text, "scope": args.scope},
+            args.timeout_ms,
+        )
+        print(_compact_json(resp))
+        return 0
+    finally:
+        conn.close()
+
+
 def cmd_lobby_mvp(args: argparse.Namespace) -> int:
     if args.exe_path:
         if not os.path.exists(args.exe_path):
@@ -339,6 +357,7 @@ def build_parser() -> argparse.ArgumentParser:
             "menu-click",
             "menu-set-text",
             "list-controls",
+            "chat-send",
             "main-click",
             "lan-click",
             "lan-name-set",
@@ -361,6 +380,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--kind", choices=["all", "button", "text_entry"], default="button")
     parser.add_argument("--include-hidden", action="store_true")
+    parser.add_argument("--scope", choices=["players", "allies", "everyone"], default="everyone")
     parser.add_argument("--args-json", default="{}")
     parser.add_argument("--delay-ms", type=int, default=1000)
     parser.add_argument(
@@ -382,6 +402,7 @@ def main() -> int:
         "menu-click": cmd_menu_click,
         "menu-set-text": cmd_menu_set_text,
         "list-controls": cmd_list_controls,
+        "chat-send": cmd_chat_send,
         "main-click": cmd_main_click,
         "lan-click": cmd_lan_click,
         "lan-name-set": cmd_lan_name_set,
