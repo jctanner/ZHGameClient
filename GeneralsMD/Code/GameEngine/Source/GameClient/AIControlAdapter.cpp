@@ -206,6 +206,16 @@ namespace
 			return it->get<std::string>();
 		}
 
+		static std::string normalizeControlId(const std::string& controlId)
+		{
+			// Backward-compatible alias: "SoloPlay" maps to the real single-player button.
+			if (controlId == "MainMenu.wnd:ButtonSoloPlay")
+			{
+				return "MainMenu.wnd:ButtonSinglePlayer";
+			}
+			return controlId;
+		}
+
 		void sendJsonLine(const nlohmann::json& payload)
 		{
 			if (!m_hasClient)
@@ -506,7 +516,8 @@ namespace
 				return false;
 			}
 
-			const NameKeyType key = TheNameKeyGenerator->nameToKey(controlId.c_str());
+			const std::string normalizedControlId = normalizeControlId(controlId);
+			const NameKeyType key = TheNameKeyGenerator->nameToKey(normalizedControlId.c_str());
 			GameWindow* control = TheWindowManager->winGetWindowFromId(nullptr, key);
 			if (control == nullptr)
 			{
@@ -567,7 +578,8 @@ namespace
 				return false;
 			}
 
-			const NameKeyType key = TheNameKeyGenerator->nameToKey(controlId.c_str());
+			const std::string normalizedControlId = normalizeControlId(controlId);
+			const NameKeyType key = TheNameKeyGenerator->nameToKey(normalizedControlId.c_str());
 			GameWindow* control = TheWindowManager->winGetWindowFromId(nullptr, key);
 			if (control == nullptr)
 			{
