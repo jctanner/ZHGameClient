@@ -100,6 +100,7 @@ Supported `cmd` values (v1):
 18. `Game.DozerConstruct`
 19. `Game.BuildSupplyStashAuto`
 20. `Game.BuildSupplyStashSmart`
+21. `Game.BuildBarracksSmart`
 
 `Chat.Send` args:
 
@@ -140,6 +141,20 @@ Supported `cmd` values (v1):
 1. Try immediate construct near closest supply source.
 2. If blocked by unrevealed shroud, issue a move order for the selected worker/dozer toward that supply area.
 3. Return success for the move order; call again after reveal to complete build.
+
+`Game.BuildBarracksSmart` args:
+
+1. `player_index` (optional int, default local player)
+2. `worker_object_id` (optional int, default first idle dozer/worker)
+3. `building_template` (optional override; otherwise inferred by faction/buildability)
+4. `anchor_object_id` (optional int; owned object used as placement anchor)
+
+`Game.BuildBarracksSmart` behavior:
+
+1. Resolve an idle worker/dozer.
+2. Infer barracks template if not explicitly provided.
+3. Place near anchor object (default: player command center).
+4. If no legal location currently exists (often shroud/path), issue a move order toward anchor and return success.
 
 ## In-Game Intent Batch
 

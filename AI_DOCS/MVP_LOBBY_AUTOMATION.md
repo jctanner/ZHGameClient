@@ -145,12 +145,26 @@ Shroud-aware abstraction (recommended for unrevealed supply areas):
 python .\scripts\ai\zhctl.py build-supply-stash-smart --pretty
 ```
 
+Smart barracks build near your base anchor (default command center):
+
+```powershell
+python .\scripts\ai\zhctl.py build-barracks-smart --pretty
+```
+
+Behavior notes:
+
+1. Prefers legal barracks placements with spacing from your existing barracks.
+2. Falls back to any legal location near anchor if no spaced location exists.
+
 Optional targeting knobs:
 
 ```powershell
 python .\scripts\ai\zhctl.py build-supply-stash --worker-object-id 12345 --pretty
 python .\scripts\ai\zhctl.py build-supply-stash-smart --worker-object-id 12345 --pretty
 python .\scripts\ai\zhctl.py build-supply-stash-smart --supply-source-id 67890 --pretty
+python .\scripts\ai\zhctl.py build-barracks-smart --worker-object-id 12345 --pretty
+python .\scripts\ai\zhctl.py build-barracks-smart --anchor-object-id 999 --pretty
+python .\scripts\ai\zhctl.py build-barracks-smart --building-template GLABarracks --pretty
 python .\scripts\ai\zhctl.py dozer-construct --supply-source-id 67890 --pretty
 python .\scripts\ai\zhctl.py dozer-construct --building-template AmericaSupplyCenter --pretty
 ```
