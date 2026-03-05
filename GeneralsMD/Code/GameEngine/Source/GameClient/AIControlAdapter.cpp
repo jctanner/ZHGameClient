@@ -213,7 +213,60 @@ namespace
 			{
 				return "MainMenu.wnd:ButtonSinglePlayer";
 			}
+			// Convenience alias for LAN lobby back button.
+			if (controlId == "ButtonBack")
+			{
+				return "LanLobbyMenu.wnd:ButtonBack";
+			}
+			if (controlId == "ButtonCreateGame")
+			{
+				return "LanLobbyMenu.wnd:ButtonHost";
+			}
+			if (controlId == "ButtonJoinGame")
+			{
+				return "LanLobbyMenu.wnd:ButtonJoin";
+			}
+			if (controlId == "ButtonDirectConnect")
+			{
+				return "LanLobbyMenu.wnd:ButtonDirectConnect";
+			}
 			return controlId;
+		}
+
+		GameWindow* findFirstUsableControl(const std::vector<std::string>& decoratedIds) const
+		{
+			if (TheNameKeyGenerator == nullptr || TheWindowManager == nullptr)
+			{
+				return nullptr;
+			}
+
+			for (const std::string& id : decoratedIds)
+			{
+				const NameKeyType key = TheNameKeyGenerator->nameToKey(id.c_str());
+				GameWindow* control = TheWindowManager->winGetWindowFromId(nullptr, key);
+				if (control == nullptr)
+				{
+					continue;
+				}
+
+				const UnsignedInt status = control->winGetStatus();
+				if ((status & WIN_STATUS_HIDDEN) != 0u)
+				{
+					continue;
+				}
+				if ((status & WIN_STATUS_ENABLED) == 0u)
+				{
+					continue;
+				}
+				if (control->winGetParent() == nullptr)
+				{
+					continue;
+				}
+
+				return control;
+			}
+
+			return nullptr;
 		}
 
 		void sendJsonLine(const nlohmann::json& payload)
@@ -519,6 +572,19 @@ namespace
 			const std::string normalizedControlId = normalizeControlId(controlId);
 			const NameKeyType key = TheNameKeyGenerator->nameToKey(normalizedControlId.c_str());
 			GameWindow* control = TheWindowManager->winGetWindowFromId(nullptr, key);
+
+			// Context-aware back aliasing for menus that use different Back control names.
+			if (control == nullptr && (controlId == "ButtonBack" || controlId == "MainMenu.wnd:ButtonBack"))
+			{
+				control = findFirstUsableControl({
+					"MainMenu.wnd:ButtonSingleBack",
+					"MainMenu.wnd:ButtonMultiBack",
+					"MainMenu.wnd:ButtonLoadReplayBack",
+					"MainMenu.wnd:ButtonDiffBack",
+					"LanLobbyMenu.wnd:ButtonBack",
+					"NetworkDirectConnect.wnd:ButtonBack"
+				});
+			}
 			if (control == nullptr)
 			{
 				reason = "control_not_found";
