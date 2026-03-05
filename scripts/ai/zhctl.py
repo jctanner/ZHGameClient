@@ -407,6 +407,105 @@ def cmd_build_worker(args: argparse.Namespace) -> int:
         conn.close()
 
 
+def cmd_find_supply_sources(args: argparse.Namespace) -> int:
+    req_args: dict[str, Any] = {"minimum_cash": args.minimum_cash}
+    if args.player_index is not None:
+        req_args["player_index"] = args.player_index
+
+    conn = open_pipe(args.pipe_name, args.timeout_ms)
+    try:
+        send_hello(conn, args.timeout_ms)
+        resp = send_session_command(conn, "Game.FindSupplySources", req_args, args.timeout_ms)
+        _print_json(resp, args.pretty)
+        return 0
+    finally:
+        conn.close()
+
+
+def cmd_find_build_location_near_supply(args: argparse.Namespace) -> int:
+    req_args: dict[str, Any] = {
+        "building_template": args.building_template,
+        "minimum_cash": args.minimum_cash,
+    }
+    if args.player_index is not None:
+        req_args["player_index"] = args.player_index
+    if args.worker_object_id is not None:
+        req_args["worker_object_id"] = args.worker_object_id
+    if args.supply_source_id is not None:
+        req_args["supply_source_id"] = args.supply_source_id
+
+    conn = open_pipe(args.pipe_name, args.timeout_ms)
+    try:
+        send_hello(conn, args.timeout_ms)
+        resp = send_session_command(conn, "Game.FindBuildLocationNearSupply", req_args, args.timeout_ms)
+        _print_json(resp, args.pretty)
+        return 0
+    finally:
+        conn.close()
+
+
+def cmd_dozer_construct(args: argparse.Namespace) -> int:
+    req_args: dict[str, Any] = {
+        "building_template": args.building_template,
+        "minimum_cash": args.minimum_cash,
+    }
+    if args.player_index is not None:
+        req_args["player_index"] = args.player_index
+    if args.worker_object_id is not None:
+        req_args["worker_object_id"] = args.worker_object_id
+    if args.supply_source_id is not None:
+        req_args["supply_source_id"] = args.supply_source_id
+
+    conn = open_pipe(args.pipe_name, args.timeout_ms)
+    try:
+        send_hello(conn, args.timeout_ms)
+        resp = send_session_command(conn, "Game.DozerConstruct", req_args, args.timeout_ms)
+        _print_json(resp, args.pretty)
+        return 0
+    finally:
+        conn.close()
+
+
+def cmd_build_supply_stash(args: argparse.Namespace) -> int:
+    req_args: dict[str, Any] = {"minimum_cash": args.minimum_cash}
+    if args.player_index is not None:
+        req_args["player_index"] = args.player_index
+    if args.worker_object_id is not None:
+        req_args["worker_object_id"] = args.worker_object_id
+    if args.building_template:
+        req_args["building_template"] = args.building_template
+
+    conn = open_pipe(args.pipe_name, args.timeout_ms)
+    try:
+        send_hello(conn, args.timeout_ms)
+        resp = send_session_command(conn, "Game.BuildSupplyStashAuto", req_args, args.timeout_ms)
+        _print_json(resp, args.pretty)
+        return 0
+    finally:
+        conn.close()
+
+
+def cmd_build_supply_stash_smart(args: argparse.Namespace) -> int:
+    req_args: dict[str, Any] = {"minimum_cash": args.minimum_cash}
+    if args.player_index is not None:
+        req_args["player_index"] = args.player_index
+    if args.worker_object_id is not None:
+        req_args["worker_object_id"] = args.worker_object_id
+    if args.supply_source_id is not None:
+        req_args["supply_source_id"] = args.supply_source_id
+    if args.building_template:
+        req_args["building_template"] = args.building_template
+
+    conn = open_pipe(args.pipe_name, args.timeout_ms)
+    try:
+        send_hello(conn, args.timeout_ms)
+        resp = send_session_command(conn, "Game.BuildSupplyStashSmart", req_args, args.timeout_ms)
+        _print_json(resp, args.pretty)
+        return 0
+    finally:
+        conn.close()
+
+
 def cmd_lobby_mvp(args: argparse.Namespace) -> int:
     if args.exe_path:
         if not os.path.exists(args.exe_path):
@@ -449,6 +548,11 @@ def build_parser() -> argparse.ArgumentParser:
             "status",
             "queue-unit",
             "build-worker",
+            "find-supply-sources",
+            "find-build-location-near-supply",
+            "dozer-construct",
+            "build-supply-stash",
+            "build-supply-stash-smart",
             "main-click",
             "lan-click",
             "lan-name-set",
@@ -492,6 +596,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--unit-template", default="")
     parser.add_argument("--producer-object-id", type=int, default=None)
     parser.add_argument("--producer-kind", choices=["command_center", "any"], default="command_center")
+    parser.add_argument("--building-template", default="")
+    parser.add_argument("--supply-source-id", type=int, default=None)
+    parser.add_argument("--worker-object-id", type=int, default=None)
+    parser.add_argument("--minimum-cash", type=int, default=1)
     parser.add_argument("--args-json", default="{}")
     parser.add_argument("--delay-ms", type=int, default=1000)
     parser.add_argument(
@@ -518,6 +626,11 @@ def main() -> int:
         "status": cmd_status,
         "queue-unit": cmd_queue_unit,
         "build-worker": cmd_build_worker,
+        "find-supply-sources": cmd_find_supply_sources,
+        "find-build-location-near-supply": cmd_find_build_location_near_supply,
+        "dozer-construct": cmd_dozer_construct,
+        "build-supply-stash": cmd_build_supply_stash,
+        "build-supply-stash-smart": cmd_build_supply_stash_smart,
         "main-click": cmd_main_click,
         "lan-click": cmd_lan_click,
         "lan-name-set": cmd_lan_name_set,
