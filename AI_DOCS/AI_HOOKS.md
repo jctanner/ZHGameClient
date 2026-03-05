@@ -242,6 +242,10 @@ Deliverable:
 4. Debug complexity:
    - Mitigate with frame-stamped acks and JSONL traces.
 
+See also:
+
+1. `AI_DOCS/SIMULATION.md` for lockstep/desync details and multiplayer-safe cash mutation policy.
+
 ## Suggested Next Step
 
 Implement Phase 0 and Phase 1 first, then validate:
