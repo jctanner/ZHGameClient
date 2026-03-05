@@ -394,7 +394,8 @@ namespace
 						"game_query",
 						"game_queue_unit",
 						"game_supply_build",
-						"game_supply_build_smart"
+						"game_supply_build_smart",
+						"game_barracks_build_smart"
 					})}
 				};
 				sendJsonLine(reply);
@@ -568,6 +569,18 @@ namespace
 			{
 				std::string reason;
 				if (!executeGameBuildSupplyStashSmart(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.BuildBarracksSmart")
+			{
+				std::string reason;
+				if (!executeGameBuildBarracksSmart(message, reason))
 				{
 					sendActionAck(requestId, false, "invalid_state", reason.c_str());
 					return;
@@ -1039,6 +1052,57 @@ namespace
 			return ctx.found;
 		}
 
+		struct NearbyBarracksSearchContext
+		{
+			const Coord3D* targetPos;
+			Real maxDistSq;
+			bool found;
+		};
+
+		static void findNearbyBarracksCallback(Object* obj, void* userData)
+		{
+			if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+			{
+				return;
+			}
+			if (!obj->isKindOf(KINDOF_STRUCTURE))
+			{
+				return;
+			}
+			const ThingTemplate* tt = obj->getTemplate();
+			if (tt == nullptr)
+			{
+				return;
+			}
+			const std::string name = tt->getName().str();
+			if (!containsIgnoreCase(name, "barracks"))
+			{
+				return;
+			}
+
+			NearbyBarracksSearchContext* ctx = static_cast<NearbyBarracksSearchContext*>(userData);
+			const Coord3D* pos = obj->getPosition();
+			if (ctx->targetPos == nullptr || pos == nullptr)
+			{
+				return;
+			}
+			if (distanceSq2D(ctx->targetPos, pos) <= ctx->maxDistSq)
+			{
+				ctx->found = true;
+			}
+		}
+
+		static bool hasNearbyOwnedBarracks(Player* player, const Coord3D* pos, Real maxDistance)
+		{
+			if (player == nullptr || pos == nullptr)
+			{
+				return false;
+			}
+			NearbyBarracksSearchContext ctx = { pos, maxDistance * maxDistance, false };
+			player->iterateObjects(findNearbyBarracksCallback, &ctx);
+			return ctx.found;
+		}
+
 		Object* chooseClosestSupplySource(
 			const std::vector<SupplySourceInfo>& sources,
 			const Coord3D* origin,
@@ -1245,6 +1309,307 @@ namespace
 				}
 			}
 			return std::string();
+		}
+
+		std::string inferBarracksTemplateForPlayer(const Player* player, Object* worker = nullptr) const
+		{
+			if (player == nullptr || TheThingFactory == nullptr)
+			{
+				return std::string();
+			}
+
+			auto canBuildTemplate = [&](const std::string& templateName) -> bool
+			{
+				if (templateName.empty())
+				{
+					return false;
+				}
+				if (worker == nullptr || TheBuildAssistant == nullptr)
+				{
+					return true;
+				}
+				const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(templateName.c_str()), false);
+				if (tt == nullptr)
+				{
+					return false;
+				}
+				return TheBuildAssistant->isPossibleToMakeUnit(worker, tt) == TRUE;
+			};
+
+			const std::string side = player->getSide().str();
+			const std::string baseSide = player->getBaseSide().str();
+			if (containsIgnoreCase(side, "gla") || containsIgnoreCase(baseSide, "gla"))
+			{
+				if (canBuildTemplate("GLABarracks"))
+				{
+					return "GLABarracks";
+				}
+			}
+			if (containsIgnoreCase(side, "china") || containsIgnoreCase(baseSide, "china"))
+			{
+				if (canBuildTemplate("ChinaBarracks"))
+				{
+					return "ChinaBarracks";
+				}
+			}
+			if (containsIgnoreCase(side, "america") || containsIgnoreCase(baseSide, "america") || containsIgnoreCase(side, "usa") || containsIgnoreCase(baseSide, "usa"))
+			{
+				if (canBuildTemplate("AmericaBarracks"))
+				{
+					return "AmericaBarracks";
+				}
+			}
+
+			const char* knownCandidates[] = {
+				"GLABarracks",
+				"ChinaBarracks",
+				"AmericaBarracks"
+			};
+			for (const char* candidate : knownCandidates)
+			{
+				if (canBuildTemplate(candidate))
+				{
+					return candidate;
+				}
+			}
+
+			if (worker != nullptr && TheBuildAssistant != nullptr)
+			{
+				for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
+				{
+					const std::string name = tt->getName().str();
+					if (!containsIgnoreCase(name, "barracks"))
+					{
+						continue;
+					}
+					if (TheBuildAssistant->isPossibleToMakeUnit(worker, tt) != TRUE)
+					{
+						continue;
+					}
+					return name;
+				}
+			}
+			return std::string();
+		}
+
+		struct CommandCenterSearchContext
+		{
+			Object* firstCommandCenter;
+		};
+
+		static void findCommandCenterCallback(Object* obj, void* userData)
+		{
+			if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+			{
+				return;
+			}
+			if (!obj->isKindOf(KINDOF_COMMANDCENTER))
+			{
+				return;
+			}
+
+			CommandCenterSearchContext* ctx = static_cast<CommandCenterSearchContext*>(userData);
+			if (ctx->firstCommandCenter == nullptr)
+			{
+				ctx->firstCommandCenter = obj;
+			}
+		}
+
+		Object* findPrimaryCommandCenter(Player* player) const
+		{
+			if (player == nullptr)
+			{
+				return nullptr;
+			}
+			CommandCenterSearchContext ctx = { nullptr };
+			player->iterateObjects(findCommandCenterCallback, &ctx);
+			return ctx.firstCommandCenter;
+		}
+
+		bool findBuildLocationAroundAnchor(
+			Player* player,
+			Object* worker,
+			Object* anchor,
+			const ThingTemplate* buildingTemplate,
+			Coord3D& outLocation,
+			Real& outAngle)
+		{
+			if (player == nullptr || worker == nullptr || buildingTemplate == nullptr || TheBuildAssistant == nullptr)
+			{
+				return false;
+			}
+
+			const Coord3D* anchorPos = anchor != nullptr ? anchor->getPosition() : nullptr;
+			if (anchorPos == nullptr)
+			{
+				anchorPos = worker->getPosition();
+			}
+			if (anchorPos == nullptr)
+			{
+				return false;
+			}
+
+			const Real placeAngle = buildingTemplate->getPlacementViewAngle();
+			const Real anchorRadius = anchor != nullptr ? anchor->getGeometryInfo().getBoundingCircleRadius() : 80.0f;
+			const Real baseRadius = anchorRadius + 90.0f;
+			const UnsignedInt legalOpts =
+				BuildAssistant::TERRAIN_RESTRICTIONS |
+				BuildAssistant::CLEAR_PATH |
+				BuildAssistant::NO_OBJECT_OVERLAP |
+				BuildAssistant::SHROUD_REVEALED;
+			const Coord3D* workerPos = worker->getPosition();
+
+			bool found = false;
+			Real bestDistSq = 0.0f;
+			Coord3D best = *anchorPos;
+			best.z = 0.0f;
+			const bool spacingBarracks = containsIgnoreCase(buildingTemplate->getName().str(), "barracks");
+			const Real barracksSpacingRadius = 280.0f;
+
+			for (Int pass = 0; pass < 2 && !found; ++pass)
+			{
+				const bool enforceSpacing = spacingBarracks && pass == 0;
+				for (Real ring = baseRadius; ring <= baseRadius + 600.0f; ring += 24.0f)
+				{
+					for (Int i = 0; i < 48; ++i)
+					{
+						const Real theta = static_cast<Real>(i) * (6.28318530717958647692f / 48.0f);
+						Coord3D candidate = *anchorPos;
+						candidate.x += std::cos(theta) * ring;
+						candidate.y += std::sin(theta) * ring;
+						candidate.z = 0.0f;
+
+						if (TheBuildAssistant->isLocationLegalToBuild(&candidate, buildingTemplate, placeAngle, legalOpts, worker, nullptr) != LBC_OK)
+						{
+							continue;
+						}
+						if (enforceSpacing && hasNearbyOwnedBarracks(player, &candidate, barracksSpacingRadius))
+						{
+							continue;
+						}
+
+						const Real distSq = workerPos != nullptr ? distanceSq2D(&candidate, workerPos) : 0.0f;
+						if (!found || distSq < bestDistSq)
+						{
+							found = true;
+							bestDistSq = distSq;
+							best = candidate;
+						}
+					}
+				}
+			}
+
+			if (TheTerrainVisual != nullptr)
+			{
+				TheTerrainVisual->removeAllBibs();
+			}
+
+			if (!found)
+			{
+				return false;
+			}
+
+			outLocation = best;
+			outAngle = placeAngle;
+			return true;
+		}
+
+		bool executeConstructAtLocation(Object* worker, const ThingTemplate* buildingTemplate, const Coord3D& location, Real angle, std::string& reason)
+		{
+			if (worker == nullptr || buildingTemplate == nullptr || TheBuildAssistant == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+
+			Player* player = worker->getControllingPlayer();
+			if (player == nullptr)
+			{
+				reason = "player_not_found";
+				return false;
+			}
+
+			const Money* wallet = player->getMoney();
+			const UnsignedInt currentMoney = wallet != nullptr ? wallet->countMoney() : 0u;
+			if (buildingTemplate->calcCostToBuild(player) > currentMoney)
+			{
+				reason = "no_money";
+				return false;
+			}
+
+			const UnsignedInt legalOpts =
+				BuildAssistant::TERRAIN_RESTRICTIONS |
+				BuildAssistant::CLEAR_PATH |
+				BuildAssistant::NO_OBJECT_OVERLAP |
+				BuildAssistant::SHROUD_REVEALED;
+			const LegalBuildCode preLegal = TheBuildAssistant->isLocationLegalToBuild(&location, buildingTemplate, angle, legalOpts, worker, nullptr);
+			if (preLegal != LBC_OK)
+			{
+				switch (preLegal)
+				{
+				case LBC_SHROUD:
+					reason = "blocked_by_shroud";
+					break;
+				case LBC_OBJECTS_IN_THE_WAY:
+					reason = "blocked_by_objects";
+					break;
+				case LBC_NO_CLEAR_PATH:
+					reason = "no_clear_path";
+					break;
+				case LBC_TOO_CLOSE_TO_SUPPLIES:
+					reason = "too_close_to_supply";
+					break;
+				case LBC_RESTRICTED_TERRAIN:
+				case LBC_NOT_FLAT_ENOUGH:
+				default:
+					reason = "no_legal_build_location";
+					break;
+				}
+				return false;
+			}
+
+			if (TheBuildAssistant->buildObjectNow(worker, buildingTemplate, &location, angle, player) == nullptr)
+			{
+				const CanMakeType canMake = TheBuildAssistant->canMakeUnit(worker, buildingTemplate);
+				switch (canMake)
+				{
+				case CANMAKE_NO_PREREQ:
+					reason = "no_prereq";
+					return false;
+				case CANMAKE_NO_MONEY:
+					reason = "no_money";
+					return false;
+				case CANMAKE_FACTORY_IS_DISABLED:
+					reason = "factory_disabled";
+					return false;
+				default:
+					break;
+				}
+
+				const LegalBuildCode postLegal = TheBuildAssistant->isLocationLegalToBuild(&location, buildingTemplate, angle, legalOpts, worker, nullptr);
+				switch (postLegal)
+				{
+				case LBC_SHROUD:
+					reason = "blocked_by_shroud";
+					return false;
+				case LBC_OBJECTS_IN_THE_WAY:
+					reason = "blocked_by_objects";
+					return false;
+				case LBC_NO_CLEAR_PATH:
+					reason = "no_clear_path";
+					return false;
+				case LBC_TOO_CLOSE_TO_SUPPLIES:
+					reason = "too_close_to_supply";
+					return false;
+				default:
+					break;
+				}
+
+				reason = "construct_failed";
+				return false;
+			}
+
+			return true;
 		}
 
 		bool executeGameQueueUnit(const nlohmann::json& message, std::string& reason)
@@ -1685,89 +2050,7 @@ namespace
 				reason = "player_not_found";
 				return false;
 			}
-
-			const Money* wallet = player->getMoney();
-			const UnsignedInt currentMoney = wallet != nullptr ? wallet->countMoney() : 0u;
-			if (buildingTemplate->calcCostToBuild(player) > currentMoney)
-			{
-				reason = "no_money";
-				return false;
-			}
-
-			const UnsignedInt legalOpts =
-				BuildAssistant::TERRAIN_RESTRICTIONS |
-				BuildAssistant::CLEAR_PATH |
-				BuildAssistant::NO_OBJECT_OVERLAP |
-				BuildAssistant::SHROUD_REVEALED;
-			const LegalBuildCode preLegal = TheBuildAssistant->isLocationLegalToBuild(&location, buildingTemplate, angle, legalOpts, worker, nullptr);
-			if (preLegal != LBC_OK)
-			{
-				switch (preLegal)
-				{
-				case LBC_SHROUD:
-					reason = "blocked_by_shroud";
-					break;
-				case LBC_OBJECTS_IN_THE_WAY:
-					reason = "blocked_by_objects";
-					break;
-				case LBC_NO_CLEAR_PATH:
-					reason = "no_clear_path";
-					break;
-				case LBC_TOO_CLOSE_TO_SUPPLIES:
-					reason = "too_close_to_supply";
-					break;
-				case LBC_RESTRICTED_TERRAIN:
-				case LBC_NOT_FLAT_ENOUGH:
-				default:
-					reason = "no_legal_build_location";
-					break;
-				}
-				return false;
-			}
-
-			if (TheBuildAssistant->buildObjectNow(worker, buildingTemplate, &location, angle, player) == nullptr)
-			{
-				// Diagnose common failure conditions from the live state after failed construct attempt.
-				const CanMakeType canMake = TheBuildAssistant->canMakeUnit(worker, buildingTemplate);
-				switch (canMake)
-				{
-				case CANMAKE_NO_PREREQ:
-					reason = "no_prereq";
-					return false;
-				case CANMAKE_NO_MONEY:
-					reason = "no_money";
-					return false;
-				case CANMAKE_FACTORY_IS_DISABLED:
-					reason = "factory_disabled";
-					return false;
-				default:
-					break;
-				}
-
-				const LegalBuildCode postLegal = TheBuildAssistant->isLocationLegalToBuild(&location, buildingTemplate, angle, legalOpts, worker, nullptr);
-				switch (postLegal)
-				{
-				case LBC_SHROUD:
-					reason = "blocked_by_shroud";
-					return false;
-				case LBC_OBJECTS_IN_THE_WAY:
-					reason = "blocked_by_objects";
-					return false;
-				case LBC_NO_CLEAR_PATH:
-					reason = "no_clear_path";
-					return false;
-				case LBC_TOO_CLOSE_TO_SUPPLIES:
-					reason = "too_close_to_supply";
-					return false;
-				default:
-					break;
-				}
-
-				reason = "construct_failed";
-				return false;
-			}
-
-			return true;
+			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
 		}
 
 		bool executeGameBuildSupplyStashAuto(const nlohmann::json& message, std::string& reason)
@@ -1989,6 +2272,101 @@ namespace
 			target.z = 0.0f;
 			ai->aiMoveToPosition(&target, CMD_FROM_AI);
 			return true;
+		}
+
+		bool executeGameBuildBarracksSmart(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheThingFactory == nullptr || TheGameLogic == nullptr || TheBuildAssistant == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			Object* worker = resolveWorkerFromArgs(player, message, true, reason);
+			if (worker == nullptr)
+			{
+				return false;
+			}
+
+			std::string buildingTemplateName;
+			Int requestedAnchorId = -1;
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				buildingTemplateName = getJsonString(*argsIt, "building_template");
+				const auto anchorIdIt = argsIt->find("anchor_object_id");
+				if (anchorIdIt != argsIt->end() && anchorIdIt->is_number_integer())
+				{
+					requestedAnchorId = anchorIdIt->get<Int>();
+				}
+			}
+			if (buildingTemplateName.empty())
+			{
+				buildingTemplateName = inferBarracksTemplateForPlayer(player, worker);
+			}
+			if (buildingTemplateName.empty())
+			{
+				reason = "barracks_template_unknown";
+				return false;
+			}
+
+			const ThingTemplate* buildingTemplate = TheThingFactory->findTemplate(AsciiString(buildingTemplateName.c_str()), false);
+			if (buildingTemplate == nullptr)
+			{
+				reason = "building_template_not_found";
+				return false;
+			}
+
+			Object* anchor = nullptr;
+			if (requestedAnchorId > 0)
+			{
+				anchor = TheGameLogic->findObjectByID(static_cast<ObjectID>(requestedAnchorId));
+				if (anchor == nullptr)
+				{
+					reason = "anchor_not_found";
+					return false;
+				}
+				if (anchor->getControllingPlayer() != player)
+				{
+					reason = "anchor_not_owned";
+					return false;
+				}
+			}
+			if (anchor == nullptr)
+			{
+				anchor = findPrimaryCommandCenter(player);
+			}
+
+			Coord3D location;
+			Real angle = 0.0f;
+			if (!findBuildLocationAroundAnchor(player, worker, anchor, buildingTemplate, location, angle))
+			{
+				AIUpdateInterface* ai = worker->getAI();
+				if (ai == nullptr)
+				{
+					reason = "worker_no_ai";
+					return false;
+				}
+
+				const Coord3D* moveTarget = anchor != nullptr ? anchor->getPosition() : worker->getPosition();
+				if (moveTarget == nullptr)
+				{
+					reason = "anchor_not_found";
+					return false;
+				}
+				Coord3D target = *moveTarget;
+				target.z = 0.0f;
+				ai->aiMoveToPosition(&target, CMD_FROM_AI);
+				return true;
+			}
+
+			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
 		}
 
 		nlohmann::json buildPlayerDetails(Player* player) const
