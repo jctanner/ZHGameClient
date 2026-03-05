@@ -275,6 +275,10 @@ Adapter should enforce:
 2. Command validation by current game/session state.
 3. Optional allowlist by mode (`human_only|bot_only|hybrid`).
 
+See also:
+
+1. `AI_DOCS/SIMULATION.md` for lockstep/desync behavior and why direct money mutation commands should be single-player only.
+
 ## Minimal CLI Mapping (suggested)
 
 Current Python CLI examples:
