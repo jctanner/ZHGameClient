@@ -86,6 +86,7 @@
 #include "GameLogic/SidesList.h"
 
 #include "GameClient/ClientInstance.h"
+#include "GameClient/AIControlAdapter.h"
 #include "GameClient/FXList.h"
 #include "GameClient/GameClient.h"
 #include "GameClient/Keyboard.h"
@@ -864,6 +865,7 @@ void GameEngine::resetSubsystems()
 	TheGameLogic->reset();
 
 	TheSubsystemList->resetAll();
+	AIControlAdapterReset();
 }
 
 /// -----------------------------------------------------------------------------------------------
@@ -973,6 +975,7 @@ void GameEngine::update()
 
 			TheAudio->UPDATE();
 			TheGameClient->UPDATE();
+			AIControlAdapterUpdate();
 			TheMessageStream->propagateMessages();
 
             if (TheNetwork != nullptr)
