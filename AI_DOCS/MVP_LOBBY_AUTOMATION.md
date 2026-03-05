@@ -12,7 +12,7 @@ Run one client command that:
 
 Use:
 
-1. `scripts/ai/zhctl.py`
+1. `ZHGameClient/scripts/ai/zhctl.py`
 
 Named pipe default:
 
@@ -23,19 +23,19 @@ Named pipe default:
 Single handshake check:
 
 ```powershell
-python .\scripts\ai\zhctl.py hello
+python .\ZHGameClient\scripts\ai\zhctl.py hello
 ```
 
 Single click test:
 
 ```powershell
-python .\scripts\ai\zhctl.py menu-click --control-id "MainMenu.wnd:ButtonMultiplayer"
+python .\ZHGameClient\scripts\ai\zhctl.py menu-click --control-id "MainMenu.wnd:ButtonMultiplayer"
 ```
 
 End-to-end MVP flow (launch + click sequence):
 
 ```powershell
-python .\scripts\ai\zhctl.py lobby-mvp `
+python .\ZHGameClient\scripts\ai\zhctl.py lobby-mvp `
   --exe-path "C:\Program Files (x86)\Steam\steamapps\common\Command & Conquer Generals - Zero Hour\GeneralsOnlineZH_hacked.exe" `
   --lobby-clicks MainMenu.wnd:ButtonMultiplayer MainMenu.wnd:ButtonNetwork `
   --delay-ms 1500
@@ -60,42 +60,42 @@ Use these IDs with `menu-click`:
 Quick action commands:
 
 ```powershell
-python .\scripts\ai\zhctl.py lan-click --lan-action main-menu
-python .\scripts\ai\zhctl.py lan-click --lan-action create-game
-python .\scripts\ai\zhctl.py lan-click --lan-action join-game
-python .\scripts\ai\zhctl.py lan-click --lan-action direct-connect
+python .\ZHGameClient\scripts\ai\zhctl.py lan-click --lan-action main-menu
+python .\ZHGameClient\scripts\ai\zhctl.py lan-click --lan-action create-game
+python .\ZHGameClient\scripts\ai\zhctl.py lan-click --lan-action join-game
+python .\ZHGameClient\scripts\ai\zhctl.py lan-click --lan-action direct-connect
 ```
 
 Set LAN lobby player name field:
 
 ```powershell
-python .\scripts\ai\zhctl.py lan-name-set --text "YourNameHere"
+python .\ZHGameClient\scripts\ai\zhctl.py lan-name-set --text "YourNameHere"
 ```
 
 Click Skirmish from Main Menu:
 
 ```powershell
-python .\scripts\ai\zhctl.py main-click --main-action skirmish
+python .\ZHGameClient\scripts\ai\zhctl.py main-click --main-action skirmish
 ```
 
 List discoverable controls (button inventory):
 
 ```powershell
-python .\scripts\ai\zhctl.py list-controls --kind button
+python .\ZHGameClient\scripts\ai\zhctl.py list-controls --kind button
 ```
 
 Include hidden controls and text entries:
 
 ```powershell
-python .\scripts\ai\zhctl.py list-controls --kind all --include-hidden
+python .\ZHGameClient\scripts\ai\zhctl.py list-controls --kind all --include-hidden
 ```
 
 Send in-game chat:
 
 ```powershell
-python .\scripts\ai\zhctl.py chat-send --scope everyone --text "hello from controller"
-python .\scripts\ai\zhctl.py chat-send --scope allies --text "team chat"
-python .\scripts\ai\zhctl.py chat-send --scope players --text "self chat"
+python .\ZHGameClient\scripts\ai\zhctl.py chat-send --scope everyone --text "hello from controller"
+python .\ZHGameClient\scripts\ai\zhctl.py chat-send --scope allies --text "team chat"
+python .\ZHGameClient\scripts\ai\zhctl.py chat-send --scope players --text "self chat"
 ```
 
 ## Gameplay Build Commands
@@ -103,13 +103,13 @@ python .\scripts\ai\zhctl.py chat-send --scope players --text "self chat"
 Find supply sources discovered from map objects/modules:
 
 ```powershell
-python .\scripts\ai\zhctl.py find-supply-sources --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py find-supply-sources --pretty
 ```
 
 Find a legal build location near a supply source for a worker/dozer:
 
 ```powershell
-python .\scripts\ai\zhctl.py find-build-location-near-supply `
+python .\ZHGameClient\scripts\ai\zhctl.py find-build-location-near-supply `
   --building-template GLASupplyStash `
   --pretty
 ```
@@ -117,7 +117,7 @@ python .\scripts\ai\zhctl.py find-build-location-near-supply `
 Issue construction using worker/dozer placement:
 
 ```powershell
-python .\scripts\ai\zhctl.py dozer-construct `
+python .\ZHGameClient\scripts\ai\zhctl.py dozer-construct `
   --building-template GLASupplyStash `
   --pretty
 ```
@@ -130,7 +130,7 @@ High-level abstraction (recommended):
 4. Build supply stash/supply center.
 
 ```powershell
-python .\scripts\ai\zhctl.py build-supply-stash --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py build-supply-stash --pretty
 ```
 
 Shroud-aware abstraction (recommended for unrevealed supply areas):
@@ -142,13 +142,13 @@ Shroud-aware abstraction (recommended for unrevealed supply areas):
 5. Run the same command again once vision is revealed.
 
 ```powershell
-python .\scripts\ai\zhctl.py build-supply-stash-smart --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py build-supply-stash-smart --pretty
 ```
 
 Smart barracks build near your base anchor (default command center):
 
 ```powershell
-python .\scripts\ai\zhctl.py build-barracks-smart --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py build-barracks-smart --pretty
 ```
 
 Behavior notes:
@@ -159,12 +159,12 @@ Behavior notes:
 Optional targeting knobs:
 
 ```powershell
-python .\scripts\ai\zhctl.py build-supply-stash --worker-object-id 12345 --pretty
-python .\scripts\ai\zhctl.py build-supply-stash-smart --worker-object-id 12345 --pretty
-python .\scripts\ai\zhctl.py build-supply-stash-smart --supply-source-id 67890 --pretty
-python .\scripts\ai\zhctl.py build-barracks-smart --worker-object-id 12345 --pretty
-python .\scripts\ai\zhctl.py build-barracks-smart --anchor-object-id 999 --pretty
-python .\scripts\ai\zhctl.py build-barracks-smart --building-template GLABarracks --pretty
-python .\scripts\ai\zhctl.py dozer-construct --supply-source-id 67890 --pretty
-python .\scripts\ai\zhctl.py dozer-construct --building-template AmericaSupplyCenter --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py build-supply-stash --worker-object-id 12345 --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py build-supply-stash-smart --worker-object-id 12345 --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py build-supply-stash-smart --supply-source-id 67890 --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py build-barracks-smart --worker-object-id 12345 --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py build-barracks-smart --anchor-object-id 999 --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py build-barracks-smart --building-template GLABarracks --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py dozer-construct --supply-source-id 67890 --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py dozer-construct --building-template AmericaSupplyCenter --pretty
 ```
