@@ -106,6 +106,8 @@ Supported `cmd` values (v1):
 20. `Game.BuildSupplyStashAuto`
 21. `Game.BuildSupplyStashSmart`
 22. `Game.BuildBarracksSmart`
+23. `Game.BuildCommandCenterSmart`
+24. `Game.AttackMove`
 
 `Lobby.Join` args:
 
@@ -180,6 +182,40 @@ Supported `cmd` values (v1):
 3. Place near anchor object (default: player command center).
 4. If no legal location currently exists (often shroud/path), issue a move order toward anchor and return success.
 
+`Game.BuildCommandCenterSmart` args:
+
+1. `player_index` (optional int, default local player)
+2. `worker_object_id` (optional int, default first idle dozer/worker)
+3. `building_template` (optional override; otherwise inferred by faction/buildability)
+4. `anchor_object_id` (optional int; owned object used as placement anchor, defaults to command center)
+
+`Game.BuildCommandCenterSmart` behavior:
+
+1. Resolve an idle worker/dozer.
+2. Infer command center template if not explicitly provided.
+3. Place near anchor object (default: player command center).
+4. If no legal location currently exists (often shroud/path), issue a move order toward anchor and return success.
+
+`Game.QueueUnit` args:
+
+1. `player_index` (optional int, default local player)
+2. `producer_object_id` (optional int; if omitted, adapter finds matching producer)
+3. `producer_kind` (`command_center|any`, optional; default `command_center`)
+4. `unit_template` (required string)
+
+`Game.BuildWorker` args:
+
+1. Same args as `Game.QueueUnit`
+2. If `unit_template` is omitted, adapter infers faction worker/dozer template.
+
+`Game.AttackMove` args:
+
+1. `player_index` (optional int, default local player)
+2. `x` (required number)
+3. `y` (required number)
+4. `object_id` (optional int, single controlled object)
+5. `object_ids` (optional int[], multiple controlled objects)
+
 ## In-Game Intent Batch
 
 Use for match actions:
@@ -215,6 +251,8 @@ Common `path` values:
 7. `game.faction`
 8. `game.resources`
 9. `game.units`
+10. `game.objects`
+11. `game.visible_enemies`
 
 ## Acknowledgements
 
