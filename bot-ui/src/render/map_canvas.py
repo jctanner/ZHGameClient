@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 import tkinter as tk
 from typing import Iterable
 
@@ -11,6 +12,16 @@ class MapRenderer:
         self.canvas = canvas
         self.padding = 16
         self.orientation = "flip_y"
+        self.unit_radius = 1.5
+        self.animation_duration_sec = 0.25
+        self._unit_positions: dict[tuple[int | None, int], tuple[float, float]] = {}
+        self._unit_animations: dict[
+            tuple[int | None, int],
+            tuple[float, tuple[float, float], tuple[float, float]],
+        ] = {}
+
+    def has_active_animation(self) -> bool:
+        return bool(self._unit_animations)
 
     def draw(self, store: UIStore) -> None:
         width = max(self.canvas.winfo_width(), 1)
@@ -86,6 +97,7 @@ class MapRenderer:
         store: UIStore,
         friendly: bool,
     ) -> None:
+        now = time.monotonic()
         all_objects = list(objects)
         buildings = [o for o in all_objects if o.kind == "building"]
         units = [o for o in all_objects if o.kind != "building"]
@@ -96,10 +108,52 @@ class MapRenderer:
             self.canvas.create_rectangle(cx - 6, cy - 6, cx + 6, cy + 6, outline=outline, fill=fill)
 
         # Draw units last so they remain visible over structures.
+        current_unit_positions: dict[tuple[int | None, int], tuple[float, float]] = {}
         for obj in units:
-            cx, cy = self._world_to_canvas(obj.x, obj.y, canvas_w, canvas_h, bounds)
+            key = (obj.owner_player_index, obj.object_id)
+            current = (obj.x, obj.y)
+            current_unit_positions[key] = current
+            prev = self._unit_positions.get(key)
+            if prev is None:
+                continue
+            dx = current[0] - prev[0]
+            dy = current[1] - prev[1]
+            if (dx * dx) + (dy * dy) > 0.0001:
+                existing = self._unit_animations.get(key)
+                if existing is None or existing[2] != current:
+                    self._unit_animations[key] = (now, prev, current)
+
+        for obj in units:
+            key = (obj.owner_player_index, obj.object_id)
+            world_x = obj.x
+            world_y = obj.y
+            anim = self._unit_animations.get(key)
+            if anim is not None:
+                start, src, dst = anim
+                elapsed = now - start
+                if elapsed >= self.animation_duration_sec:
+                    self._unit_animations.pop(key, None)
+                else:
+                    t = max(0.0, min(1.0, elapsed / self.animation_duration_sec))
+                    world_x = src[0] + ((dst[0] - src[0]) * t)
+                    world_y = src[1] + ((dst[1] - src[1]) * t)
+
+            cx, cy = self._world_to_canvas(world_x, world_y, canvas_w, canvas_h, bounds)
             outline, fill = self._resolve_object_colors(store, obj, friendly)
-            self.canvas.create_oval(cx - 3, cy - 3, cx + 3, cy + 3, outline=outline, fill=fill)
+            self.canvas.create_oval(
+                cx - self.unit_radius,
+                cy - self.unit_radius,
+                cx + self.unit_radius,
+                cy + self.unit_radius,
+                outline=outline,
+                fill=fill,
+            )
+
+        # Keep only current units for next interpolation step.
+        self._unit_positions = current_unit_positions
+        stale_keys = [k for k in self._unit_animations if k not in current_unit_positions]
+        for key in stale_keys:
+            self._unit_animations.pop(key, None)
 
     def _draw_interesting_points(
         self,
