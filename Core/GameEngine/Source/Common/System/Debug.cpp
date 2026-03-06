@@ -378,10 +378,18 @@ void DebugInit(int flags)
 			return;
 
 		char dirbuf[ _MAX_PATH ];
-		::GetModuleFileName( nullptr, dirbuf, sizeof( dirbuf ) );
-		if (char *pEnd = strrchr(dirbuf, '\\'))
+		strcpy(dirbuf, "D:\\logs\\");
+		if (!::CreateDirectoryA("D:\\logs", nullptr))
 		{
-			*(pEnd + 1) = 0;
+			const DWORD err = ::GetLastError();
+			if (err != ERROR_ALREADY_EXISTS)
+			{
+				::GetModuleFileName( nullptr, dirbuf, sizeof( dirbuf ) );
+				if (char *pEnd = strrchr(dirbuf, '\\'))
+				{
+					*(pEnd + 1) = 0;
+				}
+			}
 		}
 
 		static_assert(ARRAY_SIZE(theLogFileNamePrev) >= ARRAY_SIZE(dirbuf), "Incorrect array size");

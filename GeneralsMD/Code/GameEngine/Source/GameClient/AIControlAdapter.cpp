@@ -38,6 +38,9 @@
 #include <cctype>
 #include <cmath>
 #include <unordered_map>
+#include <cstdarg>
+#include <cstdio>
+#include <share.h>
 
 namespace
 {
@@ -46,16 +49,19 @@ namespace
 	public:
 		AIControlAdapterState() :
 			m_pipe(INVALID_HANDLE_VALUE),
-			m_hasClient(false)
+			m_hasClient(false),
+			m_adapterLog(nullptr)
 		{
 			char buffer[32];
 			sprintf_s(buffer, "%08X%08X", static_cast<unsigned int>(::GetCurrentProcessId()), static_cast<unsigned int>(::GetTickCount()));
 			m_sessionId = buffer;
+			adapterLog("adapter_start pid=%lu session=%s", static_cast<unsigned long>(::GetCurrentProcessId()), m_sessionId.c_str());
 		}
 
 		~AIControlAdapterState()
 		{
 			closePipe();
+			closeAdapterLog();
 		}
 
 		void reset()
@@ -87,9 +93,82 @@ namespace
 
 		HANDLE m_pipe;
 		bool m_hasClient;
+		FILE* m_adapterLog;
 		std::string m_lineBuffer;
 		std::string m_sessionId;
 		std::unordered_map<Int, Int> m_lastAutoSupplySourceByPlayer;
+
+		static std::string truncateForLog(const std::string& text, std::size_t maxLen = 1200u)
+		{
+			if (text.size() <= maxLen)
+			{
+				return text;
+			}
+			return text.substr(0, maxLen) + "...(truncated)";
+		}
+
+		void ensureAdapterLogOpen()
+		{
+			if (m_adapterLog != nullptr)
+			{
+				return;
+			}
+
+			::CreateDirectoryA("D:\\logs", nullptr);
+			m_adapterLog = _fsopen("D:\\logs\\adapter.log", "a", _SH_DENYNO);
+			if (m_adapterLog != nullptr)
+			{
+				SYSTEMTIME st;
+				::GetLocalTime(&st);
+				fprintf(
+					m_adapterLog,
+					"[%02u:%02u:%02u.%03u] adapter_log_opened pid=%lu session=%s\n",
+					static_cast<unsigned int>(st.wHour),
+					static_cast<unsigned int>(st.wMinute),
+					static_cast<unsigned int>(st.wSecond),
+					static_cast<unsigned int>(st.wMilliseconds),
+					static_cast<unsigned long>(::GetCurrentProcessId()),
+					m_sessionId.c_str());
+				fflush(m_adapterLog);
+			}
+		}
+
+		void closeAdapterLog()
+		{
+			if (m_adapterLog == nullptr)
+			{
+				return;
+			}
+			fflush(m_adapterLog);
+			fclose(m_adapterLog);
+			m_adapterLog = nullptr;
+		}
+
+		void adapterLog(const char* format, ...)
+		{
+			ensureAdapterLogOpen();
+			if (m_adapterLog == nullptr)
+			{
+				return;
+			}
+
+			SYSTEMTIME st;
+			::GetLocalTime(&st);
+			fprintf(
+				m_adapterLog,
+				"[%02u:%02u:%02u.%03u] ",
+				static_cast<unsigned int>(st.wHour),
+				static_cast<unsigned int>(st.wMinute),
+				static_cast<unsigned int>(st.wSecond),
+				static_cast<unsigned int>(st.wMilliseconds));
+
+			va_list args;
+			va_start(args, format);
+			vfprintf(m_adapterLog, format, args);
+			va_end(args);
+			fputc('\n', m_adapterLog);
+			fflush(m_adapterLog);
+		}
 
 		void ensurePipeCreated()
 		{
@@ -107,6 +186,10 @@ namespace
 				PIPE_BUFFER_SIZE,
 				0,
 				nullptr);
+			if (m_pipe == INVALID_HANDLE_VALUE)
+			{
+				adapterLog("pipe_create_failed winerr=%lu", static_cast<unsigned long>(::GetLastError()));
+			}
 		}
 
 		void closePipe()
@@ -127,6 +210,10 @@ namespace
 			{
 				::DisconnectNamedPipe(m_pipe);
 			}
+			if (m_hasClient)
+			{
+				adapterLog("client_disconnected");
+			}
 			m_hasClient = false;
 		}
 
@@ -140,6 +227,7 @@ namespace
 			if (::ConnectNamedPipe(m_pipe, nullptr))
 			{
 				m_hasClient = true;
+				adapterLog("client_connected");
 				return;
 			}
 
@@ -147,6 +235,7 @@ namespace
 			if (error == ERROR_PIPE_CONNECTED)
 			{
 				m_hasClient = true;
+				adapterLog("client_connected_already");
 				return;
 			}
 
@@ -163,6 +252,7 @@ namespace
 				DWORD bytesAvailable = 0;
 				if (!::PeekNamedPipe(m_pipe, nullptr, 0, nullptr, &bytesAvailable, nullptr))
 				{
+					adapterLog("peek_pipe_failed winerr=%lu", static_cast<unsigned long>(::GetLastError()));
 					resetClientConnection();
 					return;
 				}
@@ -182,6 +272,7 @@ namespace
 				DWORD bytesRead = 0;
 				if (!::ReadFile(m_pipe, buffer, requested, &bytesRead, nullptr) || bytesRead == 0)
 				{
+					adapterLog("read_pipe_failed winerr=%lu bytes_read=%lu", static_cast<unsigned long>(::GetLastError()), static_cast<unsigned long>(bytesRead));
 					resetClientConnection();
 					return;
 				}
@@ -214,6 +305,7 @@ namespace
 					continue;
 				}
 
+				adapterLog("recv_raw %s", truncateForLog(line).c_str());
 				handleMessage(line);
 			}
 		}
@@ -299,11 +391,13 @@ namespace
 			}
 
 			std::string line = payload.dump();
+			adapterLog("send_raw %s", truncateForLog(line).c_str());
 			line.push_back('\n');
 
 			DWORD bytesWritten = 0;
 			if (!::WriteFile(m_pipe, line.data(), static_cast<DWORD>(line.size()), &bytesWritten, nullptr))
 			{
+				adapterLog("write_pipe_failed winerr=%lu", static_cast<unsigned long>(::GetLastError()));
 				resetClientConnection();
 			}
 		}
@@ -2984,6 +3078,35 @@ namespace
 			return "unit";
 		}
 
+		static bool isCivilianLikePlayer(const Player* player)
+		{
+			if (player == nullptr)
+			{
+				return true;
+			}
+
+			auto toLower = [](std::string value) -> std::string
+			{
+				std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) -> unsigned char
+				{
+					return static_cast<unsigned char>(std::tolower(ch));
+				});
+				return value;
+			};
+
+			const std::string side = toLower(player->getSide().str());
+			const std::string baseSide = toLower(player->getBaseSide().str());
+			const std::string keyName = toLower(KEYNAME(player->getPlayerNameKey()).str());
+			const std::string displayName = toLower(unicodeToUtf8(const_cast<Player*>(player)->getPlayerDisplayName()));
+
+			auto hasCivilianTag = [](const std::string& s) -> bool
+			{
+				return s.find("civilian") != std::string::npos;
+			};
+
+			return hasCivilianTag(side) || hasCivilianTag(baseSide) || hasCivilianTag(keyName) || hasCivilianTag(displayName);
+		}
+
 		nlohmann::json buildObjectSummaryRow(const Object* obj, bool includeIdleState) const
 		{
 			nlohmann::json row = nlohmann::json::object();
@@ -3053,6 +3176,46 @@ namespace
 				{"player_index", player->getPlayerIndex()},
 				{"units", units},
 				{"buildings", buildings}
+			};
+		}
+
+		nlohmann::json buildAllPlayersObjectsSummary()
+		{
+			nlohmann::json players = nlohmann::json::array();
+			if (ThePlayerList == nullptr)
+			{
+				return nlohmann::json{
+					{"count", 0},
+					{"players", players}
+				};
+			}
+
+			const Player* neutralPlayer = ThePlayerList->getNeutralPlayer();
+			const Int count = ThePlayerList->getPlayerCount();
+			for (Int i = 0; i < count; ++i)
+			{
+				Player* player = ThePlayerList->getNthPlayer(i);
+				if (player == nullptr)
+				{
+					continue;
+				}
+				if (neutralPlayer != nullptr && player == neutralPlayer)
+				{
+					continue;
+				}
+				if (isCivilianLikePlayer(player))
+				{
+					continue;
+				}
+
+				nlohmann::json row = buildOwnedObjectsSummary(player);
+				row["player"] = buildLocalPlayerSummary(player);
+				players.push_back(row);
+			}
+
+			return nlohmann::json{
+				{"count", players.size()},
+				{"players", players}
 			};
 		}
 
@@ -3195,6 +3358,12 @@ namespace
 			{
 				result = buildOwnedObjectsSummary(selectedPlayer);
 				result["is_local_player"] = (selectedPlayer == localPlayer);
+				return true;
+			}
+
+			if (path == "game.objects_all")
+			{
+				result = buildAllPlayersObjectsSummary();
 				return true;
 			}
 
