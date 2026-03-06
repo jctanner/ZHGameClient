@@ -507,6 +507,10 @@ namespace
 						"chat_send",
 						"game_query",
 						"game_queue_unit",
+						"game_queue_soldiers_all_barracks",
+						"game_queue_rpg_all_barracks",
+						"game_queue_quads_all_war_factories",
+						"game_queue_scorpions_all_war_factories",
 						"game_supply_build",
 						"game_supply_build_smart",
 						"game_barracks_build_smart",
@@ -609,6 +613,58 @@ namespace
 			{
 				std::string reason;
 				if (!executeGameQueueUnit(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.QueueSoldiersAllBarracks")
+			{
+				std::string reason;
+				if (!executeGameQueueSoldiersAllBarracks(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.QueueRpgTroopersAllBarracks")
+			{
+				std::string reason;
+				if (!executeGameQueueRpgTroopersAllBarracks(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.QueueQuadsAllWarFactories")
+			{
+				std::string reason;
+				if (!executeGameQueueQuadsAllWarFactories(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.QueueScorpionsAllWarFactories")
+			{
+				std::string reason;
+				if (!executeGameQueueScorpionsAllWarFactories(message, reason))
 				{
 					sendActionAck(requestId, false, "invalid_state", reason.c_str());
 					return;
@@ -1161,6 +1217,153 @@ namespace
 				return nullptr;
 			}
 			return ctx.found;
+		}
+
+		struct SupplyProducerSearchContext
+		{
+			Object* found;
+		};
+
+		static void findSupplyProducerCallback(Object* obj, void* userData)
+		{
+			if (obj == nullptr || userData == nullptr)
+			{
+				return;
+			}
+			if (obj->isEffectivelyDead())
+			{
+				return;
+			}
+			if (obj->getProductionUpdateInterface() == nullptr)
+			{
+				return;
+			}
+			const ThingTemplate* tt = obj->getTemplate();
+			if (tt == nullptr)
+			{
+				return;
+			}
+			const std::string name = tt->getName().str();
+			if (!containsIgnoreCase(name, "supply"))
+			{
+				return;
+			}
+			if (!containsIgnoreCase(name, "stash") && !containsIgnoreCase(name, "center"))
+			{
+				return;
+			}
+
+			SupplyProducerSearchContext* ctx = static_cast<SupplyProducerSearchContext*>(userData);
+			if (ctx->found == nullptr)
+			{
+				ctx->found = obj;
+			}
+		}
+
+		Object* resolveSupplyProducerFromArgs(Player* player, const nlohmann::json& message, std::string& reason)
+		{
+			if (player == nullptr)
+			{
+				reason = "player_not_found";
+				return nullptr;
+			}
+			if (TheGameLogic == nullptr)
+			{
+				reason = "logic_not_ready";
+				return nullptr;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				const auto producerIdIt = argsIt->find("producer_object_id");
+				if (producerIdIt != argsIt->end() && producerIdIt->is_number_integer())
+				{
+					const Int producerId = producerIdIt->get<Int>();
+					if (producerId <= 0)
+					{
+						reason = "invalid_producer_object_id";
+						return nullptr;
+					}
+
+					Object* producer = TheGameLogic->findObjectByID(static_cast<ObjectID>(producerId));
+					if (producer == nullptr)
+					{
+						reason = "producer_not_found";
+						return nullptr;
+					}
+					if (producer->getControllingPlayer() != player)
+					{
+						reason = "producer_not_owned";
+						return nullptr;
+					}
+					if (producer->getProductionUpdateInterface() == nullptr)
+					{
+						reason = "producer_not_factory";
+						return nullptr;
+					}
+					const ThingTemplate* tt = producer->getTemplate();
+					if (tt == nullptr)
+					{
+						reason = "producer_not_supply";
+						return nullptr;
+					}
+					const std::string name = tt->getName().str();
+					if (!containsIgnoreCase(name, "supply") || (!containsIgnoreCase(name, "stash") && !containsIgnoreCase(name, "center")))
+					{
+						reason = "producer_not_supply";
+						return nullptr;
+					}
+					return producer;
+				}
+			}
+
+			SupplyProducerSearchContext ctx = { nullptr };
+			player->iterateObjects(findSupplyProducerCallback, &ctx);
+			if (ctx.found == nullptr)
+			{
+				reason = "supply_producer_not_found";
+				return nullptr;
+			}
+			return ctx.found;
+		}
+
+		struct SupplyProducerCollectContext
+		{
+			std::vector<Object*> producers;
+		};
+
+		static void collectSupplyProducersCallback(Object* obj, void* userData)
+		{
+			if (obj == nullptr || userData == nullptr)
+			{
+				return;
+			}
+			if (obj->isEffectivelyDead())
+			{
+				return;
+			}
+			if (obj->getProductionUpdateInterface() == nullptr)
+			{
+				return;
+			}
+			const ThingTemplate* tt = obj->getTemplate();
+			if (tt == nullptr)
+			{
+				return;
+			}
+			const std::string name = tt->getName().str();
+			if (!containsIgnoreCase(name, "supply"))
+			{
+				return;
+			}
+			if (!containsIgnoreCase(name, "stash") && !containsIgnoreCase(name, "center"))
+			{
+				return;
+			}
+
+			SupplyProducerCollectContext* ctx = static_cast<SupplyProducerCollectContext*>(userData);
+			ctx->producers.push_back(obj);
 		}
 
 		struct WorkerSearchContext
@@ -2276,6 +2479,456 @@ namespace
 			return true;
 		}
 
+		struct ProducerCollectContext
+		{
+			std::vector<Object*> producers;
+			bool matchBarracks;
+			bool matchWarFactory;
+		};
+
+		static void collectProducersCallback(Object* obj, void* userData)
+		{
+			if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+			{
+				return;
+			}
+			if (!obj->isKindOf(KINDOF_STRUCTURE))
+			{
+				return;
+			}
+			if (obj->getProductionUpdateInterface() == nullptr)
+			{
+				return;
+			}
+
+			const ThingTemplate* tt = obj->getTemplate();
+			if (tt == nullptr)
+			{
+				return;
+			}
+			const std::string name = tt->getName().str();
+			ProducerCollectContext* ctx = static_cast<ProducerCollectContext*>(userData);
+
+			if (ctx->matchBarracks && containsIgnoreCase(name, "barracks"))
+			{
+				ctx->producers.push_back(obj);
+				return;
+			}
+			if (ctx->matchWarFactory && (containsIgnoreCase(name, "warfactory") || containsIgnoreCase(name, "armsdealer")))
+			{
+				ctx->producers.push_back(obj);
+				return;
+			}
+		}
+
+		static Int parseQueueCountArg(const nlohmann::json& message)
+		{
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				return 1;
+			}
+			const auto countIt = argsIt->find("count");
+			if (countIt == argsIt->end() || !countIt->is_number_integer())
+			{
+				return 1;
+			}
+			Int value = countIt->get<Int>();
+			if (value < 1)
+			{
+				value = 1;
+			}
+			if (value > 9)
+			{
+				value = 9;
+			}
+			return value;
+		}
+
+		std::string inferSoldierTemplateForPlayer(const Player* player, Object* producer) const
+		{
+			if (player == nullptr || producer == nullptr || TheThingFactory == nullptr || TheBuildAssistant == nullptr)
+			{
+				return std::string();
+			}
+
+			std::vector<std::string> candidates;
+			const std::string side = player->getSide().str();
+			const std::string baseSide = player->getBaseSide().str();
+			if (containsIgnoreCase(side, "gla") || containsIgnoreCase(baseSide, "gla"))
+			{
+				candidates.push_back("GLAInfantryRebel");
+			}
+			if (containsIgnoreCase(side, "china") || containsIgnoreCase(baseSide, "china"))
+			{
+				candidates.push_back("ChinaInfantryRedguard");
+			}
+			if (containsIgnoreCase(side, "america") || containsIgnoreCase(baseSide, "america") || containsIgnoreCase(side, "usa") || containsIgnoreCase(baseSide, "usa"))
+			{
+				candidates.push_back("AmericaInfantryRanger");
+			}
+			candidates.push_back("GLAInfantryRebel");
+			candidates.push_back("ChinaInfantryRedguard");
+			candidates.push_back("AmericaInfantryRanger");
+
+			for (const std::string& name : candidates)
+			{
+				const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(name.c_str()), false);
+				if (tt == nullptr)
+				{
+					continue;
+				}
+				if (TheBuildAssistant->canMakeUnit(producer, tt) == CANMAKE_OK)
+				{
+					return name;
+				}
+			}
+			return std::string();
+		}
+
+		std::string inferQuadTemplateForProducer(Object* producer) const
+		{
+			if (producer == nullptr || TheThingFactory == nullptr || TheBuildAssistant == nullptr)
+			{
+				return std::string();
+			}
+			const char* candidates[] = {
+				"GLAVehicleQuadCannon",
+				"GLAVehicleQuadcannon",
+				"GLAQuadCannon"
+			};
+			for (const char* name : candidates)
+			{
+				const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(name), false);
+				if (tt == nullptr)
+				{
+					continue;
+				}
+				if (TheBuildAssistant->canMakeUnit(producer, tt) == CANMAKE_OK)
+				{
+					return name;
+				}
+			}
+			return std::string();
+		}
+
+		std::string inferRpgTemplateForProducer(Object* producer) const
+		{
+			if (producer == nullptr || TheThingFactory == nullptr || TheBuildAssistant == nullptr)
+			{
+				return std::string();
+			}
+			auto isPotentiallyQueueable = [&](const ThingTemplate* tt) -> bool
+			{
+				if (tt == nullptr)
+				{
+					return false;
+				}
+				const CanMakeType canMake = TheBuildAssistant->canMakeUnit(producer, tt);
+				// Accept queueable-now and queueable-in-principle states.
+				return canMake == CANMAKE_OK ||
+					canMake == CANMAKE_NO_MONEY ||
+					canMake == CANMAKE_QUEUE_FULL ||
+					canMake == CANMAKE_PARKING_PLACES_FULL;
+			};
+			const char* candidates[] = {
+				"GLAInfantryTunnelDefender",
+				"GLAInfantryRPGTrooper",
+				"GLAInfantryRPGRocket",
+				"GLAInfantryRPG"
+			};
+			for (const char* name : candidates)
+			{
+				const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(name), false);
+				if (tt == nullptr)
+				{
+					continue;
+				}
+				if (isPotentiallyQueueable(tt))
+				{
+					return name;
+				}
+			}
+
+			// Fallback: scan all templates for likely RPG infantry names.
+			for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
+			{
+				const std::string templateName = tt->getName().str();
+				if (!containsIgnoreCase(templateName, "rpg"))
+				{
+					continue;
+				}
+				if (!containsIgnoreCase(templateName, "infantry") && !containsIgnoreCase(templateName, "trooper"))
+				{
+					continue;
+				}
+				if (!isPotentiallyQueueable(tt))
+				{
+					continue;
+				}
+				return templateName;
+			}
+			return std::string();
+		}
+
+		std::string inferScorpionTemplateForProducer(Object* producer) const
+		{
+			if (producer == nullptr || TheThingFactory == nullptr || TheBuildAssistant == nullptr)
+			{
+				return std::string();
+			}
+			const char* candidates[] = {
+				"GLAVehicleScorpion",
+				"GLAVehicleScorpionTank",
+				"GLATankScorpion"
+			};
+			for (const char* name : candidates)
+			{
+				const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(name), false);
+				if (tt == nullptr)
+				{
+					continue;
+				}
+				if (TheBuildAssistant->canMakeUnit(producer, tt) == CANMAKE_OK)
+				{
+					return name;
+				}
+			}
+			return std::string();
+		}
+
+		bool queueTemplateAtProducer(const nlohmann::json& message, Object* producer, const std::string& unitTemplateName, std::string& reason)
+		{
+			if (producer == nullptr || unitTemplateName.empty())
+			{
+				reason = "invalid_queue_target";
+				return false;
+			}
+
+			nlohmann::json queuedMessage = message;
+			nlohmann::json queueArgs = nlohmann::json::object();
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				queueArgs = *argsIt;
+			}
+			queueArgs["producer_kind"] = "any";
+			queueArgs["producer_object_id"] = static_cast<Int>(producer->getID());
+			queueArgs["unit_template"] = unitTemplateName;
+			queuedMessage["args"] = queueArgs;
+
+			return executeGameQueueUnit(queuedMessage, reason);
+		}
+
+		bool executeGameQueueSoldiersAllBarracks(const nlohmann::json& message, std::string& reason)
+		{
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			ProducerCollectContext ctx;
+			ctx.matchBarracks = true;
+			ctx.matchWarFactory = false;
+			player->iterateObjects(collectProducersCallback, &ctx);
+			if (ctx.producers.empty())
+			{
+				reason = "no_barracks_found";
+				return false;
+			}
+
+			const Int count = parseQueueCountArg(message);
+			Int queued = 0;
+			std::string lastReason = "queue_failed";
+			for (Object* producer : ctx.producers)
+			{
+				const std::string unitTemplateName = inferSoldierTemplateForPlayer(player, producer);
+				if (unitTemplateName.empty())
+				{
+					continue;
+				}
+				for (Int i = 0; i < count; ++i)
+				{
+					std::string queueReason;
+					if (queueTemplateAtProducer(message, producer, unitTemplateName, queueReason))
+					{
+						++queued;
+						continue;
+					}
+					lastReason = queueReason;
+					if (queueReason == "queue_full" || queueReason == "no_money")
+					{
+						break;
+					}
+				}
+			}
+
+			if (queued <= 0)
+			{
+				reason = lastReason;
+				return false;
+			}
+			return true;
+		}
+
+		bool executeGameQueueRpgTroopersAllBarracks(const nlohmann::json& message, std::string& reason)
+		{
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			ProducerCollectContext ctx;
+			ctx.matchBarracks = true;
+			ctx.matchWarFactory = false;
+			player->iterateObjects(collectProducersCallback, &ctx);
+			if (ctx.producers.empty())
+			{
+				reason = "no_barracks_found";
+				return false;
+			}
+
+			const Int count = parseQueueCountArg(message);
+			Int queued = 0;
+			std::string lastReason = "queue_failed";
+			for (Object* producer : ctx.producers)
+			{
+				const std::string unitTemplateName = inferRpgTemplateForProducer(producer);
+				if (unitTemplateName.empty())
+				{
+					lastReason = "rpg_template_not_found";
+					continue;
+				}
+				for (Int i = 0; i < count; ++i)
+				{
+					std::string queueReason;
+					if (queueTemplateAtProducer(message, producer, unitTemplateName, queueReason))
+					{
+						++queued;
+						continue;
+					}
+					lastReason = queueReason;
+					if (queueReason == "queue_full" || queueReason == "no_money")
+					{
+						break;
+					}
+				}
+			}
+
+			if (queued <= 0)
+			{
+				reason = lastReason;
+				return false;
+			}
+			return true;
+		}
+
+		bool executeGameQueueQuadsAllWarFactories(const nlohmann::json& message, std::string& reason)
+		{
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			ProducerCollectContext ctx;
+			ctx.matchBarracks = false;
+			ctx.matchWarFactory = true;
+			player->iterateObjects(collectProducersCallback, &ctx);
+			if (ctx.producers.empty())
+			{
+				reason = "no_war_factory_found";
+				return false;
+			}
+
+			const Int count = parseQueueCountArg(message);
+			Int queued = 0;
+			std::string lastReason = "queue_failed";
+			for (Object* producer : ctx.producers)
+			{
+				const std::string unitTemplateName = inferQuadTemplateForProducer(producer);
+				if (unitTemplateName.empty())
+				{
+					continue;
+				}
+				for (Int i = 0; i < count; ++i)
+				{
+					std::string queueReason;
+					if (queueTemplateAtProducer(message, producer, unitTemplateName, queueReason))
+					{
+						++queued;
+						continue;
+					}
+					lastReason = queueReason;
+					if (queueReason == "queue_full" || queueReason == "no_money")
+					{
+						break;
+					}
+				}
+			}
+
+			if (queued <= 0)
+			{
+				reason = lastReason;
+				return false;
+			}
+			return true;
+		}
+
+		bool executeGameQueueScorpionsAllWarFactories(const nlohmann::json& message, std::string& reason)
+		{
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			ProducerCollectContext ctx;
+			ctx.matchBarracks = false;
+			ctx.matchWarFactory = true;
+			player->iterateObjects(collectProducersCallback, &ctx);
+			if (ctx.producers.empty())
+			{
+				reason = "no_war_factory_found";
+				return false;
+			}
+
+			const Int count = parseQueueCountArg(message);
+			Int queued = 0;
+			std::string lastReason = "queue_failed";
+			for (Object* producer : ctx.producers)
+			{
+				const std::string unitTemplateName = inferScorpionTemplateForProducer(producer);
+				if (unitTemplateName.empty())
+				{
+					continue;
+				}
+				for (Int i = 0; i < count; ++i)
+				{
+					std::string queueReason;
+					if (queueTemplateAtProducer(message, producer, unitTemplateName, queueReason))
+					{
+						++queued;
+						continue;
+					}
+					lastReason = queueReason;
+					if (queueReason == "queue_full" || queueReason == "no_money")
+					{
+						break;
+					}
+				}
+			}
+
+			if (queued <= 0)
+			{
+				reason = lastReason;
+				return false;
+			}
+			return true;
+		}
+
 		bool executeGameBuildWorker(const nlohmann::json& message, std::string& reason)
 		{
 			Player* player = resolvePlayerFromArgs(message, reason);
@@ -2285,41 +2938,65 @@ namespace
 			}
 
 			bool requireCommandCenter = true;
+			bool requireSupplyProducer = false;
+			bool explicitProducerId = false;
 			const auto argsIt = message.find("args");
 			if (argsIt != message.end() && argsIt->is_object())
 			{
+				const auto producerIdIt = argsIt->find("producer_object_id");
+				if (producerIdIt != argsIt->end() && producerIdIt->is_number_integer())
+				{
+					explicitProducerId = true;
+				}
 				const std::string producerKind = getJsonString(*argsIt, "producer_kind");
 				if (!producerKind.empty() && producerKind == "any")
 				{
 					requireCommandCenter = false;
 				}
+				else if (
+					producerKind == "supply_stash" ||
+					producerKind == "supply_center" ||
+					producerKind == "supply")
+				{
+					requireCommandCenter = false;
+					requireSupplyProducer = true;
+				}
 			}
 
-			Object* producer = resolveProducerFromArgs(player, message, requireCommandCenter, reason);
-			if (producer == nullptr)
+			std::vector<Object*> targetProducers;
+			if (requireSupplyProducer && !explicitProducerId)
 			{
-				return false;
+				SupplyProducerCollectContext ctx;
+				player->iterateObjects(collectSupplyProducersCallback, &ctx);
+				if (ctx.producers.empty())
+				{
+					reason = "supply_producer_not_found";
+					return false;
+				}
+				targetProducers = ctx.producers;
+			}
+			else
+			{
+				Object* producer = nullptr;
+				if (requireSupplyProducer)
+				{
+					producer = resolveSupplyProducerFromArgs(player, message, reason);
+				}
+				else
+				{
+					producer = resolveProducerFromArgs(player, message, requireCommandCenter, reason);
+				}
+				if (producer == nullptr)
+				{
+					return false;
+				}
+				targetProducers.push_back(producer);
 			}
 
 			std::string unitTemplateName;
 			if (argsIt != message.end() && argsIt->is_object())
 			{
 				unitTemplateName = getJsonString(*argsIt, "unit_template");
-			}
-
-			// Explicit template requested: use it directly.
-			if (!unitTemplateName.empty())
-			{
-				nlohmann::json queuedMessage = message;
-				nlohmann::json queueArgs = nlohmann::json::object();
-				if (argsIt != message.end() && argsIt->is_object())
-				{
-					queueArgs = *argsIt;
-				}
-				queueArgs["unit_template"] = unitTemplateName;
-				queueArgs["producer_kind"] = requireCommandCenter ? "command_center" : "any";
-				queuedMessage["args"] = queueArgs;
-				return executeGameQueueUnit(queuedMessage, reason);
 			}
 
 			// Try best-guess template first.
@@ -2333,59 +3010,107 @@ namespace
 			candidates.push_back("AmericaVehicleDozer");
 			candidates.push_back("ChinaVehicleDozer");
 
-			auto queueCandidate = [&](const std::string& candidateTemplate) -> bool
+			auto queueWorkerAtProducer = [&](Object* targetProducer, std::string& outReason) -> bool
 			{
-				nlohmann::json queueArgs = nlohmann::json::object();
-				if (argsIt != message.end() && argsIt->is_object())
+				if (targetProducer == nullptr)
 				{
-					queueArgs = *argsIt;
+					outReason = "producer_not_found";
+					return false;
 				}
-				queueArgs["unit_template"] = candidateTemplate;
-				queueArgs["producer_kind"] = requireCommandCenter ? "command_center" : "any";
-				nlohmann::json queuedMessage = message;
-				queuedMessage["args"] = queueArgs;
-				std::string candidateReason;
-				if (executeGameQueueUnit(queuedMessage, candidateReason))
-				{
-					return true;
-				}
-				reason = candidateReason;
-				return false;
-			};
 
-			for (const std::string& candidate : candidates)
-			{
-				if (candidate.empty())
+				// Explicit template requested: use it directly for this producer.
+				if (!unitTemplateName.empty())
 				{
-					continue;
+					nlohmann::json queuedMessage = message;
+					nlohmann::json queueArgs = nlohmann::json::object();
+					if (argsIt != message.end() && argsIt->is_object())
+					{
+						queueArgs = *argsIt;
+					}
+					queueArgs["unit_template"] = unitTemplateName;
+					queueArgs["producer_kind"] = "any";
+					queueArgs["producer_object_id"] = static_cast<Int>(targetProducer->getID());
+					queuedMessage["args"] = queueArgs;
+					return executeGameQueueUnit(queuedMessage, outReason);
 				}
-				if (queueCandidate(candidate))
-				{
-					return true;
-				}
-			}
 
-			// Fallback scan: pick first Worker/Dozer template that this command center can make.
-			if (TheThingFactory != nullptr && TheBuildAssistant != nullptr)
-			{
-				for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
+				auto queueCandidate = [&](const std::string& candidateTemplate) -> bool
 				{
-					const std::string templateName = tt->getName().str();
-					if (!containsIgnoreCase(templateName, "worker") && !containsIgnoreCase(templateName, "dozer"))
+					nlohmann::json queueArgs = nlohmann::json::object();
+					if (argsIt != message.end() && argsIt->is_object())
+					{
+						queueArgs = *argsIt;
+					}
+					queueArgs["unit_template"] = candidateTemplate;
+					queueArgs["producer_kind"] = "any";
+					queueArgs["producer_object_id"] = static_cast<Int>(targetProducer->getID());
+					nlohmann::json queuedMessage = message;
+					queuedMessage["args"] = queueArgs;
+					std::string candidateReason;
+					if (executeGameQueueUnit(queuedMessage, candidateReason))
+					{
+						return true;
+					}
+					outReason = candidateReason;
+					return false;
+				};
+
+				for (const std::string& candidate : candidates)
+				{
+					if (candidate.empty())
 					{
 						continue;
 					}
-					if (TheBuildAssistant->canMakeUnit(producer, tt) != CANMAKE_OK)
-					{
-						continue;
-					}
-					if (queueCandidate(templateName))
+					if (queueCandidate(candidate))
 					{
 						return true;
 					}
 				}
+
+				// Fallback scan: pick first Worker/Dozer template this producer can make.
+				if (TheThingFactory != nullptr && TheBuildAssistant != nullptr)
+				{
+					for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
+					{
+						const std::string templateName = tt->getName().str();
+						if (!containsIgnoreCase(templateName, "worker") && !containsIgnoreCase(templateName, "dozer"))
+						{
+							continue;
+						}
+						if (TheBuildAssistant->canMakeUnit(targetProducer, tt) != CANMAKE_OK)
+						{
+							continue;
+						}
+						if (queueCandidate(templateName))
+						{
+							return true;
+						}
+					}
+				}
+				return false;
+			};
+
+			Int queuedCount = 0;
+			std::string lastReason = "queue_failed";
+			for (Object* targetProducer : targetProducers)
+			{
+				std::string producerReason;
+				if (queueWorkerAtProducer(targetProducer, producerReason))
+				{
+					++queuedCount;
+				}
+				else if (!producerReason.empty())
+				{
+					lastReason = producerReason;
+				}
 			}
-			return false;
+
+			if (queuedCount <= 0)
+			{
+				reason = lastReason;
+				return false;
+			}
+			return true;
 		}
 
 		bool executeGameFindSupplySources(const nlohmann::json& message, nlohmann::json& result, std::string& reason)

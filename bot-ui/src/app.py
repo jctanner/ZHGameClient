@@ -53,6 +53,7 @@ class BotUIApp:
         self.poll_interval_ms = tk.IntVar(value=1000)
         self.stream_enabled = tk.BooleanVar(value=False)
         self.debug_inbound = tk.BooleanVar(value=True)
+        self.queue_count_var = tk.IntVar(value=1)
         self.pipe_name_var = tk.StringVar(value="zh_ai_control")
         self.connection_state_var = tk.StringVar(value="Disconnected")
         self.command_input_var = tk.StringVar(value='Session.Status {}')
@@ -195,13 +196,33 @@ class BotUIApp:
         ttk.Button(controls, text="Query Enemies", command=lambda: self._query("game.visible_enemies", quiet=False)).grid(
             row=0, column=5, sticky="ew", padx=2, pady=2
         )
-        ttk.Checkbutton(controls, text="Polling", variable=self.poll_enabled).grid(row=1, column=0, sticky="w")
-        ttk.Label(controls, text="Interval ms").grid(row=1, column=1, sticky="e")
-        ttk.Entry(controls, textvariable=self.poll_interval_ms, width=8).grid(row=1, column=2, sticky="w")
-        ttk.Checkbutton(controls, text="Use Streaming", variable=self.stream_enabled, command=self._toggle_streaming).grid(
-            row=1, column=3, columnspan=2, sticky="w"
+        ttk.Label(controls, text="Queue Count (1-9)").grid(row=1, column=0, sticky="e")
+        tk.Spinbox(controls, from_=1, to=9, textvariable=self.queue_count_var, width=5).grid(row=1, column=1, sticky="w")
+        ttk.Button(controls, text="Queue Soldiers", command=self._queue_soldiers_all_barracks).grid(
+            row=1, column=2, columnspan=2, sticky="ew", padx=2, pady=2
         )
-        ttk.Checkbutton(controls, text="Debug Inbound", variable=self.debug_inbound).grid(row=2, column=0, sticky="w")
+        ttk.Button(controls, text="Queue Quads", command=self._queue_quads_all_war_factories).grid(
+            row=1, column=4, columnspan=2, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(controls, text="Queue RPG", command=self._queue_rpg_troopers_all_barracks).grid(
+            row=2, column=2, columnspan=2, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(controls, text="Queue Scorpions", command=self._queue_scorpions_all_war_factories).grid(
+            row=2, column=4, columnspan=2, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(controls, text="Build Worker (CC)", command=self._build_worker_command_center).grid(
+            row=3, column=0, columnspan=2, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(controls, text="Build Worker (All Stashes)", command=self._build_worker_supply_stash).grid(
+            row=3, column=2, columnspan=2, sticky="ew", padx=2, pady=2
+        )
+        ttk.Checkbutton(controls, text="Polling", variable=self.poll_enabled).grid(row=4, column=0, sticky="w")
+        ttk.Label(controls, text="Interval ms").grid(row=4, column=1, sticky="e")
+        ttk.Entry(controls, textvariable=self.poll_interval_ms, width=8).grid(row=4, column=2, sticky="w")
+        ttk.Checkbutton(controls, text="Use Streaming", variable=self.stream_enabled, command=self._toggle_streaming).grid(
+            row=4, column=3, columnspan=2, sticky="w"
+        )
+        ttk.Checkbutton(controls, text="Debug Inbound", variable=self.debug_inbound).grid(row=5, column=0, sticky="w")
 
         cmd_row = ttk.LabelFrame(bottom, text="Command Input", padding=8)
         cmd_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -282,6 +303,35 @@ class BotUIApp:
         self._log("Attempting SOLO Back (single-player back variants).")
         for control_id in SOLO_BACK_CONTROL_IDS:
             self._menu_click(control_id)
+
+    def _get_queue_count(self) -> int:
+        try:
+            count = int(self.queue_count_var.get())
+        except Exception:  # noqa: BLE001
+            count = 1
+        return max(1, min(9, count))
+
+    def _queue_soldiers_all_barracks(self) -> None:
+        count = self._get_queue_count()
+        self._send_session_command("Game.QueueSoldiersAllBarracks", {"count": count})
+
+    def _queue_quads_all_war_factories(self) -> None:
+        count = self._get_queue_count()
+        self._send_session_command("Game.QueueQuadsAllWarFactories", {"count": count})
+
+    def _queue_rpg_troopers_all_barracks(self) -> None:
+        count = self._get_queue_count()
+        self._send_session_command("Game.QueueRpgTroopersAllBarracks", {"count": count})
+
+    def _queue_scorpions_all_war_factories(self) -> None:
+        count = self._get_queue_count()
+        self._send_session_command("Game.QueueScorpionsAllWarFactories", {"count": count})
+
+    def _build_worker_command_center(self) -> None:
+        self._send_session_command("Game.BuildWorker", {"producer_kind": "command_center"})
+
+    def _build_worker_supply_stash(self) -> None:
+        self._send_session_command("Game.BuildWorker", {"producer_kind": "supply_stash"})
 
     def _send_session_command(self, cmd: str, args: dict[str, Any], quiet: bool = False) -> None:
         if not self._hello_ok:
