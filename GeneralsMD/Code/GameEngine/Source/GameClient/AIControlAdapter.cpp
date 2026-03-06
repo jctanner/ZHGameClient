@@ -509,7 +509,8 @@ namespace
 						"game_queue_unit",
 						"game_supply_build",
 						"game_supply_build_smart",
-						"game_barracks_build_smart"
+						"game_barracks_build_smart",
+						"game_arms_dealer_build_smart"
 					})}
 				};
 				sendJsonLine(reply);
@@ -708,6 +709,18 @@ namespace
 			{
 				std::string reason;
 				if (!executeGameBuildCommandCenterSmart(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.BuildArmsDealerSmart")
+			{
+				std::string reason;
+				if (!executeGameBuildArmsDealerSmart(message, reason))
 				{
 					sendActionAck(requestId, false, "invalid_state", reason.c_str());
 					return;
@@ -1405,6 +1418,14 @@ namespace
 			bool found;
 		};
 
+		struct NearbyStructureClearanceContext
+		{
+			const Coord3D* targetPos;
+			Real candidateRadius;
+			Real extraPadding;
+			bool tooClose;
+		};
+
 		static void findNearbyBarracksCallback(Object* obj, void* userData)
 		{
 			if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
@@ -1447,6 +1468,55 @@ namespace
 			NearbyBarracksSearchContext ctx = { pos, maxDistance * maxDistance, false };
 			player->iterateObjects(findNearbyBarracksCallback, &ctx);
 			return ctx.found;
+		}
+
+		static void findNearbyStructureClearanceCallback(Object* obj, void* userData)
+		{
+			if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+			{
+				return;
+			}
+			if (!obj->isKindOf(KINDOF_STRUCTURE))
+			{
+				return;
+			}
+
+			NearbyStructureClearanceContext* ctx = static_cast<NearbyStructureClearanceContext*>(userData);
+			if (ctx->tooClose || ctx->targetPos == nullptr)
+			{
+				return;
+			}
+
+			const Coord3D* pos = obj->getPosition();
+			if (pos == nullptr)
+			{
+				return;
+			}
+
+			const Real existingRadius = obj->getGeometryInfo().getBoundingCircleRadius();
+			const Real required = ctx->candidateRadius + existingRadius + ctx->extraPadding;
+			if (distanceSq2D(ctx->targetPos, pos) <= required * required)
+			{
+				ctx->tooClose = true;
+			}
+		}
+
+		static bool hasOwnedStructureTooClose(Player* player, const Coord3D* pos, const ThingTemplate* templateToPlace, Real extraPadding)
+		{
+			if (player == nullptr || pos == nullptr || templateToPlace == nullptr)
+			{
+				return false;
+			}
+
+			Real candidateRadius = templateToPlace->getTemplateGeometryInfo().getBoundingCircleRadius();
+			if (candidateRadius < 1.0f)
+			{
+				candidateRadius = 40.0f;
+			}
+
+			NearbyStructureClearanceContext ctx = { pos, candidateRadius, extraPadding, false };
+			player->iterateObjects(findNearbyStructureClearanceCallback, &ctx);
+			return ctx.tooClose;
 		}
 
 		Object* chooseClosestSupplySource(
@@ -1819,6 +1889,72 @@ namespace
 			return std::string();
 		}
 
+		std::string inferArmsDealerTemplateForPlayer(const Player* player, Object* worker = nullptr) const
+		{
+			if (player == nullptr || TheThingFactory == nullptr)
+			{
+				return std::string();
+			}
+
+			auto canBuildTemplate = [&](const std::string& templateName) -> bool
+			{
+				if (templateName.empty())
+				{
+					return false;
+				}
+				if (worker == nullptr || TheBuildAssistant == nullptr)
+				{
+					return true;
+				}
+				const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(templateName.c_str()), false);
+				if (tt == nullptr)
+				{
+					return false;
+				}
+				return TheBuildAssistant->isPossibleToMakeUnit(worker, tt) == TRUE;
+			};
+
+			const std::string side = player->getSide().str();
+			const std::string baseSide = player->getBaseSide().str();
+			if (containsIgnoreCase(side, "gla") || containsIgnoreCase(baseSide, "gla"))
+			{
+				if (canBuildTemplate("GLAArmsDealer"))
+				{
+					return "GLAArmsDealer";
+				}
+			}
+
+			const char* knownCandidates[] = {
+				"GLAArmsDealer"
+			};
+			for (const char* candidate : knownCandidates)
+			{
+				if (canBuildTemplate(candidate))
+				{
+					return candidate;
+				}
+			}
+
+			if (worker != nullptr && TheBuildAssistant != nullptr)
+			{
+				for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
+				{
+					const std::string name = tt->getName().str();
+					if (!containsIgnoreCase(name, "arms") && !containsIgnoreCase(name, "dealer"))
+					{
+						continue;
+					}
+					if (TheBuildAssistant->isPossibleToMakeUnit(worker, tt) != TRUE)
+					{
+						continue;
+					}
+					return name;
+				}
+			}
+
+			return std::string();
+		}
+
 		struct CommandCenterSearchContext
 		{
 			Object* firstCommandCenter;
@@ -1892,6 +2028,7 @@ namespace
 			best.z = 0.0f;
 			const bool spacingBarracks = containsIgnoreCase(buildingTemplate->getName().str(), "barracks");
 			const Real barracksSpacingRadius = 280.0f;
+			const Real structurePadding = 36.0f;
 
 			for (Int pass = 0; pass < 2 && !found; ++pass)
 			{
@@ -1911,6 +2048,10 @@ namespace
 							continue;
 						}
 						if (enforceSpacing && hasNearbyOwnedBarracks(player, &candidate, barracksSpacingRadius))
+						{
+							continue;
+						}
+						if (hasOwnedStructureTooClose(player, &candidate, buildingTemplate, structurePadding))
 						{
 							continue;
 						}
@@ -2892,6 +3033,101 @@ namespace
 				}
 
 				const Coord3D* moveTarget = anchor->getPosition();
+				if (moveTarget == nullptr)
+				{
+					reason = "anchor_not_found";
+					return false;
+				}
+				Coord3D target = *moveTarget;
+				target.z = 0.0f;
+				ai->aiMoveToPosition(&target, CMD_FROM_AI);
+				return true;
+			}
+
+			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
+		}
+
+		bool executeGameBuildArmsDealerSmart(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheThingFactory == nullptr || TheGameLogic == nullptr || TheBuildAssistant == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			Object* worker = resolveWorkerFromArgs(player, message, true, reason);
+			if (worker == nullptr)
+			{
+				return false;
+			}
+
+			std::string buildingTemplateName;
+			Int requestedAnchorId = -1;
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				buildingTemplateName = getJsonString(*argsIt, "building_template");
+				const auto anchorIdIt = argsIt->find("anchor_object_id");
+				if (anchorIdIt != argsIt->end() && anchorIdIt->is_number_integer())
+				{
+					requestedAnchorId = anchorIdIt->get<Int>();
+				}
+			}
+			if (buildingTemplateName.empty())
+			{
+				buildingTemplateName = inferArmsDealerTemplateForPlayer(player, worker);
+			}
+			if (buildingTemplateName.empty())
+			{
+				reason = "arms_dealer_template_unknown";
+				return false;
+			}
+
+			const ThingTemplate* buildingTemplate = TheThingFactory->findTemplate(AsciiString(buildingTemplateName.c_str()), false);
+			if (buildingTemplate == nullptr)
+			{
+				reason = "building_template_not_found";
+				return false;
+			}
+
+			Object* anchor = nullptr;
+			if (requestedAnchorId > 0)
+			{
+				anchor = TheGameLogic->findObjectByID(static_cast<ObjectID>(requestedAnchorId));
+				if (anchor == nullptr)
+				{
+					reason = "anchor_not_found";
+					return false;
+				}
+				if (anchor->getControllingPlayer() != player)
+				{
+					reason = "anchor_not_owned";
+					return false;
+				}
+			}
+			if (anchor == nullptr)
+			{
+				anchor = findPrimaryCommandCenter(player);
+			}
+
+			Coord3D location;
+			Real angle = 0.0f;
+			if (!findBuildLocationAroundAnchor(player, worker, anchor, buildingTemplate, location, angle))
+			{
+				AIUpdateInterface* ai = worker->getAI();
+				if (ai == nullptr)
+				{
+					reason = "worker_no_ai";
+					return false;
+				}
+
+				const Coord3D* moveTarget = anchor != nullptr ? anchor->getPosition() : worker->getPosition();
 				if (moveTarget == nullptr)
 				{
 					reason = "anchor_not_found";
