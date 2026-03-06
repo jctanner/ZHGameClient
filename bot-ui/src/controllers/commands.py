@@ -36,3 +36,8 @@ SINGLE_PLAYER_CONTROL_IDS = [
     "MainMenu.wnd:ButtonSinglePlayer",
     "MainMenu.wnd:ButtonSoloPlay",
 ]
+
+SOLO_BACK_CONTROL_IDS = [
+    "MainMenu.wnd:ButtonSingleBack",
+    "ButtonBack",
+]

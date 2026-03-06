@@ -14,6 +14,7 @@ from controllers.commands import (
     MAIN_MENU_BACK_CONTROL_IDS,
     PLAY_GAME_CONTROL_IDS,
     SINGLE_PLAYER_CONTROL_IDS,
+    SOLO_BACK_CONTROL_IDS,
 )
 from protocol.client import PipeClient
 from protocol.messages import hello_message, session_command_message, subscribe_message, unsubscribe_message
@@ -104,7 +105,7 @@ class BotUIApp:
         ttk.Button(nav, text="SOLO PLAY", command=self._go_single_player).grid(
             row=1, column=0, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(nav, text="Main Skirmish", command=lambda: self._menu_click(MAIN_MENU_ACTIONS["main_skirmish"])).grid(
+        ttk.Button(nav, text="Skirmish", command=lambda: self._menu_click(MAIN_MENU_ACTIONS["main_skirmish"])).grid(
             row=1, column=1, sticky="ew", padx=2, pady=2
         )
         ttk.Button(nav, text="LAN Create", command=lambda: self._menu_click(LAN_ACTIONS["lan_create"])).grid(
@@ -124,6 +125,7 @@ class BotUIApp:
         )
         ttk.Button(nav, text="PLAY GAME", command=self._play_game).grid(row=4, column=1, sticky="ew", padx=2, pady=2)
         ttk.Button(nav, text="MAIN MENU", command=self._go_main_menu).grid(row=5, column=0, sticky="ew", padx=2, pady=2)
+        ttk.Button(nav, text="SOLO Back", command=self._go_solo_back).grid(row=5, column=1, sticky="ew", padx=2, pady=2)
 
         players = ttk.LabelFrame(parent, text="Players", padding=8)
         players.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
@@ -273,6 +275,11 @@ class BotUIApp:
         for control_id in SINGLE_PLAYER_CONTROL_IDS:
             self._menu_click(control_id)
 
+    def _go_solo_back(self) -> None:
+        self._log("Attempting SOLO Back (single-player back variants).")
+        for control_id in SOLO_BACK_CONTROL_IDS:
+            self._menu_click(control_id)
+
     def _send_session_command(self, cmd: str, args: dict[str, Any], quiet: bool = False) -> None:
         if not self._hello_ok:
             if not quiet:
@@ -376,6 +383,13 @@ class BotUIApp:
                 self._refresh_player_table()
                 self.redraw_map()
                 self._dirty_view = False
+                self._last_redraw_monotonic = now
+            elif (
+                self.map_renderer is not None
+                and self.map_renderer.has_active_animation()
+                and now - self._last_redraw_monotonic >= 0.033
+            ):
+                self.redraw_map()
                 self._last_redraw_monotonic = now
         except Exception as exc:  # noqa: BLE001
             self._log(f"process_incoming error: {exc}")
