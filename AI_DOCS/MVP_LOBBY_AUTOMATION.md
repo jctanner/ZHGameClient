@@ -165,6 +165,30 @@ python .\ZHGameClient\scripts\ai\zhctl.py build-supply-stash-smart --supply-sour
 python .\ZHGameClient\scripts\ai\zhctl.py build-barracks-smart --worker-object-id 12345 --pretty
 python .\ZHGameClient\scripts\ai\zhctl.py build-barracks-smart --anchor-object-id 999 --pretty
 python .\ZHGameClient\scripts\ai\zhctl.py build-barracks-smart --building-template GLABarracks --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py build-command-center-smart --pretty
 python .\ZHGameClient\scripts\ai\zhctl.py dozer-construct --supply-source-id 67890 --pretty
 python .\ZHGameClient\scripts\ai\zhctl.py dozer-construct --building-template AmericaSupplyCenter --pretty
+```
+
+## Loop Primitives (Economy + Army + Attack)
+
+Use these as the minimum command/query set for a simple loop controller:
+
+1. `query --path game.objects` (inventory of owned units/buildings, IDs, template names, positions, idle state)
+2. `query --path game.visible_enemies` (visible enemy IDs/types/positions)
+3. `build-supply-stash-smart` (supply drop-off)
+4. `build-worker --producer-kind any --producer-object-id <stash_id> --unit-template GLAInfantryWorker` (GLA stash worker production)
+5. `build-barracks-smart` (barracks)
+6. `queue-unit --producer-kind any --producer-object-id <barracks_id> --unit-template GLAInfantryRebel` (soldier production)
+7. `attack-move --object-ids <ids...> --x <target_x> --y <target_y>` (army pressure)
+
+Examples:
+
+```powershell
+python .\ZHGameClient\scripts\ai\zhctl.py query --path game.objects --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py query --path game.visible_enemies --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py build-command-center-smart --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py build-worker --producer-kind any --producer-object-id 12345 --unit-template GLAInfantryWorker --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py queue-unit --producer-kind any --producer-object-id 23456 --unit-template GLAInfantryRebel --pretty
+python .\ZHGameClient\scripts\ai\zhctl.py attack-move --object-ids 30001 30002 30003 --x 512.0 --y 512.0 --pretty
 ```
