@@ -54,6 +54,7 @@ class BotUIApp:
         self.stream_enabled = tk.BooleanVar(value=False)
         self.debug_inbound = tk.BooleanVar(value=True)
         self.queue_count_var = tk.IntVar(value=1)
+        self.target_player_index_var = tk.IntVar(value=0)
         self.pipe_name_var = tk.StringVar(value="zh_ai_control")
         self.connection_state_var = tk.StringVar(value="Disconnected")
         self.command_input_var = tk.StringVar(value='Session.Status {}')
@@ -210,11 +211,16 @@ class BotUIApp:
         ttk.Button(controls, text="Queue Scorpions", command=self._queue_scorpions_all_war_factories).grid(
             row=2, column=4, columnspan=2, sticky="ew", padx=2, pady=2
         )
+        ttk.Label(controls, text="Target Player Idx").grid(row=2, column=0, sticky="e")
+        tk.Spinbox(controls, from_=0, to=11, textvariable=self.target_player_index_var, width=5).grid(row=2, column=1, sticky="w")
         ttk.Button(controls, text="Build Worker (CC)", command=self._build_worker_command_center).grid(
             row=3, column=0, columnspan=2, sticky="ew", padx=2, pady=2
         )
         ttk.Button(controls, text="Build Worker (All Stashes)", command=self._build_worker_supply_stash).grid(
             row=3, column=2, columnspan=2, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(controls, text="AttackMove -> Player", command=self._attackmove_all_combat_to_player).grid(
+            row=3, column=4, columnspan=2, sticky="ew", padx=2, pady=2
         )
         ttk.Checkbutton(controls, text="Polling", variable=self.poll_enabled).grid(row=4, column=0, sticky="w")
         ttk.Label(controls, text="Interval ms").grid(row=4, column=1, sticky="e")
@@ -332,6 +338,14 @@ class BotUIApp:
 
     def _build_worker_supply_stash(self) -> None:
         self._send_session_command("Game.BuildWorker", {"producer_kind": "supply_stash"})
+
+    def _attackmove_all_combat_to_player(self) -> None:
+        try:
+            target = int(self.target_player_index_var.get())
+        except Exception:  # noqa: BLE001
+            target = 0
+        target = max(0, target)
+        self._send_session_command("Game.AttackMoveAllCombatToPlayer", {"target_player_index": target})
 
     def _send_session_command(self, cmd: str, args: dict[str, Any], quiet: bool = False) -> None:
         if not self._hello_ok:
