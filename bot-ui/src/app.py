@@ -174,7 +174,7 @@ class BotUIApp:
 
         controls = ttk.LabelFrame(bottom, text="Bot Controls", padding=8)
         controls.grid(row=0, column=0, sticky="ew")
-        for i in range(5):
+        for i in range(6):
             controls.grid_columnconfigure(i, weight=1)
 
         ttk.Button(controls, text="Build Stash", command=lambda: self._send_session_command("Game.BuildSupplyStashSmart", {})).grid(
@@ -186,11 +186,14 @@ class BotUIApp:
         ttk.Button(controls, text="Build Command", command=lambda: self._send_session_command("Game.BuildCommandCenterSmart", {})).grid(
             row=0, column=2, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(controls, text="Query Objects", command=lambda: self._query("game.objects_all", quiet=False)).grid(
+        ttk.Button(controls, text="Build Arms Dealer", command=lambda: self._send_session_command("Game.BuildArmsDealerSmart", {})).grid(
             row=0, column=3, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(controls, text="Query Enemies", command=lambda: self._query("game.visible_enemies", quiet=False)).grid(
+        ttk.Button(controls, text="Query Objects", command=lambda: self._query("game.objects_all", quiet=False)).grid(
             row=0, column=4, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(controls, text="Query Enemies", command=lambda: self._query("game.visible_enemies", quiet=False)).grid(
+            row=0, column=5, sticky="ew", padx=2, pady=2
         )
         ttk.Checkbutton(controls, text="Polling", variable=self.poll_enabled).grid(row=1, column=0, sticky="w")
         ttk.Label(controls, text="Interval ms").grid(row=1, column=1, sticky="e")
