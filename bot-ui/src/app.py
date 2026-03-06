@@ -43,8 +43,10 @@ class BotUIApp:
         self._request_queue: "queue.PriorityQueue[tuple[int, int, dict[str, Any]]]" = queue.PriorityQueue()
         self._request_seq = 0
         self._request_worker_started = False
-        self._poll_paths = ["game.objects", "game.visible_enemies", "game.players", "game.resources", "game.status"]
+        self._poll_paths = ["game.objects_all", "game.objects", "game.players", "game.resources", "game.status"]
         self._poll_path_index = 0
+        self._map_orientations = ["flip_y", "normal", "flip_x", "flip_xy"]
+        self._map_orientation_index = 0
 
         self.poll_enabled = tk.BooleanVar(value=True)
         self.poll_interval_ms = tk.IntVar(value=1000)
@@ -151,10 +153,13 @@ class BotUIApp:
     def _build_right_top_map(self, parent: ttk.Frame) -> None:
         map_frame = ttk.LabelFrame(parent, text="Map", padding=6)
         map_frame.grid(row=0, column=0, sticky="nsew")
-        map_frame.grid_rowconfigure(0, weight=1)
+        map_frame.grid_rowconfigure(1, weight=1)
         map_frame.grid_columnconfigure(0, weight=1)
+        toolbar = ttk.Frame(map_frame)
+        toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
+        ttk.Button(toolbar, text="Rotate/Flip Map", command=self._cycle_map_orientation).grid(row=0, column=0, sticky="w")
         canvas = tk.Canvas(map_frame, bg="#0c1318", highlightthickness=0)
-        canvas.grid(row=0, column=0, sticky="nsew")
+        canvas.grid(row=1, column=0, sticky="nsew")
         self.map_renderer = MapRenderer(canvas)
         self.map_canvas = canvas
         canvas.bind("<Configure>", lambda _evt: self.redraw_map())
@@ -179,7 +184,7 @@ class BotUIApp:
         ttk.Button(controls, text="Build Command", command=lambda: self._send_session_command("Game.BuildCommandCenterSmart", {})).grid(
             row=0, column=2, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(controls, text="Query Objects", command=lambda: self._query("game.objects", quiet=False)).grid(
+        ttk.Button(controls, text="Query Objects", command=lambda: self._query("game.objects_all", quiet=False)).grid(
             row=0, column=3, sticky="ew", padx=2, pady=2
         )
         ttk.Button(controls, text="Query Enemies", command=lambda: self._query("game.visible_enemies", quiet=False)).grid(
@@ -449,7 +454,42 @@ class BotUIApp:
         if self.debug_inbound.get():
             self._log(f"apply query path={path or '?'} payload_type={type(payload).__name__}")
         if path == "game.objects":
+            if isinstance(payload, dict):
+                units_n = len(payload.get("units", [])) if isinstance(payload.get("units"), list) else 0
+                bld_n = len(payload.get("buildings", [])) if isinstance(payload.get("buildings"), list) else 0
+                self._log(f"game.objects counts units={units_n} buildings={bld_n}")
+                coords: list[tuple[float, float]] = []
+                for key in ("units", "buildings"):
+                    rows = payload.get(key)
+                    if not isinstance(rows, list):
+                        continue
+                    for row in rows:
+                        if not isinstance(row, dict):
+                            continue
+                        x = row.get("x")
+                        y = row.get("y")
+                        if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+                            coords.append((float(x), float(y)))
+                if coords:
+                    min_x = min(p[0] for p in coords)
+                    max_x = max(p[0] for p in coords)
+                    min_y = min(p[1] for p in coords)
+                    max_y = max(p[1] for p in coords)
+                    self._log(f"game.objects extents x=[{min_x:.1f},{max_x:.1f}] y=[{min_y:.1f},{max_y:.1f}]")
             self.store.update_owned_objects(payload)
+        elif path == "game.objects_all":
+            if isinstance(payload, dict):
+                players = payload.get("players")
+                total_units = 0
+                total_buildings = 0
+                if isinstance(players, list):
+                    for row in players:
+                        if not isinstance(row, dict):
+                            continue
+                        total_units += len(row.get("units", [])) if isinstance(row.get("units"), list) else 0
+                        total_buildings += len(row.get("buildings", [])) if isinstance(row.get("buildings"), list) else 0
+                self._log(f"game.objects_all counts units={total_units} buildings={total_buildings}")
+            self.store.update_objects_all(payload)
         elif path == "game.visible_enemies":
             self.store.update_visible_enemies(payload)
         elif path == "game.players":
@@ -462,6 +502,7 @@ class BotUIApp:
             if isinstance(payload, dict):
                 # Opportunistic parsing for mixed aggregate payloads.
                 self.store.update_owned_objects(payload)
+                self.store.update_objects_all(payload)
                 self.store.update_visible_enemies(payload)
                 self.store.update_players(payload)
                 self.store.update_resources(payload)
@@ -478,6 +519,12 @@ class BotUIApp:
                     return str(payload[key])
         # Heuristic when adapter doesn't echo path.
         if isinstance(payload, dict):
+            if "players" in payload:
+                players_node = payload.get("players")
+                if isinstance(players_node, list) and players_node and isinstance(players_node[0], dict):
+                    first = players_node[0]
+                    if "units" in first or "buildings" in first:
+                        return "game.objects_all"
             if "buildings" in payload and "units" in payload:
                 return "game.objects"
             if "enemies" in payload:
@@ -539,6 +586,14 @@ class BotUIApp:
     def redraw_map(self) -> None:
         if self.map_renderer is not None:
             self.map_renderer.draw(self.store)
+
+    def _cycle_map_orientation(self) -> None:
+        if self.map_renderer is None:
+            return
+        self._map_orientation_index = (self._map_orientation_index + 1) % len(self._map_orientations)
+        self.map_renderer.orientation = self._map_orientations[self._map_orientation_index]
+        self._log(f"Map orientation set to {self.map_renderer.orientation}")
+        self.redraw_map()
 
     def _log(self, message: str) -> None:
         if self.log is not None:

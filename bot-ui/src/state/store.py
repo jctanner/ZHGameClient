@@ -128,6 +128,7 @@ class PlayerMeta:
 class UIStore:
     owned_objects: dict[int, WorldObject] = field(default_factory=dict)
     visible_enemies: dict[int, WorldObject] = field(default_factory=dict)
+    all_objects: dict[int, WorldObject] = field(default_factory=dict)
     interesting_points: list[tuple[float, float]] = field(default_factory=list)
     players: dict[int, PlayerMeta] = field(default_factory=dict)
     session_state: dict[str, Any] = field(default_factory=dict)
@@ -203,16 +204,83 @@ class UIStore:
             x, y = _extract_xy(raw)
             obj_class = str(raw.get("class", ""))
             template = str(raw.get("template", raw.get("template_name", "")))
+            lower_class = obj_class.lower()
+            under_construction = bool(raw.get("under_construction", False))
+            kind = "building" if (under_construction or "structure" in lower_class or "building" in lower_class) else "enemy"
             updated[object_id] = WorldObject(
                 object_id=object_id,
                 template=template,
                 obj_class=obj_class,
-                owner_player_index=None,
+                owner_player_index=int(raw["player_index"]) if isinstance(raw.get("player_index"), int) else None,
                 x=x,
                 y=y,
-                kind="enemy",
+                kind=kind,
             )
         self.visible_enemies = updated
+
+    def update_objects_all(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        players = payload.get("players")
+        if not isinstance(players, list):
+            return
+        updated: dict[int, WorldObject] = {}
+        for row in players:
+            if not isinstance(row, dict):
+                continue
+            pidx = row.get("player_index")
+            if not isinstance(pidx, int):
+                continue
+            units = row.get("units") if isinstance(row.get("units"), list) else []
+            buildings = row.get("buildings") if isinstance(row.get("buildings"), list) else []
+            for raw in units:
+                if not isinstance(raw, dict):
+                    continue
+                object_id = _extract_id(raw)
+                if object_id < 0:
+                    continue
+                x, y = _extract_xy(raw)
+                obj_class = str(raw.get("class", ""))
+                template = str(raw.get("template", raw.get("template_name", "")))
+                hp_cur = raw.get("hp_cur", raw.get("hp"))
+                hp_max = raw.get("hp_max")
+                key = self._reserve_object_key(updated, pidx, object_id)
+                updated[key] = WorldObject(
+                    object_id=object_id,
+                    template=template,
+                    obj_class=obj_class,
+                    owner_player_index=pidx,
+                    x=x,
+                    y=y,
+                    hp_cur=float(hp_cur) if isinstance(hp_cur, (int, float)) else None,
+                    hp_max=float(hp_max) if isinstance(hp_max, (int, float)) else None,
+                    kind="unit",
+                )
+            for raw in buildings:
+                if not isinstance(raw, dict):
+                    continue
+                object_id = _extract_id(raw)
+                if object_id < 0:
+                    continue
+                x, y = _extract_xy(raw)
+                obj_class = str(raw.get("class", ""))
+                template = str(raw.get("template", raw.get("template_name", "")))
+                hp_cur = raw.get("hp_cur", raw.get("hp"))
+                hp_max = raw.get("hp_max")
+                key = self._reserve_object_key(updated, pidx, object_id)
+                updated[key] = WorldObject(
+                    object_id=object_id,
+                    template=template,
+                    obj_class=obj_class,
+                    owner_player_index=pidx,
+                    x=x,
+                    y=y,
+                    hp_cur=float(hp_cur) if isinstance(hp_cur, (int, float)) else None,
+                    hp_max=float(hp_max) if isinstance(hp_max, (int, float)) else None,
+                    kind="building",
+                )
+        self.all_objects = updated
+        self._recompute_player_aggregates()
 
     def update_players(self, payload: Any) -> None:
         players = self._extract_list(payload, "players")
@@ -313,20 +381,25 @@ class UIStore:
             self.map_height = float(height)
 
     def _recompute_player_aggregates(self) -> None:
+        source_objects = self.all_objects if self.all_objects else self.owned_objects
         for meta in self.players.values():
-            meta.unit_count = 0
-            meta.building_count = 0
             xs: list[float] = []
             ys: list[float] = []
-            for obj in self.owned_objects.values():
+            derived_units = 0
+            derived_buildings = 0
+            for obj in source_objects.values():
                 if obj.owner_player_index != meta.player_index:
                     continue
                 if obj.kind == "building":
-                    meta.building_count += 1
+                    derived_buildings += 1
                 else:
-                    meta.unit_count += 1
+                    derived_units += 1
                 xs.append(obj.x)
                 ys.append(obj.y)
+            # Only override table counts when we actually observed objects for this player.
+            if derived_units > 0 or derived_buildings > 0:
+                meta.unit_count = derived_units
+                meta.building_count = derived_buildings
             if xs and ys:
                 meta.map_position = (sum(xs) / len(xs), sum(ys) / len(ys))
 
@@ -337,3 +410,13 @@ class UIStore:
             if isinstance(value, list):
                 return value
         return None
+
+    @staticmethod
+    def _reserve_object_key(existing: dict[int, WorldObject], player_index: int, object_id: int) -> int:
+        if object_id not in existing:
+            return object_id
+        # Some payloads can reuse object ids across players; keep all entries.
+        key = (player_index * 10_000_000) + object_id
+        while key in existing:
+            key += 1
+        return key

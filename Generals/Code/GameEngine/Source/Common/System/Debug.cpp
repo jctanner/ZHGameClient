@@ -374,16 +374,24 @@ void DebugInit(int flags)
 			return;
 
 		char dirbuf[ _MAX_PATH ];
-		::GetModuleFileName( NULL, dirbuf, sizeof( dirbuf ) );
-		char *pEnd = dirbuf + strlen( dirbuf );
-		while( pEnd != dirbuf ) 
+		strcpy(dirbuf, "D:\\logs\\");
+		if (!::CreateDirectoryA("D:\\logs", nullptr))
 		{
-			if( *pEnd == '\\' ) 
+			const DWORD err = ::GetLastError();
+			if (err != ERROR_ALREADY_EXISTS)
 			{
-				*(pEnd + 1) = 0;
-				break;
+				::GetModuleFileName( NULL, dirbuf, sizeof( dirbuf ) );
+				char *pEnd = dirbuf + strlen( dirbuf );
+				while( pEnd != dirbuf ) 
+				{
+					if( *pEnd == '\\' ) 
+					{
+						*(pEnd + 1) = 0;
+						break;
+					}
+					pEnd--;
+				}
 			}
-			pEnd--;
 		}
 
 		strcpy(theLogFileNamePrev, dirbuf);
