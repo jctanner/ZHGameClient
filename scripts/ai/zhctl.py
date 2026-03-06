@@ -394,6 +394,8 @@ def cmd_build_worker(args: argparse.Namespace) -> int:
         req_args["player_index"] = args.player_index
     if args.producer_object_id is not None:
         req_args["producer_object_id"] = args.producer_object_id
+    if args.producer_kind:
+        req_args["producer_kind"] = args.producer_kind
     if args.unit_template:
         req_args["unit_template"] = args.unit_template
 
@@ -527,6 +529,54 @@ def cmd_build_barracks_smart(args: argparse.Namespace) -> int:
         conn.close()
 
 
+def cmd_build_command_center_smart(args: argparse.Namespace) -> int:
+    req_args: dict[str, Any] = {}
+    if args.player_index is not None:
+        req_args["player_index"] = args.player_index
+    if args.worker_object_id is not None:
+        req_args["worker_object_id"] = args.worker_object_id
+    if args.anchor_object_id is not None:
+        req_args["anchor_object_id"] = args.anchor_object_id
+    if args.building_template:
+        req_args["building_template"] = args.building_template
+
+    conn = open_pipe(args.pipe_name, args.timeout_ms)
+    try:
+        send_hello(conn, args.timeout_ms)
+        resp = send_session_command(conn, "Game.BuildCommandCenterSmart", req_args, args.timeout_ms)
+        _print_json(resp, args.pretty)
+        return 0
+    finally:
+        conn.close()
+
+
+def cmd_attack_move(args: argparse.Namespace) -> int:
+    if args.x is None or args.y is None:
+        raise ValueError("--x and --y are required for command 'attack-move'.")
+
+    req_args: dict[str, Any] = {
+        "x": args.x,
+        "y": args.y,
+    }
+    if args.player_index is not None:
+        req_args["player_index"] = args.player_index
+    if args.object_id is not None:
+        req_args["object_id"] = args.object_id
+    if args.object_ids:
+        req_args["object_ids"] = args.object_ids
+    if "object_id" not in req_args and "object_ids" not in req_args:
+        raise ValueError("Either --object-id or --object-ids is required for command 'attack-move'.")
+
+    conn = open_pipe(args.pipe_name, args.timeout_ms)
+    try:
+        send_hello(conn, args.timeout_ms)
+        resp = send_session_command(conn, "Game.AttackMove", req_args, args.timeout_ms)
+        _print_json(resp, args.pretty)
+        return 0
+    finally:
+        conn.close()
+
+
 def cmd_lobby_mvp(args: argparse.Namespace) -> int:
     if args.exe_path:
         if not os.path.exists(args.exe_path):
@@ -575,6 +625,8 @@ def build_parser() -> argparse.ArgumentParser:
             "build-supply-stash",
             "build-supply-stash-smart",
             "build-barracks-smart",
+            "build-command-center-smart",
+            "attack-move",
             "main-click",
             "lan-click",
             "lan-name-set",
@@ -611,6 +663,8 @@ def build_parser() -> argparse.ArgumentParser:
             "game.faction",
             "game.resources",
             "game.units",
+            "game.objects",
+            "game.visible_enemies",
         ],
         default="game.status",
     )
@@ -622,6 +676,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--supply-source-id", type=int, default=None)
     parser.add_argument("--worker-object-id", type=int, default=None)
     parser.add_argument("--anchor-object-id", type=int, default=None)
+    parser.add_argument("--object-id", type=int, default=None)
+    parser.add_argument("--object-ids", nargs="*", type=int, default=[])
+    parser.add_argument("--x", type=float, default=None)
+    parser.add_argument("--y", type=float, default=None)
     parser.add_argument("--minimum-cash", type=int, default=1)
     parser.add_argument("--args-json", default="{}")
     parser.add_argument("--delay-ms", type=int, default=1000)
@@ -655,6 +713,8 @@ def main() -> int:
         "build-supply-stash": cmd_build_supply_stash,
         "build-supply-stash-smart": cmd_build_supply_stash_smart,
         "build-barracks-smart": cmd_build_barracks_smart,
+        "build-command-center-smart": cmd_build_command_center_smart,
+        "attack-move": cmd_attack_move,
         "main-click": cmd_main_click,
         "lan-click": cmd_lan_click,
         "lan-name-set": cmd_lan_name_set,

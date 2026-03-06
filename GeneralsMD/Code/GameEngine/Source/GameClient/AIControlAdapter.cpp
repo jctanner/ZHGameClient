@@ -310,6 +310,11 @@ namespace
 
 		void sendProtocolError(const std::string& requestId, const char* code, const char* reason)
 		{
+			DEBUG_LOG(("[AICTRL] protocol_error request_id=%s code=%s reason=%s",
+				requestId.c_str(),
+				code != nullptr ? code : "",
+				reason != nullptr ? reason : ""));
+
 			nlohmann::json reply = {
 				{"type", "Error"},
 				{"request_id", requestId},
@@ -321,6 +326,12 @@ namespace
 
 		void sendActionAck(const std::string& requestId, bool ok, const char* code = nullptr, const char* reason = nullptr)
 		{
+			DEBUG_LOG(("[AICTRL] action_ack request_id=%s ok=%d code=%s reason=%s",
+				requestId.c_str(),
+				ok ? 1 : 0,
+				code != nullptr ? code : "",
+				reason != nullptr ? reason : ""));
+
 			nlohmann::json reply = {
 				{"type", "ActionAck"},
 				{"request_id", requestId},
@@ -338,6 +349,8 @@ namespace
 
 		void sendQueryResult(const std::string& requestId, const nlohmann::json& result)
 		{
+			DEBUG_LOG(("[AICTRL] query_result request_id=%s ok=1", requestId.c_str()));
+
 			nlohmann::json reply = {
 				{"type", "QueryResult"},
 				{"request_id", requestId},
@@ -349,6 +362,11 @@ namespace
 
 		void sendQueryError(const std::string& requestId, const char* code, const char* reason)
 		{
+			DEBUG_LOG(("[AICTRL] query_result request_id=%s ok=0 code=%s reason=%s",
+				requestId.c_str(),
+				code != nullptr ? code : "",
+				reason != nullptr ? reason : ""));
+
 			nlohmann::json reply = {
 				{"type", "QueryResult"},
 				{"request_id", requestId},
@@ -364,12 +382,14 @@ namespace
 			const nlohmann::json message = nlohmann::json::parse(line, nullptr, false);
 			if (message.is_discarded() || !message.is_object())
 			{
+				DEBUG_LOG(("[AICTRL] recv invalid_json"));
 				sendProtocolError(std::string(), "bad_request", "invalid_json");
 				return;
 			}
 
 			const std::string type = getJsonString(message, "type");
 			const std::string requestId = getJsonString(message, "request_id");
+			DEBUG_LOG(("[AICTRL] recv type=%s request_id=%s", type.c_str(), requestId.c_str()));
 
 			if (type.empty())
 			{
@@ -424,6 +444,7 @@ namespace
 		void handleSessionCommand(const nlohmann::json& message, const std::string& requestId)
 		{
 			const std::string cmd = getJsonString(message, "cmd");
+			DEBUG_LOG(("[AICTRL] session_cmd request_id=%s cmd=%s", requestId.c_str(), cmd.c_str()));
 			if (cmd.empty())
 			{
 				sendActionAck(requestId, false, "bad_request", "missing_cmd");
@@ -589,6 +610,30 @@ namespace
 				return;
 			}
 
+			if (cmd == "Game.BuildCommandCenterSmart")
+			{
+				std::string reason;
+				if (!executeGameBuildCommandCenterSmart(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.AttackMove")
+			{
+				std::string reason;
+				if (!executeGameAttackMove(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
 			sendActionAck(requestId, false, "unsupported_cmd", "unsupported_session_command");
 		}
 
@@ -596,11 +641,17 @@ namespace
 		{
 			const PlayerType playerType = player->getPlayerType();
 			const bool isAi = (playerType == PLAYER_COMPUTER);
+			const Color playerColor = player->getPlayerColor();
+			const std::string displayName = unicodeToUtf8(const_cast<Player*>(player)->getPlayerDisplayName());
 			nlohmann::json local = {
 				{"player_index", player->getPlayerIndex()},
+				{"name", displayName},
 				{"player_name_key", KEYNAME(player->getPlayerNameKey()).str()},
 				{"side", player->getSide().str()},
 				{"base_side", player->getBaseSide().str()},
+				{"color", formatColorHex(playerColor)},
+				{"color_argb", static_cast<Int>(playerColor)},
+				{"color_hex", formatColorHex(playerColor)},
 				{"rank_level", player->getRankLevel()},
 				{"player_type", static_cast<Int>(playerType)},
 				{"player_type_name", isAi ? "computer" : "human"},
@@ -613,6 +664,39 @@ namespace
 				local["template_name"] = playerTemplate->getName().str();
 				local["template_side"] = playerTemplate->getSide().str();
 				local["template_base_side"] = playerTemplate->getBaseSide().str();
+			}
+
+			const GameSlot* slot = findSlotForPlayer(player);
+			if (slot != nullptr)
+			{
+				local["team_id"] = slot->getTeamNumber();
+				local["team"] = slot->getTeamNumber();
+				local["slot_color_index"] = slot->getColor();
+				local["slot_start_pos"] = slot->getStartPos();
+				local["start_pos_index"] = slot->getStartPos();
+				local["start_position_index"] = slot->getStartPos();
+				if (displayName.empty())
+				{
+					const std::string slotName = unicodeToUtf8(slot->getName());
+					if (!slotName.empty())
+					{
+						local["name"] = slotName;
+					}
+				}
+			}
+
+			nlohmann::json mapPos = buildPlayerMapPositionSummary(player);
+			if (!mapPos.is_null() && mapPos.is_object())
+			{
+				local["map_position"] = mapPos;
+				local["start_position"] = mapPos;
+				const auto xIt = mapPos.find("x");
+				const auto yIt = mapPos.find("y");
+				if (xIt != mapPos.end() && yIt != mapPos.end())
+				{
+					local["x"] = *xIt;
+					local["y"] = *yIt;
+				}
 			}
 
 			return local;
@@ -635,6 +719,174 @@ namespace
 				}
 			}
 			return nullptr;
+		}
+
+		static std::string formatColorHex(Color argb)
+		{
+			char buffer[16];
+			sprintf_s(buffer, "#%08X", static_cast<unsigned int>(argb));
+			return std::string(buffer);
+		}
+
+		static std::string unicodeToUtf8(const UnicodeString& text)
+		{
+			const WideChar* wide = text.str();
+			if (wide == nullptr || wide[0] == 0)
+			{
+				return std::string();
+			}
+
+			const int utf8LenWithNull = ::WideCharToMultiByte(
+				CP_UTF8,
+				0,
+				wide,
+				-1,
+				nullptr,
+				0,
+				nullptr,
+				nullptr);
+			if (utf8LenWithNull <= 1)
+			{
+				return std::string();
+			}
+
+			std::string out;
+			out.resize(static_cast<std::size_t>(utf8LenWithNull));
+			::WideCharToMultiByte(
+				CP_UTF8,
+				0,
+				wide,
+				-1,
+				&out[0],
+				utf8LenWithNull,
+				nullptr,
+				nullptr);
+			if (!out.empty() && out[out.size() - 1] == '\0')
+			{
+				out.resize(out.size() - 1);
+			}
+			return out;
+		}
+
+		const GameSlot* findSlotForPlayer(const Player* player) const
+		{
+			if (player == nullptr || TheGameInfo == nullptr)
+			{
+				return nullptr;
+			}
+
+			const Int idx = player->getPlayerIndex();
+			if (idx >= 0 && idx < MAX_SLOTS)
+			{
+				return TheGameInfo->getConstSlot(idx);
+			}
+			return nullptr;
+		}
+
+		nlohmann::json buildPlayerMapPositionSummary(const Player* player) const
+		{
+			nlohmann::json mapPos = nlohmann::json::object();
+			if (player == nullptr)
+			{
+				return mapPos;
+			}
+
+			struct PositionProbeContext
+			{
+				Bool hasCommandCenter;
+				Coord3D commandCenterPos;
+				Bool hasStructure;
+				Coord3D structurePos;
+				UnsignedInt count;
+				Real sumX;
+				Real sumY;
+				Real sumZ;
+			};
+
+			PositionProbeContext ctx;
+			ctx.hasCommandCenter = false;
+			ctx.commandCenterPos.x = 0.0f;
+			ctx.commandCenterPos.y = 0.0f;
+			ctx.commandCenterPos.z = 0.0f;
+			ctx.hasStructure = false;
+			ctx.structurePos.x = 0.0f;
+			ctx.structurePos.y = 0.0f;
+			ctx.structurePos.z = 0.0f;
+			ctx.count = 0;
+			ctx.sumX = 0.0f;
+			ctx.sumY = 0.0f;
+			ctx.sumZ = 0.0f;
+
+			auto callback = [](Object* obj, void* userData)
+			{
+				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+				{
+					return;
+				}
+
+				const Coord3D* pos = obj->getPosition();
+				if (pos == nullptr)
+				{
+					return;
+				}
+
+				PositionProbeContext* probe = static_cast<PositionProbeContext*>(userData);
+				probe->sumX += pos->x;
+				probe->sumY += pos->y;
+				probe->sumZ += pos->z;
+				++probe->count;
+
+				if (!probe->hasCommandCenter && obj->isKindOf(KINDOF_COMMANDCENTER))
+				{
+					probe->commandCenterPos = *pos;
+					probe->hasCommandCenter = true;
+				}
+				if (!probe->hasStructure && obj->isKindOf(KINDOF_STRUCTURE))
+				{
+					probe->structurePos = *pos;
+					probe->hasStructure = true;
+				}
+			};
+
+			const_cast<Player*>(player)->iterateObjects(callback, &ctx);
+
+			const GameSlot* slot = findSlotForPlayer(player);
+			if (slot != nullptr)
+			{
+				mapPos["start_pos_index"] = slot->getStartPos();
+				mapPos["start_position_index"] = slot->getStartPos();
+			}
+
+			if (ctx.hasCommandCenter)
+			{
+				mapPos["x"] = ctx.commandCenterPos.x;
+				mapPos["y"] = ctx.commandCenterPos.y;
+				mapPos["z"] = ctx.commandCenterPos.z;
+				mapPos["source"] = "command_center";
+				return mapPos;
+			}
+
+			if (ctx.hasStructure)
+			{
+				mapPos["x"] = ctx.structurePos.x;
+				mapPos["y"] = ctx.structurePos.y;
+				mapPos["z"] = ctx.structurePos.z;
+				mapPos["source"] = "structure";
+				return mapPos;
+			}
+
+			if (ctx.count > 0)
+			{
+				const Real inv = 1.0f / static_cast<Real>(ctx.count);
+				mapPos["x"] = ctx.sumX * inv;
+				mapPos["y"] = ctx.sumY * inv;
+				mapPos["z"] = ctx.sumZ * inv;
+				mapPos["source"] = "centroid";
+				return mapPos;
+			}
+
+			mapPos["source"] = "unknown";
+			return mapPos;
 		}
 
 		static bool containsIgnoreCase(const std::string& haystack, const char* needle)
@@ -1392,6 +1644,87 @@ namespace
 			return std::string();
 		}
 
+		std::string inferCommandCenterTemplateForPlayer(const Player* player, Object* worker = nullptr) const
+		{
+			if (player == nullptr || TheThingFactory == nullptr)
+			{
+				return std::string();
+			}
+
+			auto canBuildTemplate = [&](const std::string& templateName) -> bool
+			{
+				if (templateName.empty())
+				{
+					return false;
+				}
+				if (worker == nullptr || TheBuildAssistant == nullptr)
+				{
+					return true;
+				}
+				const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(templateName.c_str()), false);
+				if (tt == nullptr)
+				{
+					return false;
+				}
+				return TheBuildAssistant->isPossibleToMakeUnit(worker, tt) == TRUE;
+			};
+
+			const std::string side = player->getSide().str();
+			const std::string baseSide = player->getBaseSide().str();
+			if (containsIgnoreCase(side, "gla") || containsIgnoreCase(baseSide, "gla"))
+			{
+				if (canBuildTemplate("GLACommandCenter"))
+				{
+					return "GLACommandCenter";
+				}
+			}
+			if (containsIgnoreCase(side, "china") || containsIgnoreCase(baseSide, "china"))
+			{
+				if (canBuildTemplate("ChinaCommandCenter"))
+				{
+					return "ChinaCommandCenter";
+				}
+			}
+			if (containsIgnoreCase(side, "america") || containsIgnoreCase(baseSide, "america") || containsIgnoreCase(side, "usa") || containsIgnoreCase(baseSide, "usa"))
+			{
+				if (canBuildTemplate("AmericaCommandCenter"))
+				{
+					return "AmericaCommandCenter";
+				}
+			}
+
+			const char* knownCandidates[] = {
+				"GLACommandCenter",
+				"ChinaCommandCenter",
+				"AmericaCommandCenter"
+			};
+			for (const char* candidate : knownCandidates)
+			{
+				if (canBuildTemplate(candidate))
+				{
+					return candidate;
+				}
+			}
+
+			if (worker != nullptr && TheBuildAssistant != nullptr)
+			{
+				for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
+				{
+					const std::string name = tt->getName().str();
+					if (!containsIgnoreCase(name, "command") || !containsIgnoreCase(name, "center"))
+					{
+						continue;
+					}
+					if (TheBuildAssistant->isPossibleToMakeUnit(worker, tt) != TRUE)
+					{
+						continue;
+					}
+					return name;
+				}
+			}
+			return std::string();
+		}
+
 		struct CommandCenterSearchContext
 		{
 			Object* firstCommandCenter;
@@ -1716,14 +2049,24 @@ namespace
 				return false;
 			}
 
-			Object* producer = resolveProducerFromArgs(player, message, true, reason);
+			bool requireCommandCenter = true;
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				const std::string producerKind = getJsonString(*argsIt, "producer_kind");
+				if (!producerKind.empty() && producerKind == "any")
+				{
+					requireCommandCenter = false;
+				}
+			}
+
+			Object* producer = resolveProducerFromArgs(player, message, requireCommandCenter, reason);
 			if (producer == nullptr)
 			{
 				return false;
 			}
 
 			std::string unitTemplateName;
-			const auto argsIt = message.find("args");
 			if (argsIt != message.end() && argsIt->is_object())
 			{
 				unitTemplateName = getJsonString(*argsIt, "unit_template");
@@ -1739,7 +2082,7 @@ namespace
 					queueArgs = *argsIt;
 				}
 				queueArgs["unit_template"] = unitTemplateName;
-				queueArgs["producer_kind"] = "command_center";
+				queueArgs["producer_kind"] = requireCommandCenter ? "command_center" : "any";
 				queuedMessage["args"] = queueArgs;
 				return executeGameQueueUnit(queuedMessage, reason);
 			}
@@ -1763,7 +2106,7 @@ namespace
 					queueArgs = *argsIt;
 				}
 				queueArgs["unit_template"] = candidateTemplate;
-				queueArgs["producer_kind"] = "command_center";
+				queueArgs["producer_kind"] = requireCommandCenter ? "command_center" : "any";
 				nlohmann::json queuedMessage = message;
 				queuedMessage["args"] = queueArgs;
 				std::string candidateReason;
@@ -2369,6 +2712,205 @@ namespace
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
 		}
 
+		bool executeGameBuildCommandCenterSmart(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheThingFactory == nullptr || TheGameLogic == nullptr || TheBuildAssistant == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			Object* worker = resolveWorkerFromArgs(player, message, true, reason);
+			if (worker == nullptr)
+			{
+				return false;
+			}
+
+			Int requestedAnchorId = -1;
+			std::string buildingTemplateName;
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				buildingTemplateName = getJsonString(*argsIt, "building_template");
+				const auto anchorIdIt = argsIt->find("anchor_object_id");
+				if (anchorIdIt != argsIt->end() && anchorIdIt->is_number_integer())
+				{
+					requestedAnchorId = anchorIdIt->get<Int>();
+				}
+			}
+			if (buildingTemplateName.empty())
+			{
+				buildingTemplateName = inferCommandCenterTemplateForPlayer(player, worker);
+			}
+			if (buildingTemplateName.empty())
+			{
+				reason = "command_center_template_unknown";
+				return false;
+			}
+
+			const ThingTemplate* buildingTemplate = TheThingFactory->findTemplate(AsciiString(buildingTemplateName.c_str()), false);
+			if (buildingTemplate == nullptr)
+			{
+				reason = "building_template_not_found";
+				return false;
+			}
+
+			Object* anchor = nullptr;
+			if (requestedAnchorId > 0)
+			{
+				anchor = TheGameLogic->findObjectByID(static_cast<ObjectID>(requestedAnchorId));
+				if (anchor == nullptr)
+				{
+					reason = "anchor_not_found";
+					return false;
+				}
+				if (anchor->getControllingPlayer() != player)
+				{
+					reason = "anchor_not_owned";
+					return false;
+				}
+			}
+			if (anchor == nullptr)
+			{
+				anchor = findPrimaryCommandCenter(player);
+			}
+			if (anchor == nullptr)
+			{
+				reason = "anchor_not_found";
+				return false;
+			}
+
+			Coord3D location;
+			Real angle = 0.0f;
+			if (!findBuildLocationAroundAnchor(player, worker, anchor, buildingTemplate, location, angle))
+			{
+				AIUpdateInterface* ai = worker->getAI();
+				if (ai == nullptr)
+				{
+					reason = "worker_no_ai";
+					return false;
+				}
+
+				const Coord3D* moveTarget = anchor->getPosition();
+				if (moveTarget == nullptr)
+				{
+					reason = "anchor_not_found";
+					return false;
+				}
+				Coord3D target = *moveTarget;
+				target.z = 0.0f;
+				ai->aiMoveToPosition(&target, CMD_FROM_AI);
+				return true;
+			}
+
+			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
+		}
+
+		bool executeGameAttackMove(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheGameLogic == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			const auto xIt = argsIt->find("x");
+			const auto yIt = argsIt->find("y");
+			if (xIt == argsIt->end() || yIt == argsIt->end() || !xIt->is_number() || !yIt->is_number())
+			{
+				reason = "missing_target_position";
+				return false;
+			}
+
+			Coord3D target;
+			target.x = xIt->get<Real>();
+			target.y = yIt->get<Real>();
+			target.z = 0.0f;
+
+			std::vector<Int> objectIds;
+			const auto objectIdsIt = argsIt->find("object_ids");
+			if (objectIdsIt != argsIt->end() && objectIdsIt->is_array())
+			{
+				for (const auto& idNode : *objectIdsIt)
+				{
+					if (idNode.is_number_integer())
+					{
+						const Int id = idNode.get<Int>();
+						if (id > 0)
+						{
+							objectIds.push_back(id);
+						}
+					}
+				}
+			}
+			if (objectIds.empty())
+			{
+				const auto objectIdIt = argsIt->find("object_id");
+				if (objectIdIt != argsIt->end() && objectIdIt->is_number_integer())
+				{
+					const Int id = objectIdIt->get<Int>();
+					if (id > 0)
+					{
+						objectIds.push_back(id);
+					}
+				}
+			}
+			if (objectIds.empty())
+			{
+				reason = "missing_object_ids";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			Int commanded = 0;
+			for (Int id : objectIds)
+			{
+				Object* obj = TheGameLogic->findObjectByID(static_cast<ObjectID>(id));
+				if (obj == nullptr || obj->isEffectivelyDead())
+				{
+					continue;
+				}
+				if (obj->getControllingPlayer() != player)
+				{
+					continue;
+				}
+
+				AIUpdateInterface* ai = obj->getAI();
+				if (ai == nullptr)
+				{
+					continue;
+				}
+
+				ai->aiAttackMoveToPosition(&target, 0, CMD_FROM_AI);
+				++commanded;
+			}
+
+			if (commanded == 0)
+			{
+				reason = "no_valid_objects";
+				return false;
+			}
+			return true;
+		}
+
 		nlohmann::json buildPlayerDetails(Player* player) const
 		{
 			return nlohmann::json{
@@ -2414,6 +2956,159 @@ namespace
 				{"dozers", player->countObjects(dozerMask, none)},
 				{"harvesters", player->countObjects(harvesterMask, none)},
 				{"objects_total", player->countObjects(none, none)}
+			};
+		}
+
+		static const char* classifyObjectClass(const Object* obj)
+		{
+			if (obj == nullptr)
+			{
+				return "unknown";
+			}
+			if (obj->isKindOf(KINDOF_STRUCTURE))
+			{
+				return "building";
+			}
+			if (obj->isKindOf(KINDOF_INFANTRY))
+			{
+				return "infantry";
+			}
+			if (obj->isKindOf(KINDOF_VEHICLE))
+			{
+				return "vehicle";
+			}
+			if (obj->isKindOf(KINDOF_AIRCRAFT))
+			{
+				return "aircraft";
+			}
+			return "unit";
+		}
+
+		nlohmann::json buildObjectSummaryRow(const Object* obj, bool includeIdleState) const
+		{
+			nlohmann::json row = nlohmann::json::object();
+			if (obj == nullptr)
+			{
+				return row;
+			}
+
+			const Coord3D* pos = obj->getPosition();
+			row["id"] = obj->getID();
+			row["template"] = obj->getTemplate() != nullptr ? obj->getTemplate()->getName().str() : "";
+			row["class"] = classifyObjectClass(obj);
+			row["x"] = pos != nullptr ? pos->x : 0.0f;
+			row["y"] = pos != nullptr ? pos->y : 0.0f;
+			row["z"] = pos != nullptr ? pos->z : 0.0f;
+			row["under_construction"] = obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION);
+			if (includeIdleState)
+			{
+				const AIUpdateInterface* ai = obj->getAI();
+				row["idle"] = ai != nullptr ? ai->isIdle() : false;
+			}
+			return row;
+		}
+
+		struct OwnedObjectCollectContext
+		{
+			AIControlAdapterState* self;
+			nlohmann::json* units;
+			nlohmann::json* buildings;
+		};
+
+		static void collectOwnedObjectsCallback(Object* obj, void* userData)
+		{
+			if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+			{
+				return;
+			}
+			OwnedObjectCollectContext* ctx = static_cast<OwnedObjectCollectContext*>(userData);
+			nlohmann::json row = ctx->self->buildObjectSummaryRow(obj, true);
+			if (obj->isKindOf(KINDOF_STRUCTURE))
+			{
+				ctx->buildings->push_back(row);
+			}
+			else
+			{
+				ctx->units->push_back(row);
+			}
+		}
+
+		nlohmann::json buildOwnedObjectsSummary(Player* player)
+		{
+			nlohmann::json units = nlohmann::json::array();
+			nlohmann::json buildings = nlohmann::json::array();
+			if (player == nullptr)
+			{
+				return nlohmann::json{
+					{"player_index", -1},
+					{"units", units},
+					{"buildings", buildings}
+				};
+			}
+
+			OwnedObjectCollectContext ctx = { this, &units, &buildings };
+			player->iterateObjects(collectOwnedObjectsCallback, &ctx);
+
+			return nlohmann::json{
+				{"player_index", player->getPlayerIndex()},
+				{"units", units},
+				{"buildings", buildings}
+			};
+		}
+
+		nlohmann::json buildVisibleEnemiesSummary(Player* localPlayer)
+		{
+			nlohmann::json enemies = nlohmann::json::array();
+			if (localPlayer == nullptr || ThePlayerList == nullptr)
+			{
+				return nlohmann::json{
+					{"count", 0},
+					{"enemies", enemies}
+				};
+			}
+
+			const Int playerCount = ThePlayerList->getPlayerCount();
+			for (Int i = 0; i < playerCount; ++i)
+			{
+				Player* enemyPlayer = ThePlayerList->getNthPlayer(i);
+				if (enemyPlayer == nullptr || enemyPlayer == localPlayer)
+				{
+					continue;
+				}
+				if (enemyPlayer == ThePlayerList->getNeutralPlayer())
+				{
+					continue;
+				}
+
+				struct EnemyObjectCollectContext
+				{
+					AIControlAdapterState* self;
+					Player* localPlayer;
+					nlohmann::json* enemies;
+				};
+				EnemyObjectCollectContext ctx = { this, localPlayer, &enemies };
+
+				enemyPlayer->iterateObjects([](Object* obj, void* userData)
+				{
+					if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+					{
+						return;
+					}
+					EnemyObjectCollectContext* ctx = static_cast<EnemyObjectCollectContext*>(userData);
+					if (!obj->isLogicallyVisible())
+					{
+						return;
+					}
+					nlohmann::json row = ctx->self->buildObjectSummaryRow(obj, false);
+					Player* owner = obj->getControllingPlayer();
+					row["player_index"] = owner != nullptr ? owner->getPlayerIndex() : -1;
+					ctx->enemies->push_back(row);
+				}, &ctx);
+			}
+
+			return nlohmann::json{
+				{"count", enemies.size()},
+				{"enemies", enemies}
 			};
 		}
 
@@ -2493,6 +3188,20 @@ namespace
 			{
 				result = buildUnitCountsSummary(selectedPlayer);
 				result["player_index"] = selectedPlayer->getPlayerIndex();
+				return true;
+			}
+
+			if (path == "game.objects")
+			{
+				result = buildOwnedObjectsSummary(selectedPlayer);
+				result["is_local_player"] = (selectedPlayer == localPlayer);
+				return true;
+			}
+
+			if (path == "game.visible_enemies")
+			{
+				// Visibility is always from local player's perspective.
+				result = buildVisibleEnemiesSummary(localPlayer);
 				return true;
 			}
 
