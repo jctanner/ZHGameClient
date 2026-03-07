@@ -41,15 +41,16 @@ class BotUIApp:
         self._suspend_poll_until_monotonic = 0.0
         self._hello_ok = False
         self._connecting = False
-        self._request_queue: "queue.PriorityQueue[tuple[int, int, dict[str, Any]]]" = queue.PriorityQueue()
+        self._request_queue: "queue.PriorityQueue[tuple[int, int, dict[str, Any], int | None]]" = queue.PriorityQueue()
         self._request_seq = 0
         self._request_worker_started = False
-        self._poll_paths = ["game.objects", "game.players", "game.status", "game.resources"]
+        self._poll_paths = ["game.objects_map", "game.objects_all_map", "game.players", "game.status", "game.resources"]
         self._poll_path_index = 0
         self._map_orientations = ["flip_y", "normal", "flip_x", "flip_xy"]
         self._map_orientation_index = 0
 
         self.poll_enabled = tk.BooleanVar(value=True)
+        self.map_updates_enabled = tk.BooleanVar(value=True)
         self.poll_interval_ms = tk.IntVar(value=1000)
         self.stream_enabled = tk.BooleanVar(value=False)
         self.debug_inbound = tk.BooleanVar(value=True)
@@ -229,6 +230,12 @@ class BotUIApp:
             row=5, column=4, columnspan=2, sticky="ew", padx=2, pady=2
         )
         ttk.Checkbutton(controls, text="Polling", variable=self.poll_enabled).grid(row=5, column=0, sticky="w")
+        ttk.Checkbutton(
+            controls,
+            text="Map Updates",
+            variable=self.map_updates_enabled,
+            command=self._on_map_updates_toggle,
+        ).grid(row=6, column=1, sticky="w")
         ttk.Label(controls, text="Interval ms").grid(row=5, column=1, sticky="e")
         ttk.Entry(controls, textvariable=self.poll_interval_ms, width=8).grid(row=5, column=2, sticky="w")
         ttk.Checkbutton(controls, text="Use Streaming", variable=self.stream_enabled, command=self._toggle_streaming).grid(
@@ -375,7 +382,12 @@ class BotUIApp:
                 # Prioritize operator actions over background polling for a short window.
                 self._suspend_poll_until_monotonic = time.monotonic() + 1.0
             priority = 1 if cmd == "Game.Query" else 0
-            self._request_async(msg, priority=priority)
+            timeout_ms: int | None = None
+            if cmd == "Game.Query":
+                # Keep map polling responsive when a query path stalls on the adapter side.
+                path = str(args.get("path", ""))
+                timeout_ms = 4000 if path == "game.objects_all_map" else 2500
+            self._request_async(msg, priority=priority, timeout_ms=timeout_ms)
             if not quiet:
                 self._log(f"sent {cmd} request_id={req_id}")
         except Exception as exc:  # noqa: BLE001
@@ -415,13 +427,14 @@ class BotUIApp:
                 # Avoid flooding a single-instance named pipe. Send at most one query per tick,
                 # and only when no other query is currently pending.
                 if self._pending_query_count() == 0 and self._request_queue.qsize() == 0:
-                    path = self._poll_paths[self._poll_path_index % len(self._poll_paths)]
-                    self._poll_path_index += 1
-                    if path in ("game.players", "game.resources", "game.status") and now < self._next_meta_poll_monotonic:
+                    path = self._next_poll_path()
+                    if not path:
+                        return
+                    if path in ("game.players", "game.resources", "game.status", "game.objects_all_map") and now < self._next_meta_poll_monotonic:
                         pass
                     else:
                         self._query(path, quiet=True)
-                        if path in ("game.players", "game.resources", "game.status"):
+                        if path in ("game.players", "game.resources", "game.status", "game.objects_all_map"):
                             self._next_meta_poll_monotonic = now + 1.5
         except Exception as exc:  # noqa: BLE001
             self._log(f"poll_loop error: {exc}")
@@ -460,16 +473,25 @@ class BotUIApp:
             now = time.monotonic()
             if self._dirty_view and now - self._last_redraw_monotonic >= 0.1:
                 self._refresh_player_table()
-                self.redraw_map()
+                if self.map_updates_enabled.get():
+                    self.redraw_map()
                 self._dirty_view = False
+                self._last_redraw_monotonic = now
+            elif (
+                self.map_updates_enabled.get()
+                and self.map_renderer is not None
+                and self.map_renderer.has_active_animation()
+                and now - self._last_redraw_monotonic >= 0.033
+            ):
+                self.redraw_map()
                 self._last_redraw_monotonic = now
             elif (
                 self.map_renderer is not None
                 and self.map_renderer.has_active_animation()
                 and now - self._last_redraw_monotonic >= 0.033
             ):
-                self.redraw_map()
-                self._last_redraw_monotonic = now
+                # Keep consuming animation state while map updates are disabled.
+                pass
         except Exception as exc:  # noqa: BLE001
             self._log(f"process_incoming error: {exc}")
         finally:
@@ -546,11 +568,11 @@ class BotUIApp:
         path = pending_path or self._extract_path_hint(msg, payload)
         if self.debug_inbound.get():
             self._log(f"apply query path={path or '?'} payload_type={type(payload).__name__}")
-        if path == "game.objects":
+        if path == "game.objects" or path == "game.objects_map":
             if isinstance(payload, dict):
                 units_n = len(payload.get("units", [])) if isinstance(payload.get("units"), list) else 0
                 bld_n = len(payload.get("buildings", [])) if isinstance(payload.get("buildings"), list) else 0
-                self._log(f"game.objects counts units={units_n} buildings={bld_n}")
+                self._log(f"{path} counts units={units_n} buildings={bld_n}")
                 coords: list[tuple[float, float]] = []
                 for key in ("units", "buildings"):
                     rows = payload.get(key)
@@ -568,9 +590,9 @@ class BotUIApp:
                     max_x = max(p[0] for p in coords)
                     min_y = min(p[1] for p in coords)
                     max_y = max(p[1] for p in coords)
-                    self._log(f"game.objects extents x=[{min_x:.1f},{max_x:.1f}] y=[{min_y:.1f},{max_y:.1f}]")
+                    self._log(f"{path} extents x=[{min_x:.1f},{max_x:.1f}] y=[{min_y:.1f},{max_y:.1f}]")
             self.store.update_owned_objects(payload)
-        elif path == "game.objects_all":
+        elif path == "game.objects_all" or path == "game.objects_all_map":
             if isinstance(payload, dict):
                 players = payload.get("players")
                 total_units = 0
@@ -581,7 +603,7 @@ class BotUIApp:
                             continue
                         total_units += len(row.get("units", [])) if isinstance(row.get("units"), list) else 0
                         total_buildings += len(row.get("buildings", [])) if isinstance(row.get("buildings"), list) else 0
-                self._log(f"game.objects_all counts units={total_units} buildings={total_buildings}")
+                self._log(f"{path} counts units={total_units} buildings={total_buildings}")
             self.store.update_objects_all(payload)
         elif path == "game.visible_enemies":
             self.store.update_visible_enemies(payload)
@@ -617,9 +639,16 @@ class BotUIApp:
                 if isinstance(players_node, list) and players_node and isinstance(players_node[0], dict):
                     first = players_node[0]
                     if "units" in first or "buildings" in first:
+                        payload_path = payload.get("path")
+                        if payload_path == "game.objects_all_map":
+                            return "game.objects_all_map"
                         return "game.objects_all"
             if "buildings" in payload and "units" in payload:
                 return "game.objects"
+            if payload.get("path") == "game.objects_map":
+                return "game.objects_map"
+            if payload.get("path") == "game.objects_all_map":
+                return "game.objects_all_map"
             if "enemies" in payload:
                 return "game.visible_enemies"
             if "visible_enemies" in payload:
@@ -677,8 +706,16 @@ class BotUIApp:
                 self.player_tree.insert("", "end", iid=item_id, values=values)
 
     def redraw_map(self) -> None:
-        if self.map_renderer is not None:
+        if self.map_renderer is not None and self.map_updates_enabled.get():
             self.map_renderer.draw(self.store)
+
+    def _on_map_updates_toggle(self) -> None:
+        if self.map_updates_enabled.get():
+            self._log("Map updates enabled.")
+            self._dirty_view = True
+            self.redraw_map()
+        else:
+            self._log("Map updates disabled.")
 
     def _cycle_map_orientation(self) -> None:
         if self.map_renderer is None:
@@ -692,9 +729,9 @@ class BotUIApp:
         if self.log is not None:
             self.log.write(message)
 
-    def _request_async(self, payload: dict[str, Any], priority: int = 0) -> None:
+    def _request_async(self, payload: dict[str, Any], priority: int = 0, timeout_ms: int | None = None) -> None:
         self._request_seq += 1
-        self._request_queue.put((priority, self._request_seq, payload))
+        self._request_queue.put((priority, self._request_seq, payload, timeout_ms))
 
     def _start_request_worker(self) -> None:
         if self._request_worker_started:
@@ -703,9 +740,9 @@ class BotUIApp:
 
         def worker() -> None:
             while True:
-                _priority, _seq, payload = self._request_queue.get()
+                _priority, _seq, payload, timeout_ms = self._request_queue.get()
                 try:
-                    response = self.client.request_once(payload)
+                    response = self.client.request_once(payload, timeout_ms=timeout_ms)
                     self.client.incoming.put(response)
                 except Exception as exc:  # noqa: BLE001
                     req_id = str(payload.get("request_id", ""))
@@ -723,3 +760,15 @@ class BotUIApp:
             if info.get("cmd") == "Game.Query":
                 total += 1
         return total
+
+    def _next_poll_path(self) -> str:
+        if not self._poll_paths:
+            return ""
+        map_paths = {"game.objects_map", "game.objects_all_map"}
+        for _ in range(len(self._poll_paths)):
+            path = self._poll_paths[self._poll_path_index % len(self._poll_paths)]
+            self._poll_path_index += 1
+            if not self.map_updates_enabled.get() and path in map_paths:
+                continue
+            return path
+        return ""

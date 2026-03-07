@@ -4670,6 +4670,124 @@ namespace
 			};
 		}
 
+		nlohmann::json buildObjectMapRow(const Object* obj) const
+		{
+			nlohmann::json row = nlohmann::json::object();
+			if (obj == nullptr)
+			{
+				return row;
+			}
+			const Coord3D* pos = obj->getPosition();
+			row["id"] = obj->getID();
+			row["class"] = classifyObjectClass(obj);
+			row["x"] = pos != nullptr ? pos->x : 0.0f;
+			row["y"] = pos != nullptr ? pos->y : 0.0f;
+			row["under_construction"] = obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION);
+			return row;
+		}
+
+		nlohmann::json buildOwnedObjectsSummaryCompact(Player* player, std::size_t maxUnits, std::size_t maxBuildings)
+		{
+			nlohmann::json units = nlohmann::json::array();
+			nlohmann::json buildings = nlohmann::json::array();
+			if (player == nullptr)
+			{
+				return nlohmann::json{
+					{"player_index", -1},
+					{"units", units},
+					{"buildings", buildings},
+					{"units_total", 0},
+					{"buildings_total", 0}
+				};
+			}
+
+			struct CompactCollectContext
+			{
+				AIControlAdapterState* self;
+				nlohmann::json* units;
+				nlohmann::json* buildings;
+				std::size_t maxUnits;
+				std::size_t maxBuildings;
+				Int totalUnits;
+				Int totalBuildings;
+			};
+
+			CompactCollectContext ctx = { this, &units, &buildings, maxUnits, maxBuildings, 0, 0 };
+			player->iterateObjects([](Object* obj, void* userData)
+			{
+				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+				{
+					return;
+				}
+				CompactCollectContext* ctx = static_cast<CompactCollectContext*>(userData);
+				nlohmann::json row = ctx->self->buildObjectMapRow(obj);
+				if (obj->isKindOf(KINDOF_STRUCTURE))
+				{
+					++ctx->totalBuildings;
+					if (ctx->buildings->size() < ctx->maxBuildings)
+					{
+						ctx->buildings->push_back(row);
+					}
+				}
+				else
+				{
+					++ctx->totalUnits;
+					if (ctx->units->size() < ctx->maxUnits)
+					{
+						ctx->units->push_back(row);
+					}
+				}
+			}, &ctx);
+
+			return nlohmann::json{
+				{"player_index", player->getPlayerIndex()},
+				{"units", units},
+				{"buildings", buildings},
+				{"units_total", ctx.totalUnits},
+				{"buildings_total", ctx.totalBuildings}
+			};
+		}
+
+		nlohmann::json buildAllPlayersObjectsSummaryCompact(std::size_t maxUnitsPerPlayer, std::size_t maxBuildingsPerPlayer)
+		{
+			nlohmann::json players = nlohmann::json::array();
+			if (ThePlayerList == nullptr)
+			{
+				return nlohmann::json{
+					{"count", 0},
+					{"players", players}
+				};
+			}
+
+			const Player* neutralPlayer = ThePlayerList->getNeutralPlayer();
+			const Int count = ThePlayerList->getPlayerCount();
+			for (Int i = 0; i < count; ++i)
+			{
+				Player* player = ThePlayerList->getNthPlayer(i);
+				if (player == nullptr)
+				{
+					continue;
+				}
+				if (neutralPlayer != nullptr && player == neutralPlayer)
+				{
+					continue;
+				}
+				if (isCivilianLikePlayer(player))
+				{
+					continue;
+				}
+
+				nlohmann::json row = buildOwnedObjectsSummaryCompact(player, maxUnitsPerPlayer, maxBuildingsPerPlayer);
+				row["player"] = buildLocalPlayerSummary(player);
+				players.push_back(row);
+			}
+
+			return nlohmann::json{
+				{"count", players.size()},
+				{"players", players}
+			};
+		}
+
 		nlohmann::json buildAllPlayersObjectsSummary()
 		{
 			nlohmann::json players = nlohmann::json::array();
@@ -4849,6 +4967,23 @@ namespace
 			{
 				result = buildOwnedObjectsSummary(selectedPlayer);
 				result["is_local_player"] = (selectedPlayer == localPlayer);
+				return true;
+			}
+
+			if (path == "game.objects_map")
+			{
+				result = buildOwnedObjectsSummaryCompact(selectedPlayer, 60u, 60u);
+				result["is_local_player"] = (selectedPlayer == localPlayer);
+				result["truncated"] = true;
+				result["path"] = "game.objects_map";
+				return true;
+			}
+
+			if (path == "game.objects_all_map")
+			{
+				result = buildAllPlayersObjectsSummaryCompact(25u, 40u);
+				result["truncated"] = true;
+				result["path"] = "game.objects_all_map";
 				return true;
 			}
 
