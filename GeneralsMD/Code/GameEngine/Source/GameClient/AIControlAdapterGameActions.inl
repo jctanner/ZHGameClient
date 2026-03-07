@@ -1348,6 +1348,10 @@
 				return false;
 			}
 
+			// Keep a worker out of selection for a while after issuing construction.
+			// This avoids repeatedly interrupting the same builder if AI idle/busy flags
+			// lag for a few frames or temporarily report idle.
+			reserveWorkerForBuild(worker, 45000u);
 			return true;
 		}
 
@@ -2402,6 +2406,7 @@
 				bridgedArgs["avoid_supply_source_id"] = lastSupplyIt->second;
 			}
 			bridgedArgs["worker_object_id"] = static_cast<Int>(idleWorker->getID());
+			bridgedArgs["allow_reserved_worker"] = true;
 			bridged["args"] = bridgedArgs;
 
 			return executeGameDozerConstruct(bridged, reason);

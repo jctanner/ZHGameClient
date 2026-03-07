@@ -62,6 +62,44 @@
 			m_reservedWorkersUntilTick[id] = ::GetTickCount() + durationMs;
 		}
 
+		bool isWorkerAssignedToActiveConstruction(Object* worker) const
+		{
+			if (worker == nullptr || TheGameLogic == nullptr)
+			{
+				return false;
+			}
+
+			const ObjectID workerId = worker->getID();
+			if (static_cast<Int>(workerId) <= 0)
+			{
+				return false;
+			}
+
+			for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
+			{
+				if (obj->isEffectivelyDead())
+				{
+					continue;
+				}
+				if (!obj->isKindOf(KINDOF_STRUCTURE))
+				{
+					continue;
+				}
+				if (!obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+				{
+					continue;
+				}
+				if (obj->getBuilderID() != workerId)
+				{
+					continue;
+				}
+
+				return true;
+			}
+
+			return false;
+		}
+
 		bool isWorkerAvailableForNewBuild(Object* worker, bool checkReservation = true)
 		{
 			if (worker == nullptr || worker->isEffectivelyDead())
@@ -78,6 +116,13 @@
 			}
 			AIUpdateInterface* ai = worker->getAI();
 			if (ai == nullptr || !ai->isIdle() || ai->isBusy())
+			{
+				return false;
+			}
+			// Extra guard: if this worker is currently assigned as builder for an
+			// under-construction structure, treat it as not available even if AI
+			// idle/busy briefly reports an inconsistent value.
+			if (isWorkerAssignedToActiveConstruction(worker))
 			{
 				return false;
 			}
@@ -158,9 +203,17 @@
 					}
 					if (requireIdle)
 					{
-						// Explicit worker selections are allowed to bypass temporary reservation,
-						// so internal multi-step smart-build flows can reuse the same worker id.
-						if (!isWorkerAvailableForNewBuild(worker, false))
+						bool allowReservedWorker = false;
+						const auto allowReservedIt = argsIt->find("allow_reserved_worker");
+						if (allowReservedIt != argsIt->end() && allowReservedIt->is_boolean())
+						{
+							allowReservedWorker = allowReservedIt->get<bool>();
+						}
+
+						// Explicit worker selections honor temporary reservation by default.
+						// Internal multi-step flows can set allow_reserved_worker=true when they
+						// intentionally pass the same worker id across a chained request.
+						if (!isWorkerAvailableForNewBuild(worker, !allowReservedWorker))
 						{
 							reason = "worker_not_idle";
 							return nullptr;
