@@ -515,6 +515,8 @@ namespace
 						"game_supply_build_smart",
 						"game_barracks_build_smart",
 						"game_arms_dealer_build_smart",
+						"game_palace_build_smart",
+						"game_black_market_build_smart",
 						"game_attackmove_all_combat_to_player"
 					})}
 				};
@@ -778,6 +780,30 @@ namespace
 			{
 				std::string reason;
 				if (!executeGameBuildArmsDealerSmart(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.BuildPalaceSmart")
+			{
+				std::string reason;
+				if (!executeGameBuildPalaceSmart(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.BuildBlackMarketSmart")
+			{
+				std::string reason;
+				if (!executeGameBuildBlackMarketSmart(message, reason))
 				{
 					sendActionAck(requestId, false, "invalid_state", reason.c_str());
 					return;
@@ -2177,6 +2203,136 @@ namespace
 			return std::string();
 		}
 
+		std::string inferPalaceTemplateForPlayer(const Player* player, Object* worker = nullptr) const
+		{
+			if (player == nullptr || TheThingFactory == nullptr)
+			{
+				return std::string();
+			}
+
+			auto canBuildTemplate = [&](const std::string& templateName) -> bool
+			{
+				if (templateName.empty())
+				{
+					return false;
+				}
+				if (worker == nullptr || TheBuildAssistant == nullptr)
+				{
+					return true;
+				}
+				const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(templateName.c_str()), false);
+				if (tt == nullptr)
+				{
+					return false;
+				}
+				return TheBuildAssistant->isPossibleToMakeUnit(worker, tt) == TRUE;
+			};
+
+			const std::string side = player->getSide().str();
+			const std::string baseSide = player->getBaseSide().str();
+			if (containsIgnoreCase(side, "gla") || containsIgnoreCase(baseSide, "gla"))
+			{
+				if (canBuildTemplate("GLAPalace"))
+				{
+					return "GLAPalace";
+				}
+			}
+
+			const char* knownCandidates[] = {
+				"GLAPalace"
+			};
+			for (const char* candidate : knownCandidates)
+			{
+				if (canBuildTemplate(candidate))
+				{
+					return candidate;
+				}
+			}
+
+			if (worker != nullptr && TheBuildAssistant != nullptr)
+			{
+				for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
+				{
+					const std::string name = tt->getName().str();
+					if (!containsIgnoreCase(name, "palace"))
+					{
+						continue;
+					}
+					if (TheBuildAssistant->isPossibleToMakeUnit(worker, tt) != TRUE)
+					{
+						continue;
+					}
+					return name;
+				}
+			}
+			return std::string();
+		}
+
+		std::string inferBlackMarketTemplateForPlayer(const Player* player, Object* worker = nullptr) const
+		{
+			if (player == nullptr || TheThingFactory == nullptr)
+			{
+				return std::string();
+			}
+
+			auto canBuildTemplate = [&](const std::string& templateName) -> bool
+			{
+				if (templateName.empty())
+				{
+					return false;
+				}
+				if (worker == nullptr || TheBuildAssistant == nullptr)
+				{
+					return true;
+				}
+				const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(templateName.c_str()), false);
+				if (tt == nullptr)
+				{
+					return false;
+				}
+				return TheBuildAssistant->isPossibleToMakeUnit(worker, tt) == TRUE;
+			};
+
+			const std::string side = player->getSide().str();
+			const std::string baseSide = player->getBaseSide().str();
+			if (containsIgnoreCase(side, "gla") || containsIgnoreCase(baseSide, "gla"))
+			{
+				if (canBuildTemplate("GLABlackMarket"))
+				{
+					return "GLABlackMarket";
+				}
+			}
+
+			const char* knownCandidates[] = {
+				"GLABlackMarket"
+			};
+			for (const char* candidate : knownCandidates)
+			{
+				if (canBuildTemplate(candidate))
+				{
+					return candidate;
+				}
+			}
+
+			if (worker != nullptr && TheBuildAssistant != nullptr)
+			{
+				for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
+				{
+					const std::string name = tt->getName().str();
+					if (!containsIgnoreCase(name, "black") || !containsIgnoreCase(name, "market"))
+					{
+						continue;
+					}
+					if (TheBuildAssistant->isPossibleToMakeUnit(worker, tt) != TRUE)
+					{
+						continue;
+					}
+					return name;
+				}
+			}
+			return std::string();
+		}
+
 		struct CommandCenterSearchContext
 		{
 			Object* firstCommandCenter;
@@ -2611,10 +2767,24 @@ namespace
 			{
 				return std::string();
 			}
+			auto isPotentiallyQueueable = [&](const ThingTemplate* tt) -> bool
+			{
+				if (tt == nullptr)
+				{
+					return false;
+				}
+				const CanMakeType canMake = TheBuildAssistant->canMakeUnit(producer, tt);
+				return canMake == CANMAKE_OK ||
+					canMake == CANMAKE_NO_MONEY ||
+					canMake == CANMAKE_QUEUE_FULL ||
+					canMake == CANMAKE_PARKING_PLACES_FULL;
+			};
 			const char* candidates[] = {
 				"GLAVehicleQuadCannon",
 				"GLAVehicleQuadcannon",
-				"GLAQuadCannon"
+				"GLAQuadCannon",
+				"GLAVehicleQuad",
+				"GLAQuad"
 			};
 			for (const char* name : candidates)
 			{
@@ -2623,10 +2793,29 @@ namespace
 				{
 					continue;
 				}
-				if (TheBuildAssistant->canMakeUnit(producer, tt) == CANMAKE_OK)
+				if (isPotentiallyQueueable(tt))
 				{
 					return name;
 				}
+			}
+
+			// Fallback: scan all templates for likely quad vehicle names.
+			for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
+			{
+				const std::string templateName = tt->getName().str();
+				if (!containsIgnoreCase(templateName, "quad"))
+				{
+					continue;
+				}
+				if (!containsIgnoreCase(templateName, "vehicle") && !containsIgnoreCase(templateName, "cannon"))
+				{
+					continue;
+				}
+				if (!isPotentiallyQueueable(tt))
+				{
+					continue;
+				}
+				return templateName;
 			}
 			return std::string();
 		}
@@ -2870,6 +3059,7 @@ namespace
 				const std::string unitTemplateName = inferQuadTemplateForProducer(producer);
 				if (unitTemplateName.empty())
 				{
+					lastReason = "quad_template_not_found";
 					continue;
 				}
 				for (Int i = 0; i < count; ++i)
@@ -3830,6 +4020,196 @@ namespace
 			if (buildingTemplateName.empty())
 			{
 				reason = "arms_dealer_template_unknown";
+				return false;
+			}
+
+			const ThingTemplate* buildingTemplate = TheThingFactory->findTemplate(AsciiString(buildingTemplateName.c_str()), false);
+			if (buildingTemplate == nullptr)
+			{
+				reason = "building_template_not_found";
+				return false;
+			}
+
+			Object* anchor = nullptr;
+			if (requestedAnchorId > 0)
+			{
+				anchor = TheGameLogic->findObjectByID(static_cast<ObjectID>(requestedAnchorId));
+				if (anchor == nullptr)
+				{
+					reason = "anchor_not_found";
+					return false;
+				}
+				if (anchor->getControllingPlayer() != player)
+				{
+					reason = "anchor_not_owned";
+					return false;
+				}
+			}
+			if (anchor == nullptr)
+			{
+				anchor = findPrimaryCommandCenter(player);
+			}
+
+			Coord3D location;
+			Real angle = 0.0f;
+			if (!findBuildLocationAroundAnchor(player, worker, anchor, buildingTemplate, location, angle))
+			{
+				AIUpdateInterface* ai = worker->getAI();
+				if (ai == nullptr)
+				{
+					reason = "worker_no_ai";
+					return false;
+				}
+
+				const Coord3D* moveTarget = anchor != nullptr ? anchor->getPosition() : worker->getPosition();
+				if (moveTarget == nullptr)
+				{
+					reason = "anchor_not_found";
+					return false;
+				}
+				Coord3D target = *moveTarget;
+				target.z = 0.0f;
+				ai->aiMoveToPosition(&target, CMD_FROM_AI);
+				return true;
+			}
+
+			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
+		}
+
+		bool executeGameBuildPalaceSmart(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheThingFactory == nullptr || TheGameLogic == nullptr || TheBuildAssistant == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			Object* worker = resolveWorkerFromArgs(player, message, true, reason);
+			if (worker == nullptr)
+			{
+				return false;
+			}
+
+			std::string buildingTemplateName;
+			Int requestedAnchorId = -1;
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				buildingTemplateName = getJsonString(*argsIt, "building_template");
+				const auto anchorIdIt = argsIt->find("anchor_object_id");
+				if (anchorIdIt != argsIt->end() && anchorIdIt->is_number_integer())
+				{
+					requestedAnchorId = anchorIdIt->get<Int>();
+				}
+			}
+			if (buildingTemplateName.empty())
+			{
+				buildingTemplateName = inferPalaceTemplateForPlayer(player, worker);
+			}
+			if (buildingTemplateName.empty())
+			{
+				reason = "palace_template_unknown";
+				return false;
+			}
+
+			const ThingTemplate* buildingTemplate = TheThingFactory->findTemplate(AsciiString(buildingTemplateName.c_str()), false);
+			if (buildingTemplate == nullptr)
+			{
+				reason = "building_template_not_found";
+				return false;
+			}
+
+			Object* anchor = nullptr;
+			if (requestedAnchorId > 0)
+			{
+				anchor = TheGameLogic->findObjectByID(static_cast<ObjectID>(requestedAnchorId));
+				if (anchor == nullptr)
+				{
+					reason = "anchor_not_found";
+					return false;
+				}
+				if (anchor->getControllingPlayer() != player)
+				{
+					reason = "anchor_not_owned";
+					return false;
+				}
+			}
+			if (anchor == nullptr)
+			{
+				anchor = findPrimaryCommandCenter(player);
+			}
+
+			Coord3D location;
+			Real angle = 0.0f;
+			if (!findBuildLocationAroundAnchor(player, worker, anchor, buildingTemplate, location, angle))
+			{
+				AIUpdateInterface* ai = worker->getAI();
+				if (ai == nullptr)
+				{
+					reason = "worker_no_ai";
+					return false;
+				}
+
+				const Coord3D* moveTarget = anchor != nullptr ? anchor->getPosition() : worker->getPosition();
+				if (moveTarget == nullptr)
+				{
+					reason = "anchor_not_found";
+					return false;
+				}
+				Coord3D target = *moveTarget;
+				target.z = 0.0f;
+				ai->aiMoveToPosition(&target, CMD_FROM_AI);
+				return true;
+			}
+
+			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
+		}
+
+		bool executeGameBuildBlackMarketSmart(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheThingFactory == nullptr || TheGameLogic == nullptr || TheBuildAssistant == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			Object* worker = resolveWorkerFromArgs(player, message, true, reason);
+			if (worker == nullptr)
+			{
+				return false;
+			}
+
+			std::string buildingTemplateName;
+			Int requestedAnchorId = -1;
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				buildingTemplateName = getJsonString(*argsIt, "building_template");
+				const auto anchorIdIt = argsIt->find("anchor_object_id");
+				if (anchorIdIt != argsIt->end() && anchorIdIt->is_number_integer())
+				{
+					requestedAnchorId = anchorIdIt->get<Int>();
+				}
+			}
+			if (buildingTemplateName.empty())
+			{
+				buildingTemplateName = inferBlackMarketTemplateForPlayer(player, worker);
+			}
+			if (buildingTemplateName.empty())
+			{
+				reason = "black_market_template_unknown";
 				return false;
 			}
 

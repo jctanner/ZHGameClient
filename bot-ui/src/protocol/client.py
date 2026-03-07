@@ -20,7 +20,7 @@ ERROR_PIPE_BUSY = 231
 
 
 class PipeClient:
-    def __init__(self, pipe_name: str = "zh_ai_control", timeout_ms: int = 8000) -> None:
+    def __init__(self, pipe_name: str = "zh_ai_control", timeout_ms: int = 15000) -> None:
         self.pipe_name = pipe_name
         self.timeout_ms = timeout_ms
         self._stream: Any | None = None

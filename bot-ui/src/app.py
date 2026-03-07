@@ -44,7 +44,7 @@ class BotUIApp:
         self._request_queue: "queue.PriorityQueue[tuple[int, int, dict[str, Any]]]" = queue.PriorityQueue()
         self._request_seq = 0
         self._request_worker_started = False
-        self._poll_paths = ["game.objects_all", "game.objects", "game.players", "game.resources", "game.status"]
+        self._poll_paths = ["game.objects", "game.players", "game.status", "game.resources"]
         self._poll_path_index = 0
         self._map_orientations = ["flip_y", "normal", "flip_x", "flip_xy"]
         self._map_orientation_index = 0
@@ -219,16 +219,22 @@ class BotUIApp:
         ttk.Button(controls, text="Build Worker (All Stashes)", command=self._build_worker_supply_stash).grid(
             row=3, column=2, columnspan=2, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(controls, text="AttackMove -> Player", command=self._attackmove_all_combat_to_player).grid(
+        ttk.Button(controls, text="Build Palace", command=self._build_palace).grid(
             row=3, column=4, columnspan=2, sticky="ew", padx=2, pady=2
         )
-        ttk.Checkbutton(controls, text="Polling", variable=self.poll_enabled).grid(row=4, column=0, sticky="w")
-        ttk.Label(controls, text="Interval ms").grid(row=4, column=1, sticky="e")
-        ttk.Entry(controls, textvariable=self.poll_interval_ms, width=8).grid(row=4, column=2, sticky="w")
-        ttk.Checkbutton(controls, text="Use Streaming", variable=self.stream_enabled, command=self._toggle_streaming).grid(
-            row=4, column=3, columnspan=2, sticky="w"
+        ttk.Button(controls, text="Build Black Market", command=self._build_black_market).grid(
+            row=4, column=4, columnspan=2, sticky="ew", padx=2, pady=2
         )
-        ttk.Checkbutton(controls, text="Debug Inbound", variable=self.debug_inbound).grid(row=5, column=0, sticky="w")
+        ttk.Button(controls, text="AttackMove -> Player", command=self._attackmove_all_combat_to_player).grid(
+            row=5, column=4, columnspan=2, sticky="ew", padx=2, pady=2
+        )
+        ttk.Checkbutton(controls, text="Polling", variable=self.poll_enabled).grid(row=5, column=0, sticky="w")
+        ttk.Label(controls, text="Interval ms").grid(row=5, column=1, sticky="e")
+        ttk.Entry(controls, textvariable=self.poll_interval_ms, width=8).grid(row=5, column=2, sticky="w")
+        ttk.Checkbutton(controls, text="Use Streaming", variable=self.stream_enabled, command=self._toggle_streaming).grid(
+            row=5, column=3, sticky="w"
+        )
+        ttk.Checkbutton(controls, text="Debug Inbound", variable=self.debug_inbound).grid(row=6, column=0, sticky="w")
 
         cmd_row = ttk.LabelFrame(bottom, text="Command Input", padding=8)
         cmd_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -338,6 +344,12 @@ class BotUIApp:
 
     def _build_worker_supply_stash(self) -> None:
         self._send_session_command("Game.BuildWorker", {"producer_kind": "supply_stash"})
+
+    def _build_palace(self) -> None:
+        self._send_session_command("Game.BuildPalaceSmart", {})
+
+    def _build_black_market(self) -> None:
+        self._send_session_command("Game.BuildBlackMarketSmart", {})
 
     def _attackmove_all_combat_to_player(self) -> None:
         try:
