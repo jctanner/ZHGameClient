@@ -199,13 +199,19 @@
 						"game_queue_rpg_all_barracks",
 						"game_queue_quads_all_war_factories",
 						"game_queue_scorpions_all_war_factories",
+						"game_queue_radar_vans_all_war_factories",
+						"game_queue_radar_van",
 						"game_supply_build",
 						"game_supply_build_smart",
 						"game_barracks_build_smart",
 						"game_arms_dealer_build_smart",
 						"game_palace_build_smart",
 						"game_black_market_build_smart",
-						"game_attackmove_all_combat_to_player"
+						"game_attackmove_all_combat_to_player",
+						"game_camera_set",
+						"game_camera_set_zoom_limited",
+						"game_camera_lookat",
+						"game_camera_get"
 					})}
 				};
 				sendJsonLine(reply);
@@ -300,6 +306,19 @@
 				return;
 			}
 
+			if (cmd == "Game.Camera.Get")
+			{
+				nlohmann::json result;
+				std::string reason;
+				if (!executeGameCameraGet(message, result, reason))
+				{
+					sendQueryError(requestId, "invalid_state", reason.c_str());
+					return;
+				}
+				sendQueryResult(requestId, result);
+				return;
+			}
+
 			if (cmd == "Game.QueueUnit")
 			{
 				std::string reason;
@@ -356,6 +375,32 @@
 			{
 				std::string reason;
 				if (!executeGameQueueScorpionsAllWarFactories(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.QueueRadarVansAllWarFactories")
+			{
+				std::string reason;
+				if (!executeGameQueueRadarVansAllWarFactories(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.QueueRadarVan")
+			{
+				std::string reason;
+				if (!executeGameQueueRadarVan(message, reason))
 				{
 					sendActionAck(requestId, false, "invalid_state", reason.c_str());
 					return;
@@ -516,6 +561,42 @@
 			{
 				std::string reason;
 				if (!executeGameAttackMoveAllCombatToPlayer(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.Camera.Set")
+			{
+				std::string reason;
+				if (!executeGameCameraSet(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.Camera.SetZoomLimited")
+			{
+				std::string reason;
+				if (!executeGameCameraSetZoomLimited(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.Camera.LookAt")
+			{
+				std::string reason;
+				if (!executeGameCameraLookAt(message, reason))
 				{
 					sendActionAck(requestId, false, "invalid_state", reason.c_str());
 					return;
