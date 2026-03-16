@@ -3496,7 +3496,7 @@
 
 		bool executeGameAttackMoveRaidSmart(const nlohmann::json& message, std::string& reason)
 		{
-			if (TheGameLogic == nullptr)
+			if (TheGameLogic == nullptr || ThePlayerList == nullptr)
 			{
 				reason = "logic_not_ready";
 				return false;
@@ -3550,6 +3550,13 @@
 				{
 					return;
 				}
+				const ThingTemplate* tt = obj->getTemplate();
+				const std::string name = tt != nullptr ? tt->getName().str() : "";
+				// Keep radar coverage at home; do not include radar-type units in raid groups.
+				if (containsIgnoreCase(name, "radar"))
+				{
+					return;
+				}
 				if (obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
 				{
 					return;
@@ -3600,43 +3607,79 @@
 				return false;
 			}
 
-			Int directionIndex = static_cast<Int>(::GetTickCount() & 3u);
-			if (argsIt != message.end() && argsIt->is_object())
+			Coord3D target;
+			target.z = 0.0f;
+			bool haveTarget = false;
+
+			// Prefer random enemy start/base position so raids fan out across opponents.
+			std::vector<Coord3D> enemyTargets;
+			const Int playerCount = ThePlayerList->getPlayerCount();
+			Player* neutral = ThePlayerList->getNeutralPlayer();
+			for (Int i = 0; i < playerCount; ++i)
 			{
-				const auto directionIt = argsIt->find("direction_index");
-				if (directionIt != argsIt->end() && directionIt->is_number_integer())
+				Player* candidate = ThePlayerList->getNthPlayer(i);
+				if (candidate == nullptr || candidate == player || candidate == neutral)
 				{
-					const Int requested = directionIt->get<Int>();
-					if (requested >= 0)
+					continue;
+				}
+				nlohmann::json enemyPos = buildPlayerMapPositionSummary(candidate);
+				const auto exIt = enemyPos.find("x");
+				const auto eyIt = enemyPos.find("y");
+				if (exIt == enemyPos.end() || eyIt == enemyPos.end() || !exIt->is_number() || !eyIt->is_number())
+				{
+					continue;
+				}
+				Coord3D p;
+				p.x = exIt->get<Real>();
+				p.y = eyIt->get<Real>();
+				p.z = 0.0f;
+				enemyTargets.push_back(p);
+			}
+			if (!enemyTargets.empty())
+			{
+				const std::size_t pick = static_cast<std::size_t>(::GetTickCount() % enemyTargets.size());
+				target = enemyTargets[pick];
+				haveTarget = true;
+			}
+
+			// Fallback: directional offset from our anchor.
+			if (!haveTarget)
+			{
+				Int directionIndex = static_cast<Int>(::GetTickCount() & 3u);
+				if (argsIt != message.end() && argsIt->is_object())
+				{
+					const auto directionIt = argsIt->find("direction_index");
+					if (directionIt != argsIt->end() && directionIt->is_number_integer())
 					{
-						directionIndex = requested % 4;
+						const Int requested = directionIt->get<Int>();
+						if (requested >= 0)
+						{
+							directionIndex = requested % 4;
+						}
 					}
 				}
-			}
 
-			Real dx = 0.0f;
-			Real dy = 0.0f;
-			if (directionIndex == 0)
-			{
-				dx = 1.0f;
+				Real dx = 0.0f;
+				Real dy = 0.0f;
+				if (directionIndex == 0)
+				{
+					dx = 1.0f;
+				}
+				else if (directionIndex == 1)
+				{
+					dx = -1.0f;
+				}
+				else if (directionIndex == 2)
+				{
+					dy = 1.0f;
+				}
+				else
+				{
+					dy = -1.0f;
+				}
+				target.x = anchor.x + (dx * distance);
+				target.y = anchor.y + (dy * distance);
 			}
-			else if (directionIndex == 1)
-			{
-				dx = -1.0f;
-			}
-			else if (directionIndex == 2)
-			{
-				dy = 1.0f;
-			}
-			else
-			{
-				dy = -1.0f;
-			}
-
-			Coord3D target;
-			target.x = anchor.x + (dx * distance);
-			target.y = anchor.y + (dy * distance);
-			target.z = 0.0f;
 
 			Int commanded = 0;
 			const std::size_t maxToCommand = std::min<std::size_t>(collectCtx.units.size(), static_cast<std::size_t>(groupSize));
