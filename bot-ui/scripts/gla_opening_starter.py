@@ -107,6 +107,8 @@ DEFAULT_ZONE_STEP = 900.0
 DEFAULT_ZONE_COUNT = 64
 SUSTAIN_MARKET_ATTEMPT_EVERY = 3
 SUSTAIN_PALACE_ATTEMPT_EVERY = 8
+SUSTAIN_STASH_EVERY_CYCLES = 6
+SUSTAIN_STASH_MIN_MONEY = 9000
 DEFAULT_PENDING_COOLDOWN_SEC = 20.0
 BUDGET_RESERVE_CASH = 5000
 BUDGET_INFANTRY_MIX_MIN = 1200
@@ -875,6 +877,7 @@ def queue_building_mix(
     zone_center: tuple[float, float] | None = None,
     zone_radius: float | None = None,
     buildings: list[dict[str, Any]] | None = None,
+    stash_after_primary: bool = False,
 ) -> tuple[int, Any, Any]:
     sent_ok = 0
     last_code: Any = None
@@ -888,14 +891,20 @@ def queue_building_mix(
             out["strict_zone"] = False
         return out
 
-    requests: list[tuple[str, int, dict[str, Any]]] = [
+    primary_requests: list[tuple[str, int, dict[str, Any]]] = [
         ("Game.BuildBlackMarketSmart", max(0, int(black_markets_count)), {}),
-        ("Game.BuildSupplyStashSmart", max(0, int(stash_count)), {}),
         ("Game.BuildBarracksSmart", max(0, int(barracks_count)), {}),
         ("Game.BuildArmsDealerSmart", max(0, int(arms_count)), {}),
         ("Game.BuildBarracksSmart", max(0, int(tunnel_networks_count)), {"building_template": "GLATunnelNetwork"}),
         ("Game.BuildBarracksSmart", max(0, int(stinger_sites_count)), {"building_template": "GLAStingerSite"}),
     ]
+    secondary_requests: list[tuple[str, int, dict[str, Any]]] = [
+        ("Game.BuildSupplyStashSmart", max(0, int(stash_count)), {}),
+    ]
+    requests: list[tuple[str, int, dict[str, Any]]] = (
+        primary_requests + secondary_requests if stash_after_primary else
+        [("Game.BuildSupplyStashSmart", max(0, int(stash_count)), {})] + primary_requests
+    )
 
     def resolve_build_target(cmd_name: str, args_map: dict[str, Any]) -> str:
         explicit = args_map.get("building_template")
@@ -912,6 +921,12 @@ def queue_building_mix(
         return fallback.get(cmd_name, cmd_name)
 
     for cmd, count, extra_args in requests:
+        if stash_after_primary and cmd == "Game.BuildSupplyStashSmart" and sent_ok <= 0:
+            print(
+                f"[loop {cycle}] building_mix cmd={cmd} target=GLASupplyStash skip=no_primary_progress",
+                flush=True,
+            )
+            continue
         for _ in range(count):
             if zone_center is not None and zone_radius is not None and buildings is not None:
                 singleton_needles = ZONE_SINGLETON_BUILD_RULES.get(cmd)
@@ -1815,11 +1830,28 @@ def main() -> int:
                     scorpions_count=int(sustain_step.args.get("scorpions", 3)),
                 )
             elif sustain_step.cmd == "Script.BuildingMix":
+                requested_stash_count = int(sustain_step.args.get("stash", 1))
+                stash_count_for_cycle = requested_stash_count
+                if requested_stash_count > 0:
+                    if money < SUSTAIN_STASH_MIN_MONEY:
+                        stash_count_for_cycle = 0
+                        print(
+                            f"[loop {cycle}] phase=sustain step={sustain_step_index + 1}/{len(PHASE_SUSTAIN.steps)} "
+                            f"name='{sustain_step.name}' stash_skip=low_cash money={money} required={SUSTAIN_STASH_MIN_MONEY}",
+                            flush=True,
+                        )
+                    elif cycle % max(1, SUSTAIN_STASH_EVERY_CYCLES) != 0:
+                        stash_count_for_cycle = 0
+                        print(
+                            f"[loop {cycle}] phase=sustain step={sustain_step_index + 1}/{len(PHASE_SUSTAIN.steps)} "
+                            f"name='{sustain_step.name}' stash_skip=cadence every={SUSTAIN_STASH_EVERY_CYCLES}",
+                            flush=True,
+                        )
                 sustain_added, sustain_code, sustain_reason = queue_building_mix(
                     client,
                     args.timeout_ms,
                     cycle,
-                    stash_count=int(sustain_step.args.get("stash", 1)),
+                    stash_count=stash_count_for_cycle,
                     barracks_count=int(sustain_step.args.get("barracks", 1)),
                     arms_count=int(sustain_step.args.get("arms", 1)),
                     black_markets_count=int(sustain_step.args.get("black_markets", 0)),
@@ -1828,6 +1860,7 @@ def main() -> int:
                     zone_center=zone_centers[zone_index],
                     zone_radius=float(args.zone_radius),
                     buildings=buildings,
+                    stash_after_primary=True,
                 )
             else:
                 sustain_added, sustain_code, sustain_reason = try_burst_step(client, sustain_step, args.timeout_ms)
