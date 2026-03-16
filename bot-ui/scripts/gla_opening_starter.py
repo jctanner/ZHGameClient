@@ -61,7 +61,7 @@ OPENING_BUILDING_MIX: dict[str, int] = {
     "stinger_sites": 4,
 }
 OPENING_INFANTRY_MIX: dict[str, int] = {"soldiers": 3, "rpg": 6}
-OPENING_VEHICLE_MIX: dict[str, int] = {"radar": 1, "quads": 3, "scorpions": 3}
+OPENING_VEHICLE_MIX: dict[str, int] = {"radar": 0, "quads": 3, "scorpions": 3}
 
 SUSTAIN_BUILDING_MIX: dict[str, int] = {
     "stash": 1,
@@ -72,7 +72,7 @@ SUSTAIN_BUILDING_MIX: dict[str, int] = {
     "stinger_sites": 4,
 }
 SUSTAIN_INFANTRY_MIX: dict[str, int] = {"soldiers": 2, "rpg": 2}
-SUSTAIN_VEHICLE_MIX: dict[str, int] = {"radar": 1, "quads": 3, "scorpions": 3}
+SUSTAIN_VEHICLE_MIX: dict[str, int] = {"radar": 0, "quads": 3, "scorpions": 3}
 
 
 PHASE_OPENING = Phase(
@@ -116,6 +116,7 @@ OBJECTS_CACHE_REFRESH_EVERY_CYCLES = 6
 OBJECTS_UNITS_QUERY_EVERY_CYCLES = 12
 OBJECTS_BUILDINGS_QUERY_EVERY_CYCLES = 3
 HEAVY_QUERY_BACKOFF_SEC = 20.0
+IDLE_WORKERS_QUERY_EVERY_CYCLES = 2
 DEFAULT_RAID_MIN_UNITS = 20
 DEFAULT_RAID_GROUP_SIZE = 20
 DEFAULT_RAID_EVERY_CYCLES = 4
@@ -123,6 +124,12 @@ DEFAULT_RAID_DISTANCE = 3000.0
 DEFAULT_RAID_COOLDOWN_SEC = 20.0
 WORKER_TRICKLE_PER_PRODUCER_PER_TICK = 1
 DEFAULT_WORKER_TOPUP_COOLDOWN_SEC = 8.0
+DEFAULT_WORKER_TOPUP_MIN_MONEY = 7000
+DEFAULT_IDLE_WORKERS_SKIP_TOPUP_THRESHOLD = 1
+RADAR_KEEPALIVE_INFLIGHT_SEC = 90.0
+RADAR_KEEPALIVE_WATCHDOG_SEC = 240.0
+DEFAULT_LOW_MONEY_THRESHOLD = 3500
+DEFAULT_LOW_MONEY_SKIP_CYCLES = 3
 ZONE_SINGLETON_BUILD_RULES: dict[str, tuple[str, ...]] = {
     "Game.BuildCommandCenterSmart": ("commandcenter",),
     "Game.BuildSupplyStashSmart": ("supplystash", "supplycenter"),
@@ -298,6 +305,21 @@ def query_zone_counts(
         return None
     counts = payload.get("counts")
     return counts if isinstance(counts, dict) else None
+
+
+def query_idle_workers_count(client: PipeClient, timeout_ms: int, previous_count: int) -> int:
+    resp = try_send_session_command(client, "Game.Query", {"path": "game.idle_workers"}, timeout_ms)
+    if resp is None or resp.get("ok") is False:
+        return previous_count
+    payload = extract_payload(resp)
+    if isinstance(payload, dict):
+        total = payload.get("idle_workers_total")
+        if isinstance(total, int):
+            return max(0, total)
+        workers = payload.get("workers")
+        if isinstance(workers, list):
+            return max(0, len(workers))
+    return previous_count
 
 
 def merge_compact_rows(
@@ -794,7 +816,7 @@ def queue_vehicle_mix(
     last_code: Any = None
     last_reason: Any = None
 
-    for _ in range(max(1, int(radar_count))):
+    for _ in range(max(0, int(radar_count))):
         resp = try_send_session_command(client, "Game.QueueRadarVan", {}, timeout_ms)
         if resp is None:
             continue
@@ -1051,6 +1073,30 @@ def main() -> int:
         help="Cooldown between raid attack-move commands (default: 20).",
     )
     parser.add_argument(
+        "--low-money-threshold",
+        type=int,
+        default=DEFAULT_LOW_MONEY_THRESHOLD,
+        help="When sustain money is below this, enter low-money hold mode (default: 3500).",
+    )
+    parser.add_argument(
+        "--low-money-skip-cycles",
+        type=int,
+        default=DEFAULT_LOW_MONEY_SKIP_CYCLES,
+        help="How many sustain cycles to skip non-raid evaluation in low-money hold mode (default: 3).",
+    )
+    parser.add_argument(
+        "--worker-topup-min-money",
+        type=int,
+        default=DEFAULT_WORKER_TOPUP_MIN_MONEY,
+        help="Do not queue worker top-ups in sustain below this money threshold (default: 7000).",
+    )
+    parser.add_argument(
+        "--idle-workers-skip-topup-threshold",
+        type=int,
+        default=DEFAULT_IDLE_WORKERS_SKIP_TOPUP_THRESHOLD,
+        help="Skip worker top-up when idle workers are at/above this threshold (default: 1).",
+    )
+    parser.add_argument(
         "--log-file",
         default=str(ROOT / "scripts" / "logs" / "gla_opening_starter.log"),
         help="Path to log file (default: bot-ui/scripts/logs/gla_opening_starter.log).",
@@ -1134,11 +1180,16 @@ def main() -> int:
     last_attempt_at = 0.0
     last_worker_topup_at = 0.0
     heavy_query_backoff_until = 0.0
+    radar_keepalive_inflight_until = 0.0
+    radar_keepalive_queued = False
+    radar_keepalive_queued_at = 0.0
+    low_money_skip_until_cycle = 0
     cycle = 1
     pending_until_by_key: dict[str, float] = {}
     cached_units = startup_units
     cached_buildings = startup_buildings
     cached_money = query_money(client, args.timeout_ms, previous_money=0)
+    cached_idle_workers = query_idle_workers_count(client, args.timeout_ms, previous_count=0)
 
     camera_set_top_down(client, args.timeout_ms, height_multiplier=max(0.25, float(args.camera_height_multiplier)))
     camera_look_at(client, args.timeout_ms, zone_centers[zone_index][0], zone_centers[zone_index][1])
@@ -1197,13 +1248,17 @@ def main() -> int:
                     cached_buildings = merge_compact_rows(cached_buildings, compact_buildings)
 
             units, buildings = cached_units, cached_buildings
-            command_center_worker_issued, stash_worker_issued, existing_workers = recompute_producer_worker_issued(
-                units,
-                buildings,
-            )
+            existing_workers = count_matching_templates(units, ("worker", "dozer"))
+            sync_producers(buildings, command_center_worker_issued, stash_worker_issued)
             assets = summarize_assets(units, buildings)
             money = query_money(client, args.timeout_ms, previous_money=cached_money)
             cached_money = money
+            if cycle % max(1, IDLE_WORKERS_QUERY_EVERY_CYCLES) == 1:
+                cached_idle_workers = query_idle_workers_count(
+                    client,
+                    args.timeout_ms,
+                    previous_count=cached_idle_workers,
+                )
             now = time.monotonic()
 
             phase_index, phase_entered_at_monotonic, phase_last_transition_reason = maybe_transition_phase(
@@ -1220,32 +1275,106 @@ def main() -> int:
                 time.sleep(args.tick_sec)
                 continue
 
+            radar_keepalive_key = "Game.QueueRadarVan.Keepalive"
+            if assets.get("radar_vans", 0) > 0:
+                radar_keepalive_inflight_until = 0.0
+                radar_keepalive_queued = False
+                radar_keepalive_queued_at = 0.0
+            if radar_keepalive_queued and (now - radar_keepalive_queued_at) >= RADAR_KEEPALIVE_WATCHDOG_SEC:
+                radar_keepalive_queued = False
+                radar_keepalive_queued_at = 0.0
+            radar_keepalive_inflight = radar_keepalive_inflight_until > now
+            radar_ready_or_pending = (
+                assets.get("radar_vans", 0) > 0
+                or is_pending(pending_until_by_key, radar_keepalive_key, now)
+                or radar_keepalive_inflight
+                or radar_keepalive_queued
+            )
+            if assets.get("arms", 0) > 0 and not radar_ready_or_pending:
+                radar_resp = try_send_session_command(client, "Game.QueueRadarVan", {}, args.timeout_ms)
+                radar_ok = False
+                radar_code: Any = None
+                radar_reason: Any = None
+                if radar_resp is not None:
+                    radar_ok = bool(radar_resp.get("ok", False))
+                    radar_code = radar_resp.get("code")
+                    radar_reason = radar_resp.get("reason")
+                if not radar_ok:
+                    fallback_resp = try_send_session_command(
+                        client,
+                        "Game.QueueRadarVansAllWarFactories",
+                        {"count": 1},
+                        args.timeout_ms,
+                    )
+                    if fallback_resp is not None:
+                        radar_ok = bool(fallback_resp.get("ok", False))
+                        radar_code = fallback_resp.get("code")
+                        radar_reason = fallback_resp.get("reason")
+                print(
+                    f"[loop {cycle}] radar_keepalive arms={assets.get('arms', 0)} radar_vans={assets.get('radar_vans', 0)} "
+                    f"ok={radar_ok} code={radar_code} reason={radar_reason}",
+                    flush=True,
+                )
+                if radar_ok:
+                    mark_pending(
+                        pending_until_by_key,
+                        radar_keepalive_key,
+                        now,
+                        max(12.0, float(args.pending_cooldown_sec)),
+                    )
+                    radar_keepalive_inflight_until = now + RADAR_KEEPALIVE_INFLIGHT_SEC
+                    radar_keepalive_queued = True
+                    radar_keepalive_queued_at = now
+                last_attempt_at = now
+                cycle += 1
+                time.sleep(args.tick_sec)
+                continue
+
             # After we are partway into opening (or in sustain), keep worker producers filled.
             if phase_index > 0 or opening_step_index >= 2:
-                if (now - last_worker_topup_at) >= DEFAULT_WORKER_TOPUP_COOLDOWN_SEC:
+                allow_cc_topup = True
+                allow_stash_topup = True
+                idle_skip_threshold = max(0, int(args.idle_workers_skip_topup_threshold))
+                if idle_skip_threshold > 0 and cached_idle_workers >= idle_skip_threshold:
+                    allow_cc_topup = False
+                    print(
+                        f"[loop {cycle}] worker_topup_skip cc_idle_workers={cached_idle_workers} "
+                        f"threshold={idle_skip_threshold}",
+                        flush=True,
+                    )
+                if phase_index > 0:
+                    worker_money_gate = max(0, int(args.worker_topup_min_money))
+                    if money < worker_money_gate:
+                        allow_cc_topup = False
+                        print(
+                            f"[loop {cycle}] worker_topup_skip cc_low_cash money={money} required={worker_money_gate}",
+                            flush=True,
+                        )
+                if (allow_cc_topup or allow_stash_topup) and (now - last_worker_topup_at) >= DEFAULT_WORKER_TOPUP_COOLDOWN_SEC:
                     worker_topup_done = False
-                    command_center_id = pick_command_center_needing_workers(command_center_worker_issued)
-                    if command_center_id is not None:
-                        cc_key = f"Game.BuildWorker:{command_center_id}"
-                        if not is_pending(pending_until_by_key, cc_key, now):
-                            cc_added = issue_worker_for_producer(
-                                client=client,
-                                timeout_ms=args.timeout_ms,
-                                cycle=cycle,
-                                producer_label="command_center",
-                                producer_id=command_center_id,
-                                producer_target=COMMAND_CENTER_WORKER_TARGET,
-                                producer_worker_issued=command_center_worker_issued,
-                            )
-                            if cc_added > 0:
-                                mark_pending(
-                                    pending_until_by_key,
-                                    cc_key,
-                                    now,
-                                    max(2.0, float(args.pending_cooldown_sec) * 0.5),
+                    if allow_cc_topup:
+                        command_center_id = pick_command_center_needing_workers(command_center_worker_issued)
+                        if command_center_id is not None:
+                            cc_key = f"Game.BuildWorker:{command_center_id}"
+                            if not is_pending(pending_until_by_key, cc_key, now):
+                                cc_added = issue_worker_for_producer(
+                                    client=client,
+                                    timeout_ms=args.timeout_ms,
+                                    cycle=cycle,
+                                    producer_label="command_center",
+                                    producer_id=command_center_id,
+                                    producer_target=COMMAND_CENTER_WORKER_TARGET,
+                                    producer_worker_issued=command_center_worker_issued,
                                 )
-                                worker_topup_done = True
-                    if not worker_topup_done:
+                                if cc_added > 0:
+                                    mark_pending(
+                                        pending_until_by_key,
+                                        cc_key,
+                                        now,
+                                        max(2.0, float(args.pending_cooldown_sec) * 0.5),
+                                    )
+                                    worker_topup_done = True
+                    if not worker_topup_done and allow_stash_topup:
                         stash_id = pick_stash_needing_workers(stash_worker_issued)
                         if stash_id is not None:
                             stash_key = f"Game.BuildWorker:{stash_id}"
@@ -1272,38 +1401,58 @@ def main() -> int:
 
             current_phase = PLAN_PHASES[phase_index]
             if current_phase.name == PHASE_OPENING_NAME:
-                if is_pending(pending_until_by_key, "Game.BuildPalaceSmart", now):
-                    time.sleep(args.tick_sec)
-                    continue
-                palace_added, palace_code, palace_reason = try_burst_step(
-                    client,
-                    Step("Build palace priority", "Game.BuildPalaceSmart", {}),
-                    args.timeout_ms,
-                )
-                if palace_added > 0:
-                    mark_pending(
-                        pending_until_by_key,
-                        "Game.BuildPalaceSmart",
-                        now,
-                        float(args.pending_cooldown_sec),
+                opening_core_ready_now = opening_building_mix_ready(buildings)
+                if opening_core_ready_now:
+                    if is_pending(pending_until_by_key, "Game.BuildPalaceSmart", now):
+                        cycle += 1
+                        time.sleep(args.tick_sec)
+                        continue
+                    palace_added, palace_code, palace_reason = try_burst_step(
+                        client,
+                        Step("Build palace priority", "Game.BuildPalaceSmart", {}),
+                        args.timeout_ms,
                     )
-                    assets["palaces"] = max(1, assets.get("palaces", 0) + palace_added)
-                    phase_index, phase_entered_at_monotonic, phase_last_transition_reason = maybe_transition_phase(
-                        phase_index=phase_index,
-                        opening_step_index=opening_step_index,
-                        assets=assets,
-                        opening_core_ready=opening_building_mix_ready(buildings),
-                        now_monotonic=now,
-                        phase_entered_at_monotonic=phase_entered_at_monotonic,
-                        cycle=cycle,
-                    )
-                    print(f"[phase] palace_priority added={palace_added} code={palace_code} reason={palace_reason}", flush=True)
-                    last_attempt_at = now
-                    time.sleep(args.tick_sec)
-                    continue
+                    if palace_added > 0:
+                        mark_pending(
+                            pending_until_by_key,
+                            "Game.BuildPalaceSmart",
+                            now,
+                            float(args.pending_cooldown_sec),
+                        )
+                        assets["palaces"] = max(1, assets.get("palaces", 0) + palace_added)
+                        phase_index, phase_entered_at_monotonic, phase_last_transition_reason = maybe_transition_phase(
+                            phase_index=phase_index,
+                            opening_step_index=opening_step_index,
+                            assets=assets,
+                            opening_core_ready=opening_building_mix_ready(buildings),
+                            now_monotonic=now,
+                            phase_entered_at_monotonic=phase_entered_at_monotonic,
+                            cycle=cycle,
+                        )
+                        print(f"[phase] palace_priority added={palace_added} code={palace_code} reason={palace_reason}", flush=True)
+                        last_attempt_at = now
+                        cycle += 1
+                        time.sleep(args.tick_sec)
+                        continue
 
                 current = PHASE_OPENING.steps[opening_step_index]
+                if current.cmd == "Script.BuildingMix" and cached_idle_workers <= 0:
+                    mark_pending(
+                        pending_until_by_key,
+                        current.cmd,
+                        now,
+                        max(8.0, float(args.pending_cooldown_sec)),
+                    )
+                    print(
+                        f"[loop {cycle}] phase=open step={opening_step_index + 1}/{len(PHASE_OPENING.steps)} "
+                        f"name='{current.name}' skip=no_idle_workers idle_workers={cached_idle_workers}",
+                        flush=True,
+                    )
+                    cycle += 1
+                    time.sleep(args.tick_sec)
+                    continue
                 if is_pending(pending_until_by_key, current.cmd, now):
+                    cycle += 1
                     time.sleep(args.tick_sec)
                     continue
                 sent_ok = 0
@@ -1387,6 +1536,13 @@ def main() -> int:
                         now,
                         float(args.pending_cooldown_sec),
                     )
+                elif current.cmd == "Script.BuildingMix" and last_reason == "idle_worker_not_found":
+                    mark_pending(
+                        pending_until_by_key,
+                        current.cmd,
+                        now,
+                        max(10.0, float(args.pending_cooldown_sec)),
+                    )
                 last_attempt_at = now
 
                 if current.cmd == "Script.BuildingMix":
@@ -1441,6 +1597,7 @@ def main() -> int:
                     cycle=cycle,
                 )
 
+                cycle += 1
                 time.sleep(args.tick_sec)
                 continue
 
@@ -1450,10 +1607,15 @@ def main() -> int:
             raid_group_size = max(1, int(args.raid_group_size))
             raid_distance = max(256.0, float(args.raid_distance))
             raid_key = "Game.AttackMove.RaidSmart"
-            raid_cycle_gate = (cycle % raid_every == 0)
+            low_money_threshold = max(0, int(args.low_money_threshold))
+            low_money_skip_cycles = max(1, int(args.low_money_skip_cycles))
+            if money < low_money_threshold:
+                low_money_skip_until_cycle = max(low_money_skip_until_cycle, cycle + low_money_skip_cycles)
+            in_low_money_hold = (money < low_money_threshold) and (cycle < low_money_skip_until_cycle)
+
+            raid_cycle_gate = (cycle % raid_every == 0) or in_low_money_hold
             raid_cooldown_gate = not is_pending(pending_until_by_key, raid_key, now)
             if raid_cycle_gate and raid_cooldown_gate:
-                direction_index = cycle % 4
                 raid_resp = try_send_session_command(
                     client,
                     "Game.AttackMove.RaidSmart",
@@ -1461,15 +1623,13 @@ def main() -> int:
                         "min_units": raid_min_units,
                         "group_size": raid_group_size,
                         "distance": raid_distance,
-                        "direction_index": direction_index,
                     },
                     args.timeout_ms,
                 )
                 if raid_resp is not None:
                     raid_ok = bool(raid_resp.get("ok", False))
                     print(
-                        f"[loop {cycle}] raid_smart dir={direction_index} "
-                        f"ok={raid_ok} "
+                        f"[loop {cycle}] raid_smart ok={raid_ok} "
                         f"code={raid_resp.get('code')} reason={raid_resp.get('reason')}",
                         flush=True,
                     )
@@ -1488,6 +1648,16 @@ def main() -> int:
                     remaining = max(0.0, pending_until - now)
                     raid_reason = f"cooldown_gate remaining_sec={remaining:.1f}"
                 print(f"[loop {cycle}] raid_skip {raid_reason}", flush=True)
+
+            if in_low_money_hold:
+                print(
+                    f"[loop {cycle}] sustain_hold low_money money={money} "
+                    f"threshold={low_money_threshold} resume_cycle={low_money_skip_until_cycle}",
+                    flush=True,
+                )
+                cycle += 1
+                time.sleep(args.tick_sec)
+                continue
 
             black_markets = assets["black_markets"]
             palaces = assets["palaces"]
@@ -1585,6 +1755,16 @@ def main() -> int:
                     time.sleep(args.tick_sec)
                     continue
             if is_pending(pending_until_by_key, sustain_step.cmd, now):
+                sustain_step_index = (sustain_step_index + 1) % len(PHASE_SUSTAIN.steps)
+                cycle += 1
+                time.sleep(args.tick_sec)
+                continue
+            if sustain_step.cmd == "Script.BuildingMix" and cached_idle_workers <= 0:
+                print(
+                    f"[loop {cycle}] phase=sustain step={sustain_step_index + 1}/{len(PHASE_SUSTAIN.steps)} "
+                    f"name='{sustain_step.name}' skip=no_idle_workers idle_workers={cached_idle_workers}",
+                    flush=True,
+                )
                 sustain_step_index = (sustain_step_index + 1) % len(PHASE_SUSTAIN.steps)
                 cycle += 1
                 time.sleep(args.tick_sec)
