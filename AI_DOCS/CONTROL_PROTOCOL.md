@@ -100,14 +100,24 @@ Supported `cmd` values (v1):
 14. `Game.Query`
 15. `Game.QueueUnit`
 16. `Game.BuildWorker`
-17. `Game.FindSupplySources`
-18. `Game.FindBuildLocationNearSupply`
-19. `Game.DozerConstruct`
-20. `Game.BuildSupplyStashAuto`
-21. `Game.BuildSupplyStashSmart`
-22. `Game.BuildBarracksSmart`
-23. `Game.BuildCommandCenterSmart`
-24. `Game.AttackMove`
+17. `Game.QueueSoldiersAllBarracks`
+18. `Game.QueueRpgTroopersAllBarracks`
+19. `Game.QueueQuadsAllWarFactories`
+20. `Game.QueueScorpionsAllWarFactories`
+21. `Game.QueueRadarVansAllWarFactories`
+22. `Game.QueueRadarVan`
+23. `Game.FindSupplySources`
+24. `Game.FindBuildLocationNearSupply`
+25. `Game.DozerConstruct`
+26. `Game.BuildSupplyStashAuto`
+27. `Game.BuildSupplyStashSmart`
+28. `Game.BuildBarracksSmart`
+29. `Game.BuildCommandCenterSmart`
+30. `Game.AttackMove`
+31. `Game.Camera.Set`
+32. `Game.Camera.LookAt`
+33. `Game.Camera.SetZoomLimited`
+34. `Game.Camera.Get`
 
 `Lobby.Join` args:
 
@@ -174,6 +184,9 @@ Supported `cmd` values (v1):
 2. `worker_object_id` (optional int, default first idle dozer/worker)
 3. `building_template` (optional override; otherwise inferred by faction/buildability)
 4. `anchor_object_id` (optional int; owned object used as placement anchor)
+5. `zone_center` (optional object `{x,y}`; preferred zone center for placement)
+6. `zone_radius` (optional number; search radius around `zone_center`, default adapter-defined)
+7. `strict_zone` (optional bool; if `true`, do not fallback to anchor-based placement when zone has no legal spot)
 
 `Game.BuildBarracksSmart` behavior:
 
@@ -188,6 +201,39 @@ Supported `cmd` values (v1):
 2. `worker_object_id` (optional int, default first idle dozer/worker)
 3. `building_template` (optional override; otherwise inferred by faction/buildability)
 4. `anchor_object_id` (optional int; owned object used as placement anchor, defaults to command center)
+5. `zone_center` (optional object `{x,y}`; preferred zone center for placement)
+6. `zone_radius` (optional number; search radius around `zone_center`, default adapter-defined)
+7. `strict_zone` (optional bool; if `true`, do not fallback to anchor-based placement when zone has no legal spot)
+
+`Game.BuildArmsDealerSmart` args:
+
+1. `player_index` (optional int, default local player)
+2. `worker_object_id` (optional int, default first idle dozer/worker)
+3. `building_template` (optional override; otherwise inferred by faction/buildability)
+4. `anchor_object_id` (optional int; owned object used as placement anchor)
+5. `zone_center` (optional object `{x,y}`; preferred zone center for placement)
+6. `zone_radius` (optional number; search radius around `zone_center`, default adapter-defined)
+7. `strict_zone` (optional bool; if `true`, do not fallback to anchor-based placement when zone has no legal spot)
+
+`Game.BuildPalaceSmart` args:
+
+1. `player_index` (optional int, default local player)
+2. `worker_object_id` (optional int, default first idle dozer/worker)
+3. `building_template` (optional override; otherwise inferred by faction/buildability)
+4. `anchor_object_id` (optional int; owned object used as placement anchor)
+5. `zone_center` (optional object `{x,y}`; preferred zone center for placement)
+6. `zone_radius` (optional number; search radius around `zone_center`, default adapter-defined)
+7. `strict_zone` (optional bool; if `true`, do not fallback to anchor-based placement when zone has no legal spot)
+
+`Game.BuildBlackMarketSmart` args:
+
+1. `player_index` (optional int, default local player)
+2. `worker_object_id` (optional int, default first idle dozer/worker)
+3. `building_template` (optional override; otherwise inferred by faction/buildability)
+4. `anchor_object_id` (optional int; owned object used as placement anchor)
+5. `zone_center` (optional object `{x,y}`; preferred zone center for placement)
+6. `zone_radius` (optional number; search radius around `zone_center`, default adapter-defined)
+7. `strict_zone` (optional bool; if `true`, do not fallback to anchor-based placement when zone has no legal spot)
 
 `Game.BuildCommandCenterSmart` behavior:
 
@@ -208,6 +254,35 @@ Supported `cmd` values (v1):
 1. Same args as `Game.QueueUnit`
 2. If `unit_template` is omitted, adapter infers faction worker/dozer template.
 
+`Game.QueueSoldiersAllBarracks` args:
+
+1. `player_index` (optional int, default local player)
+2. `count` (optional int, default `1`, clamped `1..9`)
+
+`Game.QueueRpgTroopersAllBarracks` args:
+
+1. `player_index` (optional int, default local player)
+2. `count` (optional int, default `1`, clamped `1..9`)
+
+`Game.QueueQuadsAllWarFactories` args:
+
+1. `player_index` (optional int, default local player)
+2. `count` (optional int, default `1`, clamped `1..9`)
+
+`Game.QueueScorpionsAllWarFactories` args:
+
+1. `player_index` (optional int, default local player)
+2. `count` (optional int, default `1`, clamped `1..9`)
+
+`Game.QueueRadarVansAllWarFactories` args:
+
+1. `player_index` (optional int, default local player)
+2. `count` (optional int, default `1`, clamped `1..9`)
+
+`Game.QueueRadarVan` args:
+
+1. `player_index` (optional int, default local player)
+
 `Game.AttackMove` args:
 
 1. `player_index` (optional int, default local player)
@@ -215,6 +290,31 @@ Supported `cmd` values (v1):
 3. `y` (required number)
 4. `object_id` (optional int, single controlled object)
 5. `object_ids` (optional int[], multiple controlled objects)
+
+`Game.Camera.Set` args:
+
+1. `angle` (optional number, radians)
+2. `pitch` (optional number, radians)
+3. `zoom` (optional number)
+4. `zoom_multiplier` (optional number, multiplies current zoom)
+5. `top_down` (optional bool, convenience pitch preset near -90 degrees)
+6. `height` (optional number, camera height-above-ground)
+7. `height_multiplier` (optional number, multiplies current camera height-above-ground)
+
+`Game.Camera.LookAt` args:
+
+1. `x` (required number) and `y` (required number)
+2. alternatively `zone_center` object with `{x,y}`
+
+`Game.Camera.SetZoomLimited` args:
+
+1. `enabled` (required bool; `true` clamps camera height to engine min/max, `false` disables that clamp)
+2. alias `zoom_limited` (optional bool, same behavior as `enabled`)
+
+`Game.Camera.Get`:
+
+1. Returns `QueryResult` with current camera `x,y,z,angle,pitch,zoom,height_above_ground,zoom_limited`.
+2. Also includes defaults/limits when available: `default_height`, `min_height`, `max_height`.
 
 ## In-Game Intent Batch
 
@@ -252,7 +352,11 @@ Common `path` values:
 8. `game.resources`
 9. `game.units`
 10. `game.objects`
-11. `game.visible_enemies`
+11. `game.objects_map`
+12. `game.objects_units_map`
+13. `game.objects_buildings_map`
+14. `game.idle_workers`
+15. `game.visible_enemies`
 
 ## Acknowledgements
 

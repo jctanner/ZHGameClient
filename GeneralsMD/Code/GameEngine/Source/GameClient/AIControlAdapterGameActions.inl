@@ -1160,6 +1160,178 @@
 			return ctx.firstCommandCenter;
 		}
 
+		struct ZonePlacementArgs
+		{
+			bool hasZoneCenter;
+			Coord3D zoneCenter;
+			Real zoneRadius;
+			bool strictZone;
+		};
+
+		static ZonePlacementArgs parseZonePlacementArgs(const nlohmann::json* args)
+		{
+			ZonePlacementArgs out = {};
+			out.hasZoneCenter = false;
+			out.zoneCenter.x = 0.0f;
+			out.zoneCenter.y = 0.0f;
+			out.zoneCenter.z = 0.0f;
+			out.zoneRadius = 320.0f;
+			out.strictZone = false;
+			if (args == nullptr || !args->is_object())
+			{
+				return out;
+			}
+
+			const auto strictIt = args->find("strict_zone");
+			if (strictIt != args->end() && strictIt->is_boolean())
+			{
+				out.strictZone = strictIt->get<bool>();
+			}
+
+			const auto zoneCenterIt = args->find("zone_center");
+			if (zoneCenterIt != args->end() && zoneCenterIt->is_object())
+			{
+				const auto zxIt = zoneCenterIt->find("x");
+				const auto zyIt = zoneCenterIt->find("y");
+				if (zxIt != zoneCenterIt->end() && zyIt != zoneCenterIt->end() && zxIt->is_number() && zyIt->is_number())
+				{
+					out.zoneCenter.x = zxIt->get<Real>();
+					out.zoneCenter.y = zyIt->get<Real>();
+					out.zoneCenter.z = 0.0f;
+					out.hasZoneCenter = true;
+				}
+			}
+			if (!out.hasZoneCenter)
+			{
+				const auto zxIt = args->find("zone_x");
+				const auto zyIt = args->find("zone_y");
+				if (zxIt != args->end() && zyIt != args->end() && zxIt->is_number() && zyIt->is_number())
+				{
+					out.zoneCenter.x = zxIt->get<Real>();
+					out.zoneCenter.y = zyIt->get<Real>();
+					out.zoneCenter.z = 0.0f;
+					out.hasZoneCenter = true;
+				}
+			}
+
+			const auto radiusIt = args->find("zone_radius");
+			if (radiusIt != args->end() && radiusIt->is_number())
+			{
+				const Real parsed = radiusIt->get<Real>();
+				if (parsed >= 64.0f)
+				{
+					out.zoneRadius = parsed;
+				}
+			}
+			return out;
+		}
+
+		bool moveWorkerToPosition(Object* worker, const Coord3D* moveTarget, std::string& reason)
+		{
+			if (worker == nullptr)
+			{
+				reason = "worker_not_found";
+				return false;
+			}
+			AIUpdateInterface* ai = worker->getAI();
+			if (ai == nullptr)
+			{
+				reason = "worker_no_ai";
+				return false;
+			}
+			if (moveTarget == nullptr)
+			{
+				reason = "move_target_not_found";
+				return false;
+			}
+			Coord3D target = *moveTarget;
+			target.z = 0.0f;
+			ai->aiMoveToPosition(&target, CMD_FROM_AI);
+			return true;
+		}
+
+		bool findBuildLocationInZone(
+			Player* player,
+			Object* worker,
+			const ThingTemplate* buildingTemplate,
+			const Coord3D& zoneCenter,
+			Real zoneRadius,
+			Coord3D& outLocation,
+			Real& outAngle)
+		{
+			if (player == nullptr || worker == nullptr || buildingTemplate == nullptr || TheBuildAssistant == nullptr)
+			{
+				return false;
+			}
+
+			const Real placeAngle = buildingTemplate->getPlacementViewAngle();
+			const UnsignedInt legalOpts =
+				BuildAssistant::TERRAIN_RESTRICTIONS |
+				BuildAssistant::CLEAR_PATH |
+				BuildAssistant::NO_OBJECT_OVERLAP |
+				BuildAssistant::SHROUD_REVEALED;
+			const Coord3D* workerPos = worker->getPosition();
+
+			bool found = false;
+			Real bestDistSq = 0.0f;
+			Coord3D best = zoneCenter;
+			best.z = 0.0f;
+			const bool spacingBarracks = containsIgnoreCase(buildingTemplate->getName().str(), "barracks");
+			const Real barracksSpacingRadius = 280.0f;
+			const Real structurePadding = 36.0f;
+			const Real scanRadius = zoneRadius < 64.0f ? 64.0f : zoneRadius;
+
+			for (Real ring = 0.0f; ring <= scanRadius; ring += 24.0f)
+			{
+				const Int slices = ring <= 0.01f ? 1 : 48;
+				for (Int i = 0; i < slices; ++i)
+				{
+					Coord3D candidate = zoneCenter;
+					if (ring > 0.01f)
+					{
+						const Real theta = static_cast<Real>(i) * (6.28318530717958647692f / static_cast<Real>(slices));
+						candidate.x += std::cos(theta) * ring;
+						candidate.y += std::sin(theta) * ring;
+					}
+					candidate.z = 0.0f;
+
+					if (TheBuildAssistant->isLocationLegalToBuild(&candidate, buildingTemplate, placeAngle, legalOpts, worker, nullptr) != LBC_OK)
+					{
+						continue;
+					}
+					if (spacingBarracks && hasNearbyOwnedBarracks(player, &candidate, barracksSpacingRadius))
+					{
+						continue;
+					}
+					if (hasOwnedStructureTooClose(player, &candidate, buildingTemplate, structurePadding))
+					{
+						continue;
+					}
+
+					const Real distSq = workerPos != nullptr ? distanceSq2D(&candidate, workerPos) : 0.0f;
+					if (!found || distSq < bestDistSq)
+					{
+						found = true;
+						bestDistSq = distSq;
+						best = candidate;
+					}
+				}
+			}
+
+			if (TheTerrainVisual != nullptr)
+			{
+				TheTerrainVisual->removeAllBibs();
+			}
+			if (!found)
+			{
+				return false;
+			}
+
+			outLocation = best;
+			outAngle = placeAngle;
+			return true;
+		}
+
 		bool findBuildLocationAroundAnchor(
 			Player* player,
 			Object* worker,
@@ -1702,6 +1874,62 @@
 			return std::string();
 		}
 
+		std::string inferRadarVanTemplateForProducer(Object* producer) const
+		{
+			if (producer == nullptr || TheThingFactory == nullptr || TheBuildAssistant == nullptr)
+			{
+				return std::string();
+			}
+			auto isPotentiallyQueueable = [&](const ThingTemplate* tt) -> bool
+			{
+				if (tt == nullptr)
+				{
+					return false;
+				}
+				const CanMakeType canMake = TheBuildAssistant->canMakeUnit(producer, tt);
+				return canMake == CANMAKE_OK ||
+					canMake == CANMAKE_NO_MONEY ||
+					canMake == CANMAKE_QUEUE_FULL ||
+					canMake == CANMAKE_PARKING_PLACES_FULL;
+			};
+			const char* candidates[] = {
+				"GLAVehicleRadarVan",
+				"GLARadarVan",
+				"GLAVehicleRadar"
+			};
+			for (const char* name : candidates)
+			{
+				const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(name), false);
+				if (tt == nullptr)
+				{
+					continue;
+				}
+				if (isPotentiallyQueueable(tt))
+				{
+					return name;
+				}
+			}
+
+			for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
+			{
+				const std::string templateName = tt->getName().str();
+				if (!containsIgnoreCase(templateName, "radar") && !containsIgnoreCase(templateName, "van"))
+				{
+					continue;
+				}
+				if (!containsIgnoreCase(templateName, "vehicle") && !containsIgnoreCase(templateName, "van"))
+				{
+					continue;
+				}
+				if (!isPotentiallyQueueable(tt))
+				{
+					continue;
+				}
+				return templateName;
+			}
+			return std::string();
+		}
+
 		bool queueTemplateAtProducer(const nlohmann::json& message, Object* producer, const std::string& unitTemplateName, std::string& reason)
 		{
 			if (producer == nullptr || unitTemplateName.empty())
@@ -1933,6 +2161,99 @@
 				return false;
 			}
 			return true;
+		}
+
+		bool executeGameQueueRadarVansAllWarFactories(const nlohmann::json& message, std::string& reason)
+		{
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			ProducerCollectContext ctx;
+			ctx.matchBarracks = false;
+			ctx.matchWarFactory = true;
+			player->iterateObjects(collectProducersCallback, &ctx);
+			if (ctx.producers.empty())
+			{
+				reason = "no_war_factory_found";
+				return false;
+			}
+
+			const Int count = parseQueueCountArg(message);
+			Int queued = 0;
+			std::string lastReason = "queue_failed";
+			for (Object* producer : ctx.producers)
+			{
+				const std::string unitTemplateName = inferRadarVanTemplateForProducer(producer);
+				if (unitTemplateName.empty())
+				{
+					continue;
+				}
+				for (Int i = 0; i < count; ++i)
+				{
+					std::string queueReason;
+					if (queueTemplateAtProducer(message, producer, unitTemplateName, queueReason))
+					{
+						++queued;
+						continue;
+					}
+					lastReason = queueReason;
+					if (queueReason == "queue_full" || queueReason == "no_money")
+					{
+						break;
+					}
+				}
+			}
+
+			if (queued <= 0)
+			{
+				reason = lastReason;
+				return false;
+			}
+			return true;
+		}
+
+		bool executeGameQueueRadarVan(const nlohmann::json& message, std::string& reason)
+		{
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			ProducerCollectContext ctx;
+			ctx.matchBarracks = false;
+			ctx.matchWarFactory = true;
+			player->iterateObjects(collectProducersCallback, &ctx);
+			if (ctx.producers.empty())
+			{
+				reason = "no_war_factory_found";
+				return false;
+			}
+
+			std::string lastReason = "radar_van_template_not_found";
+			for (Object* producer : ctx.producers)
+			{
+				const std::string unitTemplateName = inferRadarVanTemplateForProducer(producer);
+				if (unitTemplateName.empty())
+				{
+					continue;
+				}
+
+				std::string queueReason;
+				if (queueTemplateAtProducer(message, producer, unitTemplateName, queueReason))
+				{
+					return true;
+				}
+
+				lastReason = queueReason;
+				// Try another war factory if this one cannot currently queue.
+			}
+
+			reason = lastReason;
+			return false;
 		}
 
 		bool executeGameBuildWorker(const nlohmann::json& message, std::string& reason)
@@ -2606,9 +2927,11 @@
 
 			std::string buildingTemplateName;
 			Int requestedAnchorId = -1;
+			ZonePlacementArgs zoneArgs = {};
 			const auto argsIt = message.find("args");
 			if (argsIt != message.end() && argsIt->is_object())
 			{
+				zoneArgs = parseZonePlacementArgs(&(*argsIt));
 				buildingTemplateName = getJsonString(*argsIt, "building_template");
 				const auto anchorIdIt = argsIt->find("anchor_object_id");
 				if (anchorIdIt != argsIt->end() && anchorIdIt->is_number_integer())
@@ -2655,25 +2978,25 @@
 
 			Coord3D location;
 			Real angle = 0.0f;
-			if (!findBuildLocationAroundAnchor(player, worker, anchor, buildingTemplate, location, angle))
+			bool foundLocation = false;
+			if (zoneArgs.hasZoneCenter)
 			{
-				AIUpdateInterface* ai = worker->getAI();
-				if (ai == nullptr)
+				foundLocation = findBuildLocationInZone(player, worker, buildingTemplate, zoneArgs.zoneCenter, zoneArgs.zoneRadius, location, angle);
+				if (!foundLocation && zoneArgs.strictZone)
 				{
-					reason = "worker_no_ai";
-					return false;
+					return moveWorkerToPosition(worker, &zoneArgs.zoneCenter, reason);
 				}
-
-				const Coord3D* moveTarget = anchor != nullptr ? anchor->getPosition() : worker->getPosition();
-				if (moveTarget == nullptr)
-				{
-					reason = "anchor_not_found";
-					return false;
-				}
-				Coord3D target = *moveTarget;
-				target.z = 0.0f;
-				ai->aiMoveToPosition(&target, CMD_FROM_AI);
-				return true;
+			}
+			if (!foundLocation)
+			{
+				foundLocation = findBuildLocationAroundAnchor(player, worker, anchor, buildingTemplate, location, angle);
+			}
+			if (!foundLocation)
+			{
+				const Coord3D* moveTarget = zoneArgs.hasZoneCenter
+					? &zoneArgs.zoneCenter
+					: (anchor != nullptr ? anchor->getPosition() : worker->getPosition());
+				return moveWorkerToPosition(worker, moveTarget, reason);
 			}
 
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
@@ -2701,9 +3024,11 @@
 
 			Int requestedAnchorId = -1;
 			std::string buildingTemplateName;
+			ZonePlacementArgs zoneArgs = {};
 			const auto argsIt = message.find("args");
 			if (argsIt != message.end() && argsIt->is_object())
 			{
+				zoneArgs = parseZonePlacementArgs(&(*argsIt));
 				buildingTemplateName = getJsonString(*argsIt, "building_template");
 				const auto anchorIdIt = argsIt->find("anchor_object_id");
 				if (anchorIdIt != argsIt->end() && anchorIdIt->is_number_integer())
@@ -2747,7 +3072,7 @@
 			{
 				anchor = findPrimaryCommandCenter(player);
 			}
-			if (anchor == nullptr)
+			if (anchor == nullptr && !zoneArgs.hasZoneCenter)
 			{
 				reason = "anchor_not_found";
 				return false;
@@ -2755,25 +3080,25 @@
 
 			Coord3D location;
 			Real angle = 0.0f;
-			if (!findBuildLocationAroundAnchor(player, worker, anchor, buildingTemplate, location, angle))
+			bool foundLocation = false;
+			if (zoneArgs.hasZoneCenter)
 			{
-				AIUpdateInterface* ai = worker->getAI();
-				if (ai == nullptr)
+				foundLocation = findBuildLocationInZone(player, worker, buildingTemplate, zoneArgs.zoneCenter, zoneArgs.zoneRadius, location, angle);
+				if (!foundLocation && zoneArgs.strictZone)
 				{
-					reason = "worker_no_ai";
-					return false;
+					return moveWorkerToPosition(worker, &zoneArgs.zoneCenter, reason);
 				}
-
-				const Coord3D* moveTarget = anchor->getPosition();
-				if (moveTarget == nullptr)
-				{
-					reason = "anchor_not_found";
-					return false;
-				}
-				Coord3D target = *moveTarget;
-				target.z = 0.0f;
-				ai->aiMoveToPosition(&target, CMD_FROM_AI);
-				return true;
+			}
+			if (!foundLocation)
+			{
+				foundLocation = findBuildLocationAroundAnchor(player, worker, anchor, buildingTemplate, location, angle);
+			}
+			if (!foundLocation)
+			{
+				const Coord3D* moveTarget = zoneArgs.hasZoneCenter
+					? &zoneArgs.zoneCenter
+					: (anchor != nullptr ? anchor->getPosition() : worker->getPosition());
+				return moveWorkerToPosition(worker, moveTarget, reason);
 			}
 
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
@@ -2801,9 +3126,11 @@
 
 			std::string buildingTemplateName;
 			Int requestedAnchorId = -1;
+			ZonePlacementArgs zoneArgs = {};
 			const auto argsIt = message.find("args");
 			if (argsIt != message.end() && argsIt->is_object())
 			{
+				zoneArgs = parseZonePlacementArgs(&(*argsIt));
 				buildingTemplateName = getJsonString(*argsIt, "building_template");
 				const auto anchorIdIt = argsIt->find("anchor_object_id");
 				if (anchorIdIt != argsIt->end() && anchorIdIt->is_number_integer())
@@ -2850,25 +3177,25 @@
 
 			Coord3D location;
 			Real angle = 0.0f;
-			if (!findBuildLocationAroundAnchor(player, worker, anchor, buildingTemplate, location, angle))
+			bool foundLocation = false;
+			if (zoneArgs.hasZoneCenter)
 			{
-				AIUpdateInterface* ai = worker->getAI();
-				if (ai == nullptr)
+				foundLocation = findBuildLocationInZone(player, worker, buildingTemplate, zoneArgs.zoneCenter, zoneArgs.zoneRadius, location, angle);
+				if (!foundLocation && zoneArgs.strictZone)
 				{
-					reason = "worker_no_ai";
-					return false;
+					return moveWorkerToPosition(worker, &zoneArgs.zoneCenter, reason);
 				}
-
-				const Coord3D* moveTarget = anchor != nullptr ? anchor->getPosition() : worker->getPosition();
-				if (moveTarget == nullptr)
-				{
-					reason = "anchor_not_found";
-					return false;
-				}
-				Coord3D target = *moveTarget;
-				target.z = 0.0f;
-				ai->aiMoveToPosition(&target, CMD_FROM_AI);
-				return true;
+			}
+			if (!foundLocation)
+			{
+				foundLocation = findBuildLocationAroundAnchor(player, worker, anchor, buildingTemplate, location, angle);
+			}
+			if (!foundLocation)
+			{
+				const Coord3D* moveTarget = zoneArgs.hasZoneCenter
+					? &zoneArgs.zoneCenter
+					: (anchor != nullptr ? anchor->getPosition() : worker->getPosition());
+				return moveWorkerToPosition(worker, moveTarget, reason);
 			}
 
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
@@ -2896,9 +3223,11 @@
 
 			std::string buildingTemplateName;
 			Int requestedAnchorId = -1;
+			ZonePlacementArgs zoneArgs = {};
 			const auto argsIt = message.find("args");
 			if (argsIt != message.end() && argsIt->is_object())
 			{
+				zoneArgs = parseZonePlacementArgs(&(*argsIt));
 				buildingTemplateName = getJsonString(*argsIt, "building_template");
 				const auto anchorIdIt = argsIt->find("anchor_object_id");
 				if (anchorIdIt != argsIt->end() && anchorIdIt->is_number_integer())
@@ -2945,25 +3274,25 @@
 
 			Coord3D location;
 			Real angle = 0.0f;
-			if (!findBuildLocationAroundAnchor(player, worker, anchor, buildingTemplate, location, angle))
+			bool foundLocation = false;
+			if (zoneArgs.hasZoneCenter)
 			{
-				AIUpdateInterface* ai = worker->getAI();
-				if (ai == nullptr)
+				foundLocation = findBuildLocationInZone(player, worker, buildingTemplate, zoneArgs.zoneCenter, zoneArgs.zoneRadius, location, angle);
+				if (!foundLocation && zoneArgs.strictZone)
 				{
-					reason = "worker_no_ai";
-					return false;
+					return moveWorkerToPosition(worker, &zoneArgs.zoneCenter, reason);
 				}
-
-				const Coord3D* moveTarget = anchor != nullptr ? anchor->getPosition() : worker->getPosition();
-				if (moveTarget == nullptr)
-				{
-					reason = "anchor_not_found";
-					return false;
-				}
-				Coord3D target = *moveTarget;
-				target.z = 0.0f;
-				ai->aiMoveToPosition(&target, CMD_FROM_AI);
-				return true;
+			}
+			if (!foundLocation)
+			{
+				foundLocation = findBuildLocationAroundAnchor(player, worker, anchor, buildingTemplate, location, angle);
+			}
+			if (!foundLocation)
+			{
+				const Coord3D* moveTarget = zoneArgs.hasZoneCenter
+					? &zoneArgs.zoneCenter
+					: (anchor != nullptr ? anchor->getPosition() : worker->getPosition());
+				return moveWorkerToPosition(worker, moveTarget, reason);
 			}
 
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
@@ -2991,9 +3320,11 @@
 
 			std::string buildingTemplateName;
 			Int requestedAnchorId = -1;
+			ZonePlacementArgs zoneArgs = {};
 			const auto argsIt = message.find("args");
 			if (argsIt != message.end() && argsIt->is_object())
 			{
+				zoneArgs = parseZonePlacementArgs(&(*argsIt));
 				buildingTemplateName = getJsonString(*argsIt, "building_template");
 				const auto anchorIdIt = argsIt->find("anchor_object_id");
 				if (anchorIdIt != argsIt->end() && anchorIdIt->is_number_integer())
@@ -3040,25 +3371,25 @@
 
 			Coord3D location;
 			Real angle = 0.0f;
-			if (!findBuildLocationAroundAnchor(player, worker, anchor, buildingTemplate, location, angle))
+			bool foundLocation = false;
+			if (zoneArgs.hasZoneCenter)
 			{
-				AIUpdateInterface* ai = worker->getAI();
-				if (ai == nullptr)
+				foundLocation = findBuildLocationInZone(player, worker, buildingTemplate, zoneArgs.zoneCenter, zoneArgs.zoneRadius, location, angle);
+				if (!foundLocation && zoneArgs.strictZone)
 				{
-					reason = "worker_no_ai";
-					return false;
+					return moveWorkerToPosition(worker, &zoneArgs.zoneCenter, reason);
 				}
-
-				const Coord3D* moveTarget = anchor != nullptr ? anchor->getPosition() : worker->getPosition();
-				if (moveTarget == nullptr)
-				{
-					reason = "anchor_not_found";
-					return false;
-				}
-				Coord3D target = *moveTarget;
-				target.z = 0.0f;
-				ai->aiMoveToPosition(&target, CMD_FROM_AI);
-				return true;
+			}
+			if (!foundLocation)
+			{
+				foundLocation = findBuildLocationAroundAnchor(player, worker, anchor, buildingTemplate, location, angle);
+			}
+			if (!foundLocation)
+			{
+				const Coord3D* moveTarget = zoneArgs.hasZoneCenter
+					? &zoneArgs.zoneCenter
+					: (anchor != nullptr ? anchor->getPosition() : worker->getPosition());
+				return moveWorkerToPosition(worker, moveTarget, reason);
 			}
 
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
@@ -3160,6 +3491,228 @@
 				reason = "no_valid_objects";
 				return false;
 			}
+			return true;
+		}
+
+		bool executeGameCameraSet(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheTacticalView == nullptr)
+			{
+				reason = "camera_not_ready";
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			bool touched = false;
+			Real angle = TheTacticalView->getAngle();
+			Real pitch = TheTacticalView->getPitch();
+			Real zoom = TheTacticalView->getZoom();
+			Real heightAboveGround = TheTacticalView->getHeightAboveGround();
+			bool setHeight = false;
+
+			const auto angleIt = argsIt->find("angle");
+			if (angleIt != argsIt->end() && angleIt->is_number())
+			{
+				angle = angleIt->get<Real>();
+				touched = true;
+			}
+
+			const auto topDownIt = argsIt->find("top_down");
+			if (topDownIt != argsIt->end() && topDownIt->is_boolean() && topDownIt->get<bool>())
+			{
+				// ~-90 degrees in radians.
+				pitch = -1.57079632679f;
+				touched = true;
+			}
+
+			const auto pitchIt = argsIt->find("pitch");
+			if (pitchIt != argsIt->end() && pitchIt->is_number())
+			{
+				pitch = pitchIt->get<Real>();
+				touched = true;
+			}
+
+			const auto zoomIt = argsIt->find("zoom");
+			if (zoomIt != argsIt->end() && zoomIt->is_number())
+			{
+				zoom = zoomIt->get<Real>();
+				touched = true;
+			}
+
+			const auto zoomMulIt = argsIt->find("zoom_multiplier");
+			if (zoomMulIt != argsIt->end() && zoomMulIt->is_number())
+			{
+				const Real mul = zoomMulIt->get<Real>();
+				if (mul > 0.0f)
+				{
+					zoom = TheTacticalView->getZoom() * mul;
+					touched = true;
+				}
+			}
+
+			const auto heightIt = argsIt->find("height");
+			if (heightIt != argsIt->end() && heightIt->is_number())
+			{
+				heightAboveGround = heightIt->get<Real>();
+				setHeight = true;
+				touched = true;
+			}
+
+			const auto heightMulIt = argsIt->find("height_multiplier");
+			if (heightMulIt != argsIt->end() && heightMulIt->is_number())
+			{
+				const Real mul = heightMulIt->get<Real>();
+				if (mul > 0.0f)
+				{
+					heightAboveGround = TheTacticalView->getHeightAboveGround() * mul;
+					setHeight = true;
+					touched = true;
+				}
+			}
+
+			if (!touched)
+			{
+				reason = "no_camera_fields";
+				return false;
+			}
+
+			TheTacticalView->setAngle(angle);
+			TheTacticalView->setPitch(pitch);
+			TheTacticalView->setZoom(zoom);
+			if (setHeight)
+			{
+				TheTacticalView->setHeightAboveGround(heightAboveGround);
+			}
+			return true;
+		}
+
+		bool executeGameCameraSetZoomLimited(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheTacticalView == nullptr)
+			{
+				reason = "camera_not_ready";
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			bool hasValue = false;
+			bool enabled = true;
+
+			const auto enabledIt = argsIt->find("enabled");
+			if (enabledIt != argsIt->end() && enabledIt->is_boolean())
+			{
+				enabled = enabledIt->get<bool>();
+				hasValue = true;
+			}
+
+			const auto zoomLimitedIt = argsIt->find("zoom_limited");
+			if (zoomLimitedIt != argsIt->end() && zoomLimitedIt->is_boolean())
+			{
+				enabled = zoomLimitedIt->get<bool>();
+				hasValue = true;
+			}
+
+			if (!hasValue)
+			{
+				reason = "missing_enabled";
+				return false;
+			}
+
+			TheTacticalView->setZoomLimited(enabled ? TRUE : FALSE);
+			return true;
+		}
+
+		bool executeGameCameraLookAt(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheTacticalView == nullptr)
+			{
+				reason = "camera_not_ready";
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			Real x = 0.0f;
+			Real y = 0.0f;
+			bool hasPos = false;
+			const auto xIt = argsIt->find("x");
+			const auto yIt = argsIt->find("y");
+			if (xIt != argsIt->end() && yIt != argsIt->end() && xIt->is_number() && yIt->is_number())
+			{
+				x = xIt->get<Real>();
+				y = yIt->get<Real>();
+				hasPos = true;
+			}
+			if (!hasPos)
+			{
+				const auto centerIt = argsIt->find("zone_center");
+				if (centerIt != argsIt->end() && centerIt->is_object())
+				{
+					const auto cxIt = centerIt->find("x");
+					const auto cyIt = centerIt->find("y");
+					if (cxIt != centerIt->end() && cyIt != centerIt->end() && cxIt->is_number() && cyIt->is_number())
+					{
+						x = cxIt->get<Real>();
+						y = cyIt->get<Real>();
+						hasPos = true;
+					}
+				}
+			}
+			if (!hasPos)
+			{
+				reason = "missing_target_position";
+				return false;
+			}
+
+			Coord3D target;
+			target.x = x;
+			target.y = y;
+			target.z = 0.0f;
+			TheTacticalView->lookAt(&target);
+			return true;
+		}
+
+		bool executeGameCameraGet(const nlohmann::json& /*message*/, nlohmann::json& result, std::string& reason)
+		{
+			if (TheTacticalView == nullptr)
+			{
+				reason = "camera_not_ready";
+				return false;
+			}
+
+			Coord3D pos;
+			TheTacticalView->getPosition(&pos);
+			result = nlohmann::json::object({
+				{"path", "game.camera"},
+				{"x", pos.x},
+				{"y", pos.y},
+				{"z", pos.z},
+				{"angle", TheTacticalView->getAngle()},
+				{"pitch", TheTacticalView->getPitch()},
+				{"zoom", TheTacticalView->getZoom()},
+				{"height_above_ground", TheTacticalView->getHeightAboveGround()},
+				{"default_height", TheGlobalData != nullptr ? TheGlobalData->m_cameraHeight : 0.0f},
+				{"min_height", TheGlobalData != nullptr ? TheGlobalData->m_minCameraHeight : 0.0f},
+				{"max_height", TheGlobalData != nullptr ? TheGlobalData->m_maxCameraHeight : 0.0f},
+				{"zoom_limited", TheTacticalView->isZoomLimited()}
+			});
 			return true;
 		}
 

@@ -172,7 +172,7 @@
 			};
 		}
 
-		nlohmann::json buildObjectMapRow(const Object* obj) const
+		nlohmann::json buildObjectMapRow(const Object* obj, bool includeTemplateAndIdle = false) const
 		{
 			nlohmann::json row = nlohmann::json::object();
 			if (obj == nullptr)
@@ -185,6 +185,12 @@
 			row["x"] = pos != nullptr ? pos->x : 0.0f;
 			row["y"] = pos != nullptr ? pos->y : 0.0f;
 			row["under_construction"] = obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION);
+			if (includeTemplateAndIdle)
+			{
+				row["template"] = obj->getTemplate() != nullptr ? obj->getTemplate()->getName().str() : "";
+				const AIUpdateInterface* ai = obj->getAI();
+				row["idle"] = ai != nullptr ? ai->isIdle() : false;
+			}
 			return row;
 		}
 
@@ -222,7 +228,7 @@
 					return;
 				}
 				CompactCollectContext* ctx = static_cast<CompactCollectContext*>(userData);
-				nlohmann::json row = ctx->self->buildObjectMapRow(obj);
+				nlohmann::json row = ctx->self->buildObjectMapRow(obj, true);
 				if (obj->isKindOf(KINDOF_STRUCTURE))
 				{
 					++ctx->totalBuildings;
@@ -247,6 +253,168 @@
 				{"buildings", buildings},
 				{"units_total", ctx.totalUnits},
 				{"buildings_total", ctx.totalBuildings}
+			};
+		}
+
+		nlohmann::json buildOwnedObjectsUnitsMap(Player* player, std::size_t maxUnits)
+		{
+			nlohmann::json units = nlohmann::json::array();
+			if (player == nullptr)
+			{
+				return nlohmann::json{
+					{"player_index", -1},
+					{"units", units},
+					{"units_total", 0}
+				};
+			}
+
+			struct UnitsCollectContext
+			{
+				AIControlAdapterState* self;
+				nlohmann::json* units;
+				std::size_t maxUnits;
+				Int totalUnits;
+			};
+
+			UnitsCollectContext ctx = { this, &units, maxUnits, 0 };
+			player->iterateObjects([](Object* obj, void* userData)
+			{
+				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+				{
+					return;
+				}
+				if (obj->isKindOf(KINDOF_STRUCTURE))
+				{
+					return;
+				}
+
+				UnitsCollectContext* ctx = static_cast<UnitsCollectContext*>(userData);
+				++ctx->totalUnits;
+				if (ctx->units->size() < ctx->maxUnits)
+				{
+					ctx->units->push_back(ctx->self->buildObjectMapRow(obj, true));
+				}
+			}, &ctx);
+
+			return nlohmann::json{
+				{"player_index", player->getPlayerIndex()},
+				{"units", units},
+				{"units_total", ctx.totalUnits},
+				{"truncated", units.size() < static_cast<std::size_t>(ctx.totalUnits)},
+				{"path", "game.objects_units_map"}
+			};
+		}
+
+		nlohmann::json buildOwnedObjectsBuildingsMap(Player* player, std::size_t maxBuildings)
+		{
+			nlohmann::json buildings = nlohmann::json::array();
+			if (player == nullptr)
+			{
+				return nlohmann::json{
+					{"player_index", -1},
+					{"buildings", buildings},
+					{"buildings_total", 0}
+				};
+			}
+
+			struct BuildingsCollectContext
+			{
+				AIControlAdapterState* self;
+				nlohmann::json* buildings;
+				std::size_t maxBuildings;
+				Int totalBuildings;
+			};
+
+			BuildingsCollectContext ctx = { this, &buildings, maxBuildings, 0 };
+			player->iterateObjects([](Object* obj, void* userData)
+			{
+				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+				{
+					return;
+				}
+				if (!obj->isKindOf(KINDOF_STRUCTURE))
+				{
+					return;
+				}
+
+				BuildingsCollectContext* ctx = static_cast<BuildingsCollectContext*>(userData);
+				++ctx->totalBuildings;
+				if (ctx->buildings->size() < ctx->maxBuildings)
+				{
+					ctx->buildings->push_back(ctx->self->buildObjectMapRow(obj, true));
+				}
+			}, &ctx);
+
+			return nlohmann::json{
+				{"player_index", player->getPlayerIndex()},
+				{"buildings", buildings},
+				{"buildings_total", ctx.totalBuildings},
+				{"truncated", buildings.size() < static_cast<std::size_t>(ctx.totalBuildings)},
+				{"path", "game.objects_buildings_map"}
+			};
+		}
+
+		nlohmann::json buildIdleWorkersSummary(Player* player, std::size_t maxWorkers)
+		{
+			nlohmann::json workers = nlohmann::json::array();
+			if (player == nullptr)
+			{
+				return nlohmann::json{
+					{"player_index", -1},
+					{"workers", workers},
+					{"idle_workers_total", 0}
+				};
+			}
+
+			struct IdleWorkerCollectContext
+			{
+				AIControlAdapterState* self;
+				nlohmann::json* workers;
+				std::size_t maxWorkers;
+				Int totalIdleWorkers;
+			};
+
+			IdleWorkerCollectContext ctx = { this, &workers, maxWorkers, 0 };
+			player->iterateObjects([](Object* obj, void* userData)
+			{
+				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+				{
+					return;
+				}
+				if (obj->isKindOf(KINDOF_STRUCTURE))
+				{
+					return;
+				}
+				const ThingTemplate* tt = obj->getTemplate();
+				if (tt == nullptr)
+				{
+					return;
+				}
+				const std::string name = tt->getName().str();
+				if (!containsIgnoreCase(name, "worker") && !containsIgnoreCase(name, "dozer"))
+				{
+					return;
+				}
+				const AIUpdateInterface* ai = obj->getAI();
+				if (ai == nullptr || !ai->isIdle())
+				{
+					return;
+				}
+
+				IdleWorkerCollectContext* ctx = static_cast<IdleWorkerCollectContext*>(userData);
+				++ctx->totalIdleWorkers;
+				if (ctx->workers->size() < ctx->maxWorkers)
+				{
+					ctx->workers->push_back(ctx->self->buildObjectMapRow(obj, true));
+				}
+			}, &ctx);
+
+			return nlohmann::json{
+				{"player_index", player->getPlayerIndex()},
+				{"workers", workers},
+				{"idle_workers_total", ctx.totalIdleWorkers},
+				{"truncated", workers.size() < static_cast<std::size_t>(ctx.totalIdleWorkers)},
+				{"path", "game.idle_workers"}
 			};
 		}
 
@@ -478,6 +646,27 @@
 				result["is_local_player"] = (selectedPlayer == localPlayer);
 				result["truncated"] = true;
 				result["path"] = "game.objects_map";
+				return true;
+			}
+
+			if (path == "game.objects_units_map")
+			{
+				result = buildOwnedObjectsUnitsMap(selectedPlayer, 120u);
+				result["is_local_player"] = (selectedPlayer == localPlayer);
+				return true;
+			}
+
+			if (path == "game.objects_buildings_map")
+			{
+				result = buildOwnedObjectsBuildingsMap(selectedPlayer, 120u);
+				result["is_local_player"] = (selectedPlayer == localPlayer);
+				return true;
+			}
+
+			if (path == "game.idle_workers")
+			{
+				result = buildIdleWorkersSummary(selectedPlayer, 120u);
+				result["is_local_player"] = (selectedPlayer == localPlayer);
 				return true;
 			}
 

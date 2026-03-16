@@ -18,6 +18,7 @@
 #include "GameClient/KeyDefs.h"
 #include "GameClient/Shell.h"
 #include "GameClient/TerrainVisual.h"
+#include "GameClient/View.h"
 #include "GameLogic/AI.h"
 #include "GameLogic/GameLogic.h"
 #include "GameLogic/Module/AIUpdate.h"
