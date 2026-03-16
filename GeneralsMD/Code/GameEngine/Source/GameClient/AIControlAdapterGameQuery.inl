@@ -411,6 +411,127 @@
 			};
 		}
 
+		nlohmann::json buildZoneCountsSummary(Player* player, const Coord3D* zoneCenter, Real zoneRadius)
+		{
+			nlohmann::json counts = nlohmann::json::object({
+				{"command_centers", 0},
+				{"stashes", 0},
+				{"barracks", 0},
+				{"arms_dealers", 0},
+				{"palaces", 0},
+				{"black_markets", 0},
+				{"tunnel_networks", 0},
+				{"stinger_sites", 0},
+				{"other_buildings", 0},
+				{"units", 0},
+				{"buildings", 0}
+			});
+
+			if (player == nullptr)
+			{
+				return nlohmann::json{
+					{"player_index", -1},
+					{"counts", counts},
+					{"zone", nlohmann::json::object({
+						{"has_center", false},
+						{"radius", zoneRadius}
+					})},
+					{"path", "game.zone_counts"}
+				};
+			}
+
+			struct ZoneCountContext
+			{
+				const Coord3D* zoneCenter;
+				Real radiusSq;
+				nlohmann::json* counts;
+			};
+			ZoneCountContext ctx = { zoneCenter, zoneRadius * zoneRadius, &counts };
+			player->iterateObjects([](Object* obj, void* userData)
+			{
+				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+				{
+					return;
+				}
+				ZoneCountContext* ctx = static_cast<ZoneCountContext*>(userData);
+				const Coord3D* pos = obj->getPosition();
+				if (ctx->zoneCenter != nullptr && pos != nullptr)
+				{
+					const Real dx = pos->x - ctx->zoneCenter->x;
+					const Real dy = pos->y - ctx->zoneCenter->y;
+					if ((dx * dx + dy * dy) > ctx->radiusSq)
+					{
+						return;
+					}
+				}
+
+				nlohmann::json& counts = *ctx->counts;
+				if (obj->isKindOf(KINDOF_STRUCTURE))
+				{
+					counts["buildings"] = counts["buildings"].get<Int>() + 1;
+					const ThingTemplate* tt = obj->getTemplate();
+					const std::string name = tt != nullptr ? tt->getName().str() : "";
+					if (containsIgnoreCase(name, "commandcenter"))
+					{
+						counts["command_centers"] = counts["command_centers"].get<Int>() + 1;
+					}
+					else if (containsIgnoreCase(name, "supplystash") || containsIgnoreCase(name, "supplycenter"))
+					{
+						counts["stashes"] = counts["stashes"].get<Int>() + 1;
+					}
+					else if (containsIgnoreCase(name, "barracks"))
+					{
+						counts["barracks"] = counts["barracks"].get<Int>() + 1;
+					}
+					else if (containsIgnoreCase(name, "armsdealer") || containsIgnoreCase(name, "warfactory"))
+					{
+						counts["arms_dealers"] = counts["arms_dealers"].get<Int>() + 1;
+					}
+					else if (containsIgnoreCase(name, "palace"))
+					{
+						counts["palaces"] = counts["palaces"].get<Int>() + 1;
+					}
+					else if (containsIgnoreCase(name, "blackmarket"))
+					{
+						counts["black_markets"] = counts["black_markets"].get<Int>() + 1;
+					}
+					else if (containsIgnoreCase(name, "tunnelnetwork"))
+					{
+						counts["tunnel_networks"] = counts["tunnel_networks"].get<Int>() + 1;
+					}
+					else if (containsIgnoreCase(name, "stingersite"))
+					{
+						counts["stinger_sites"] = counts["stinger_sites"].get<Int>() + 1;
+					}
+					else
+					{
+						counts["other_buildings"] = counts["other_buildings"].get<Int>() + 1;
+					}
+				}
+				else
+				{
+					counts["units"] = counts["units"].get<Int>() + 1;
+				}
+			}, &ctx);
+
+			nlohmann::json zone = nlohmann::json::object({
+				{"has_center", zoneCenter != nullptr},
+				{"radius", zoneRadius}
+			});
+			if (zoneCenter != nullptr)
+			{
+				zone["x"] = zoneCenter->x;
+				zone["y"] = zoneCenter->y;
+			}
+
+			return nlohmann::json{
+				{"player_index", player->getPlayerIndex()},
+				{"counts", counts},
+				{"zone", zone},
+				{"path", "game.zone_counts"}
+			};
+		}
+
 		nlohmann::json buildAllPlayersObjectsSummaryCompact(std::size_t maxUnitsPerPlayer, std::size_t maxBuildingsPerPlayer)
 		{
 			nlohmann::json players = nlohmann::json::array();
@@ -673,6 +794,40 @@
 					{"idle_workers_total", m_ownedCacheIdleWorkersTotal},
 					{"path", "game.objects_cache_refresh"}
 				};
+				result["is_local_player"] = (selectedPlayer == localPlayer);
+				return true;
+			}
+
+			if (path == "game.zone_counts")
+			{
+				Coord3D zoneCenter;
+				zoneCenter.x = 0.0f;
+				zoneCenter.y = 0.0f;
+				zoneCenter.z = 0.0f;
+				bool hasZoneCenter = false;
+				Real zoneRadius = 600.0f;
+				if (argsIt != message.end() && argsIt->is_object())
+				{
+					const auto radiusIt = argsIt->find("zone_radius");
+					if (radiusIt != argsIt->end() && radiusIt->is_number())
+					{
+						zoneRadius = std::max<Real>(64.0f, radiusIt->get<Real>());
+					}
+					const auto centerIt = argsIt->find("zone_center");
+					if (centerIt != argsIt->end() && centerIt->is_object())
+					{
+						const auto cxIt = centerIt->find("x");
+						const auto cyIt = centerIt->find("y");
+						if (cxIt != centerIt->end() && cyIt != centerIt->end() && cxIt->is_number() && cyIt->is_number())
+						{
+							zoneCenter.x = cxIt->get<Real>();
+							zoneCenter.y = cyIt->get<Real>();
+							zoneCenter.z = 0.0f;
+							hasZoneCenter = true;
+						}
+					}
+				}
+				result = buildZoneCountsSummary(selectedPlayer, hasZoneCenter ? &zoneCenter : nullptr, zoneRadius);
 				result["is_local_player"] = (selectedPlayer == localPlayer);
 				return true;
 			}

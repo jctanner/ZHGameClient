@@ -115,6 +115,7 @@ OBJECTS_FULL_REFRESH_EVERY = 0
 OBJECTS_CACHE_REFRESH_EVERY_CYCLES = 6
 OBJECTS_UNITS_QUERY_EVERY_CYCLES = 12
 OBJECTS_BUILDINGS_QUERY_EVERY_CYCLES = 3
+HEAVY_QUERY_BACKOFF_SEC = 20.0
 DEFAULT_RAID_MIN_UNITS = 20
 DEFAULT_RAID_GROUP_SIZE = 20
 DEFAULT_RAID_EVERY_CYCLES = 4
@@ -266,6 +267,37 @@ def refresh_objects_cache(client: PipeClient, timeout_ms: int) -> bool:
         flush=True,
     )
     return True
+
+
+def query_objects_cache_status(client: PipeClient, timeout_ms: int) -> dict[str, Any] | None:
+    resp = try_send_session_command(client, "Game.Query", {"path": "game.objects_cache_status"}, timeout_ms)
+    if resp is None or resp.get("ok") is False:
+        return None
+    payload = extract_payload(resp)
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def query_zone_counts(
+    client: PipeClient,
+    timeout_ms: int,
+    zone_center: tuple[float, float] | None = None,
+    zone_radius: float | None = None,
+) -> dict[str, Any] | None:
+    args: dict[str, Any] = {"path": "game.zone_counts"}
+    if zone_center is not None:
+        args["zone_center"] = {"x": float(zone_center[0]), "y": float(zone_center[1])}
+    if zone_radius is not None:
+        args["zone_radius"] = float(zone_radius)
+    resp = try_send_session_command(client, "Game.Query", args, timeout_ms)
+    if resp is None or resp.get("ok") is False:
+        return None
+    payload = extract_payload(resp)
+    if not isinstance(payload, dict):
+        return None
+    counts = payload.get("counts")
+    return counts if isinstance(counts, dict) else None
 
 
 def merge_compact_rows(
@@ -1054,15 +1086,19 @@ def main() -> int:
     )
 
     refresh_objects_cache(client, args.timeout_ms)
+    query_objects_cache_status(client, args.timeout_ms)
     startup_units, startup_buildings = query_objects_compact(
         client,
         args.timeout_ms,
         include_units=False,
         include_buildings=True,
     )
+    startup_counts = query_zone_counts(client, args.timeout_ms)
     command_center_ids, stash_ids = collect_producer_ids(startup_buildings)
     existing_workers = count_matching_templates(startup_units, ("worker", "dozer"))
-    startup_has_palace = has_palace_started(startup_buildings)
+    startup_has_palace = has_palace_started(startup_buildings) or (
+        isinstance(startup_counts, dict) and int(startup_counts.get("palaces", 0)) > 0
+    )
     anchor_x, anchor_y = resolve_primary_anchor_xy(startup_buildings)
     zone_centers = build_zone_centers(anchor_x, anchor_y, max(128.0, float(args.zone_step)), max(1, int(args.zone_count)))
     zone_index = 0
@@ -1084,7 +1120,12 @@ def main() -> int:
         phase_index=phase_index,
         opening_step_index=opening_step_index,
         assets=startup_assets,
-        opening_core_ready=opening_building_mix_ready(startup_buildings),
+        opening_core_ready=opening_building_mix_ready(startup_buildings) or (
+            isinstance(startup_counts, dict)
+            and int(startup_counts.get("stashes", 0)) >= 2
+            and int(startup_counts.get("barracks", 0)) >= 1
+            and int(startup_counts.get("arms_dealers", 0)) >= 1
+        ),
         now_monotonic=startup_now,
         phase_entered_at_monotonic=phase_entered_at_monotonic,
         cycle=0,
@@ -1092,6 +1133,7 @@ def main() -> int:
     sustain_step_index = 0
     last_attempt_at = 0.0
     last_worker_topup_at = 0.0
+    heavy_query_backoff_until = 0.0
     cycle = 1
     pending_until_by_key: dict[str, float] = {}
     cached_units = startup_units
@@ -1119,19 +1161,36 @@ def main() -> int:
                     cached_units = full_units
                     cached_buildings = full_buildings
             else:
-                if cycle % max(1, OBJECTS_CACHE_REFRESH_EVERY_CYCLES) == 1:
+                cache_status = query_objects_cache_status(client, args.timeout_ms) or {}
+                cache_units_total = int(cache_status.get("units_total", 0)) if isinstance(cache_status.get("units_total"), int) else 0
+                cache_buildings_total = (
+                    int(cache_status.get("buildings_total", 0)) if isinstance(cache_status.get("buildings_total"), int) else 0
+                )
+                if cycle % max(1, OBJECTS_CACHE_REFRESH_EVERY_CYCLES) == 1 and time.monotonic() >= heavy_query_backoff_until:
                     refresh_objects_cache(client, args.timeout_ms)
                 include_units = (cycle % max(1, OBJECTS_UNITS_QUERY_EVERY_CYCLES) == 1)
                 include_buildings = (cycle % max(1, OBJECTS_BUILDINGS_QUERY_EVERY_CYCLES) == 1)
                 compact_units: list[dict[str, Any]] = []
                 compact_buildings: list[dict[str, Any]] = []
-                if include_units or include_buildings:
+                if (include_units or include_buildings) and time.monotonic() >= heavy_query_backoff_until:
                     compact_units, compact_buildings = query_objects_compact(
                         client,
                         args.timeout_ms,
                         include_units=include_units,
                         include_buildings=include_buildings,
                     )
+                    if include_units and not compact_units and cache_units_total > 0:
+                        heavy_query_backoff_until = time.monotonic() + HEAVY_QUERY_BACKOFF_SEC
+                        print(
+                            f"[query_backoff] units_map timeout suspected; backoff_sec={HEAVY_QUERY_BACKOFF_SEC}",
+                            flush=True,
+                        )
+                    if include_buildings and not compact_buildings and cache_buildings_total > 0:
+                        heavy_query_backoff_until = time.monotonic() + HEAVY_QUERY_BACKOFF_SEC
+                        print(
+                            f"[query_backoff] buildings_map timeout suspected; backoff_sec={HEAVY_QUERY_BACKOFF_SEC}",
+                            flush=True,
+                        )
                 if compact_units:
                     cached_units = merge_compact_rows(cached_units, compact_units)
                 if compact_buildings:
@@ -1390,26 +1449,27 @@ def main() -> int:
             raid_min_units = max(1, int(args.raid_min_units))
             raid_group_size = max(1, int(args.raid_group_size))
             raid_distance = max(256.0, float(args.raid_distance))
-            raid_key = "Game.AttackMove.Raid"
-            combat_ids = collect_combat_unit_ids(units)
+            raid_key = "Game.AttackMove.RaidSmart"
             raid_cycle_gate = (cycle % raid_every == 0)
-            raid_units_gate = (len(combat_ids) >= raid_min_units)
             raid_cooldown_gate = not is_pending(pending_until_by_key, raid_key, now)
-            if raid_cycle_gate and raid_units_gate and raid_cooldown_gate:
-                selected_count = min(len(combat_ids), raid_group_size)
-                selected_ids = random.sample(combat_ids, selected_count)
-                target_x, target_y = choose_raid_target(anchor_x, anchor_y, raid_distance)
+            if raid_cycle_gate and raid_cooldown_gate:
+                direction_index = cycle % 4
                 raid_resp = try_send_session_command(
                     client,
-                    "Game.AttackMove",
-                    {"x": target_x, "y": target_y, "object_ids": selected_ids},
+                    "Game.AttackMove.RaidSmart",
+                    {
+                        "min_units": raid_min_units,
+                        "group_size": raid_group_size,
+                        "distance": raid_distance,
+                        "direction_index": direction_index,
+                    },
                     args.timeout_ms,
                 )
                 if raid_resp is not None:
                     raid_ok = bool(raid_resp.get("ok", False))
                     print(
-                        f"[loop {cycle}] raid_attackmove units={selected_count}/{len(combat_ids)} "
-                        f"target=({target_x:.1f},{target_y:.1f}) ok={raid_ok} "
+                        f"[loop {cycle}] raid_smart dir={direction_index} "
+                        f"ok={raid_ok} "
                         f"code={raid_resp.get('code')} reason={raid_resp.get('reason')}",
                         flush=True,
                     )
@@ -1423,8 +1483,6 @@ def main() -> int:
             else:
                 if not raid_cycle_gate:
                     raid_reason = f"cycle_gate cycle={cycle} every={raid_every}"
-                elif not raid_units_gate:
-                    raid_reason = f"units_gate combat={len(combat_ids)} required={raid_min_units}"
                 else:
                     pending_until = pending_until_by_key.get(raid_key, 0.0)
                     remaining = max(0.0, pending_until - now)
