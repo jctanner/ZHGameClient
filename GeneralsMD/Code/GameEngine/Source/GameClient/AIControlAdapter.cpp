@@ -51,7 +51,14 @@ namespace
 		AIControlAdapterState() :
 			m_pipe(INVALID_HANDLE_VALUE),
 			m_hasClient(false),
-			m_adapterLog(nullptr)
+			m_adapterLog(nullptr),
+			m_ownedCacheValid(false),
+			m_ownedCachePlayerIndex(-1),
+			m_ownedCacheUnitsTotal(0),
+			m_ownedCacheBuildingsTotal(0),
+			m_ownedCacheIdleWorkersTotal(0),
+			m_ownedCacheVersion(0),
+			m_ownedCacheLastRefreshTick(0u)
 		{
 			char buffer[32];
 			sprintf_s(buffer, "%08X%08X", static_cast<unsigned int>(::GetCurrentProcessId()), static_cast<unsigned int>(::GetTickCount()));
@@ -69,6 +76,14 @@ namespace
 		{
 			m_lineBuffer.clear();
 			m_lastAutoSupplySourceByPlayer.clear();
+			m_ownedCacheValid = false;
+			m_ownedCachePlayerIndex = -1;
+			m_ownedCacheUnitsTotal = 0;
+			m_ownedCacheBuildingsTotal = 0;
+			m_ownedCacheIdleWorkersTotal = 0;
+			m_ownedCacheUnits = nlohmann::json::array();
+			m_ownedCacheBuildings = nlohmann::json::array();
+			m_ownedCacheIdleWorkers = nlohmann::json::array();
 			resetClientConnection();
 		}
 
@@ -100,6 +115,16 @@ namespace
 		std::unordered_map<Int, Int> m_lastAutoSupplySourceByPlayer;
 		std::unordered_map<Int, ObjectID> m_lastSelectedWorkerByPlayer;
 		std::unordered_map<ObjectID, DWORD> m_reservedWorkersUntilTick;
+		bool m_ownedCacheValid;
+		Int m_ownedCachePlayerIndex;
+		Int m_ownedCacheUnitsTotal;
+		Int m_ownedCacheBuildingsTotal;
+		Int m_ownedCacheIdleWorkersTotal;
+		UnsignedInt m_ownedCacheVersion;
+		DWORD m_ownedCacheLastRefreshTick;
+		nlohmann::json m_ownedCacheUnits;
+		nlohmann::json m_ownedCacheBuildings;
+		nlohmann::json m_ownedCacheIdleWorkers;
 
 		#include "AIControlAdapterTransport.inl"
 

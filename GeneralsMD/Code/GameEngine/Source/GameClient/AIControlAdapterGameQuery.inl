@@ -194,6 +194,107 @@
 			return row;
 		}
 
+		void refreshOwnedObjectCache(Player* player)
+		{
+			m_ownedCacheUnits = nlohmann::json::array();
+			m_ownedCacheBuildings = nlohmann::json::array();
+			m_ownedCacheIdleWorkers = nlohmann::json::array();
+			m_ownedCacheUnitsTotal = 0;
+			m_ownedCacheBuildingsTotal = 0;
+			m_ownedCacheIdleWorkersTotal = 0;
+
+			if (player == nullptr)
+			{
+				m_ownedCacheValid = true;
+				m_ownedCachePlayerIndex = -1;
+				++m_ownedCacheVersion;
+				m_ownedCacheLastRefreshTick = ::GetTickCount();
+				return;
+			}
+
+			struct OwnedCacheCollectContext
+			{
+				AIControlAdapterState* self;
+			};
+
+			OwnedCacheCollectContext ctx = { this };
+			player->iterateObjects([](Object* obj, void* userData)
+			{
+				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+				{
+					return;
+				}
+
+				OwnedCacheCollectContext* ctx = static_cast<OwnedCacheCollectContext*>(userData);
+				AIControlAdapterState* self = ctx->self;
+				const bool isStructure = obj->isKindOf(KINDOF_STRUCTURE);
+				nlohmann::json row = self->buildObjectMapRow(obj, true);
+				if (isStructure)
+				{
+					++self->m_ownedCacheBuildingsTotal;
+					self->m_ownedCacheBuildings.push_back(row);
+					return;
+				}
+
+				++self->m_ownedCacheUnitsTotal;
+				self->m_ownedCacheUnits.push_back(row);
+
+				const ThingTemplate* tt = obj->getTemplate();
+				if (tt == nullptr)
+				{
+					return;
+				}
+				const std::string name = tt->getName().str();
+				if (!containsIgnoreCase(name, "worker") && !containsIgnoreCase(name, "dozer"))
+				{
+					return;
+				}
+				const AIUpdateInterface* ai = obj->getAI();
+				if (ai == nullptr || !ai->isIdle())
+				{
+					return;
+				}
+
+				++self->m_ownedCacheIdleWorkersTotal;
+				self->m_ownedCacheIdleWorkers.push_back(row);
+			}, &ctx);
+
+			m_ownedCacheValid = true;
+			m_ownedCachePlayerIndex = player->getPlayerIndex();
+			++m_ownedCacheVersion;
+			m_ownedCacheLastRefreshTick = ::GetTickCount();
+		}
+
+		void ensureOwnedObjectCache(Player* player, DWORD maxCacheAgeMs = 60000u)
+		{
+			const Int playerIndex = (player != nullptr) ? player->getPlayerIndex() : -1;
+			const DWORD nowTick = ::GetTickCount();
+			if (m_ownedCacheValid && m_ownedCachePlayerIndex == playerIndex)
+			{
+				const DWORD age = nowTick - m_ownedCacheLastRefreshTick;
+				if (age <= maxCacheAgeMs)
+				{
+					return;
+				}
+			}
+			refreshOwnedObjectCache(player);
+		}
+
+		static nlohmann::json truncateJsonArray(const nlohmann::json& source, std::size_t maxItems)
+		{
+			nlohmann::json out = nlohmann::json::array();
+			if (!source.is_array())
+			{
+				return out;
+			}
+			const std::size_t count = std::min<std::size_t>(source.size(), maxItems);
+			for (std::size_t i = 0; i < count; ++i)
+			{
+				out.push_back(source[i]);
+			}
+			return out;
+		}
+
 		nlohmann::json buildOwnedObjectsSummaryCompact(Player* player, std::size_t maxUnits, std::size_t maxBuildings)
 		{
 			nlohmann::json units = nlohmann::json::array();
@@ -258,163 +359,55 @@
 
 		nlohmann::json buildOwnedObjectsUnitsMap(Player* player, std::size_t maxUnits)
 		{
-			nlohmann::json units = nlohmann::json::array();
-			if (player == nullptr)
-			{
-				return nlohmann::json{
-					{"player_index", -1},
-					{"units", units},
-					{"units_total", 0}
-				};
-			}
-
-			struct UnitsCollectContext
-			{
-				AIControlAdapterState* self;
-				nlohmann::json* units;
-				std::size_t maxUnits;
-				Int totalUnits;
-			};
-
-			UnitsCollectContext ctx = { this, &units, maxUnits, 0 };
-			player->iterateObjects([](Object* obj, void* userData)
-			{
-				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
-				{
-					return;
-				}
-				if (obj->isKindOf(KINDOF_STRUCTURE))
-				{
-					return;
-				}
-
-				UnitsCollectContext* ctx = static_cast<UnitsCollectContext*>(userData);
-				++ctx->totalUnits;
-				if (ctx->units->size() < ctx->maxUnits)
-				{
-					ctx->units->push_back(ctx->self->buildObjectMapRow(obj, true));
-				}
-			}, &ctx);
+			ensureOwnedObjectCache(player);
+			nlohmann::json units = truncateJsonArray(m_ownedCacheUnits, maxUnits);
+			const Int playerIndex = (player != nullptr) ? player->getPlayerIndex() : -1;
+			const Int totalUnits = (player != nullptr) ? m_ownedCacheUnitsTotal : 0;
 
 			return nlohmann::json{
-				{"player_index", player->getPlayerIndex()},
+				{"player_index", playerIndex},
 				{"units", units},
-				{"units_total", ctx.totalUnits},
-				{"truncated", units.size() < static_cast<std::size_t>(ctx.totalUnits)},
-				{"path", "game.objects_units_map"}
+				{"units_total", totalUnits},
+				{"truncated", units.size() < static_cast<std::size_t>(totalUnits)},
+				{"path", "game.objects_units_map"},
+				{"cache_version", m_ownedCacheVersion},
+				{"cache_age_ms", ::GetTickCount() - m_ownedCacheLastRefreshTick}
 			};
 		}
 
 		nlohmann::json buildOwnedObjectsBuildingsMap(Player* player, std::size_t maxBuildings)
 		{
-			nlohmann::json buildings = nlohmann::json::array();
-			if (player == nullptr)
-			{
-				return nlohmann::json{
-					{"player_index", -1},
-					{"buildings", buildings},
-					{"buildings_total", 0}
-				};
-			}
-
-			struct BuildingsCollectContext
-			{
-				AIControlAdapterState* self;
-				nlohmann::json* buildings;
-				std::size_t maxBuildings;
-				Int totalBuildings;
-			};
-
-			BuildingsCollectContext ctx = { this, &buildings, maxBuildings, 0 };
-			player->iterateObjects([](Object* obj, void* userData)
-			{
-				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
-				{
-					return;
-				}
-				if (!obj->isKindOf(KINDOF_STRUCTURE))
-				{
-					return;
-				}
-
-				BuildingsCollectContext* ctx = static_cast<BuildingsCollectContext*>(userData);
-				++ctx->totalBuildings;
-				if (ctx->buildings->size() < ctx->maxBuildings)
-				{
-					ctx->buildings->push_back(ctx->self->buildObjectMapRow(obj, true));
-				}
-			}, &ctx);
+			ensureOwnedObjectCache(player);
+			nlohmann::json buildings = truncateJsonArray(m_ownedCacheBuildings, maxBuildings);
+			const Int playerIndex = (player != nullptr) ? player->getPlayerIndex() : -1;
+			const Int totalBuildings = (player != nullptr) ? m_ownedCacheBuildingsTotal : 0;
 
 			return nlohmann::json{
-				{"player_index", player->getPlayerIndex()},
+				{"player_index", playerIndex},
 				{"buildings", buildings},
-				{"buildings_total", ctx.totalBuildings},
-				{"truncated", buildings.size() < static_cast<std::size_t>(ctx.totalBuildings)},
-				{"path", "game.objects_buildings_map"}
+				{"buildings_total", totalBuildings},
+				{"truncated", buildings.size() < static_cast<std::size_t>(totalBuildings)},
+				{"path", "game.objects_buildings_map"},
+				{"cache_version", m_ownedCacheVersion},
+				{"cache_age_ms", ::GetTickCount() - m_ownedCacheLastRefreshTick}
 			};
 		}
 
 		nlohmann::json buildIdleWorkersSummary(Player* player, std::size_t maxWorkers)
 		{
-			nlohmann::json workers = nlohmann::json::array();
-			if (player == nullptr)
-			{
-				return nlohmann::json{
-					{"player_index", -1},
-					{"workers", workers},
-					{"idle_workers_total", 0}
-				};
-			}
-
-			struct IdleWorkerCollectContext
-			{
-				AIControlAdapterState* self;
-				nlohmann::json* workers;
-				std::size_t maxWorkers;
-				Int totalIdleWorkers;
-			};
-
-			IdleWorkerCollectContext ctx = { this, &workers, maxWorkers, 0 };
-			player->iterateObjects([](Object* obj, void* userData)
-			{
-				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
-				{
-					return;
-				}
-				if (obj->isKindOf(KINDOF_STRUCTURE))
-				{
-					return;
-				}
-				const ThingTemplate* tt = obj->getTemplate();
-				if (tt == nullptr)
-				{
-					return;
-				}
-				const std::string name = tt->getName().str();
-				if (!containsIgnoreCase(name, "worker") && !containsIgnoreCase(name, "dozer"))
-				{
-					return;
-				}
-				const AIUpdateInterface* ai = obj->getAI();
-				if (ai == nullptr || !ai->isIdle())
-				{
-					return;
-				}
-
-				IdleWorkerCollectContext* ctx = static_cast<IdleWorkerCollectContext*>(userData);
-				++ctx->totalIdleWorkers;
-				if (ctx->workers->size() < ctx->maxWorkers)
-				{
-					ctx->workers->push_back(ctx->self->buildObjectMapRow(obj, true));
-				}
-			}, &ctx);
+			ensureOwnedObjectCache(player);
+			nlohmann::json workers = truncateJsonArray(m_ownedCacheIdleWorkers, maxWorkers);
+			const Int playerIndex = (player != nullptr) ? player->getPlayerIndex() : -1;
+			const Int totalIdleWorkers = (player != nullptr) ? m_ownedCacheIdleWorkersTotal : 0;
 
 			return nlohmann::json{
-				{"player_index", player->getPlayerIndex()},
+				{"player_index", playerIndex},
 				{"workers", workers},
-				{"idle_workers_total", ctx.totalIdleWorkers},
-				{"truncated", workers.size() < static_cast<std::size_t>(ctx.totalIdleWorkers)},
-				{"path", "game.idle_workers"}
+				{"idle_workers_total", totalIdleWorkers},
+				{"truncated", workers.size() < static_cast<std::size_t>(totalIdleWorkers)},
+				{"path", "game.idle_workers"},
+				{"cache_version", m_ownedCacheVersion},
+				{"cache_age_ms", ::GetTickCount() - m_ownedCacheLastRefreshTick}
 			};
 		}
 
@@ -646,6 +639,41 @@
 				result["is_local_player"] = (selectedPlayer == localPlayer);
 				result["truncated"] = true;
 				result["path"] = "game.objects_map";
+				return true;
+			}
+
+			if (path == "game.objects_cache_status")
+			{
+				const Int selectedIndex = selectedPlayer != nullptr ? selectedPlayer->getPlayerIndex() : -1;
+				const bool validForSelected = m_ownedCacheValid && (m_ownedCachePlayerIndex == selectedIndex);
+				result = nlohmann::json{
+					{"player_index", selectedIndex},
+					{"cache_valid", validForSelected},
+					{"cache_player_index", m_ownedCachePlayerIndex},
+					{"cache_version", m_ownedCacheVersion},
+					{"cache_age_ms", validForSelected ? (::GetTickCount() - m_ownedCacheLastRefreshTick) : 0u},
+					{"units_total", validForSelected ? m_ownedCacheUnitsTotal : 0},
+					{"buildings_total", validForSelected ? m_ownedCacheBuildingsTotal : 0},
+					{"idle_workers_total", validForSelected ? m_ownedCacheIdleWorkersTotal : 0},
+					{"path", "game.objects_cache_status"}
+				};
+				result["is_local_player"] = (selectedPlayer == localPlayer);
+				return true;
+			}
+
+			if (path == "game.objects_cache_refresh")
+			{
+				refreshOwnedObjectCache(selectedPlayer);
+				result = nlohmann::json{
+					{"player_index", selectedPlayer != nullptr ? selectedPlayer->getPlayerIndex() : -1},
+					{"cache_version", m_ownedCacheVersion},
+					{"cache_age_ms", 0u},
+					{"units_total", m_ownedCacheUnitsTotal},
+					{"buildings_total", m_ownedCacheBuildingsTotal},
+					{"idle_workers_total", m_ownedCacheIdleWorkersTotal},
+					{"path", "game.objects_cache_refresh"}
+				};
+				result["is_local_player"] = (selectedPlayer == localPlayer);
 				return true;
 			}
 
