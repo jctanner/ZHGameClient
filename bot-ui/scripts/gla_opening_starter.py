@@ -57,8 +57,8 @@ OPENING_BUILDING_MIX: dict[str, int] = {
     "stash": 2,
     "barracks": 1,
     "arms": 1,
-    "tunnel_networks": 2,
-    "stinger_sites": 2,
+    "tunnel_networks": 4,
+    "stinger_sites": 4,
 }
 OPENING_INFANTRY_MIX: dict[str, int] = {"soldiers": 3, "rpg": 6}
 OPENING_VEHICLE_MIX: dict[str, int] = {"radar": 1, "quads": 3, "scorpions": 3}
@@ -67,9 +67,9 @@ SUSTAIN_BUILDING_MIX: dict[str, int] = {
     "stash": 1,
     "barracks": 1,
     "arms": 1,
-    "black_markets": 8,
-    "tunnel_networks": 2,
-    "stinger_sites": 2,
+    "black_markets": 2,
+    "tunnel_networks": 4,
+    "stinger_sites": 4,
 }
 SUSTAIN_INFANTRY_MIX: dict[str, int] = {"soldiers": 2, "rpg": 2}
 SUSTAIN_VEHICLE_MIX: dict[str, int] = {"radar": 1, "quads": 3, "scorpions": 3}
@@ -112,12 +112,16 @@ BUDGET_RESERVE_CASH = 5000
 BUDGET_INFANTRY_MIX_MIN = 1200
 BUDGET_VEHICLE_MIX_MIN = 2600
 OBJECTS_FULL_REFRESH_EVERY = 0
+OBJECTS_CACHE_REFRESH_EVERY_CYCLES = 6
+OBJECTS_UNITS_QUERY_EVERY_CYCLES = 12
+OBJECTS_BUILDINGS_QUERY_EVERY_CYCLES = 3
 DEFAULT_RAID_MIN_UNITS = 20
 DEFAULT_RAID_GROUP_SIZE = 20
 DEFAULT_RAID_EVERY_CYCLES = 4
 DEFAULT_RAID_DISTANCE = 3000.0
 DEFAULT_RAID_COOLDOWN_SEC = 20.0
 WORKER_TRICKLE_PER_PRODUCER_PER_TICK = 1
+DEFAULT_WORKER_TOPUP_COOLDOWN_SEC = 8.0
 ZONE_SINGLETON_BUILD_RULES: dict[str, tuple[str, ...]] = {
     "Game.BuildCommandCenterSmart": ("commandcenter",),
     "Game.BuildSupplyStashSmart": ("supplystash", "supplycenter"),
@@ -206,9 +210,22 @@ def query_objects_full(client: PipeClient, timeout_ms: int) -> tuple[list[dict[s
     )
 
 
-def query_objects_compact(client: PipeClient, timeout_ms: int) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    units_resp = try_send_session_command(client, "Game.Query", {"path": "game.objects_units_map"}, timeout_ms)
-    buildings_resp = try_send_session_command(client, "Game.Query", {"path": "game.objects_buildings_map"}, timeout_ms)
+def query_objects_compact(
+    client: PipeClient,
+    timeout_ms: int,
+    include_units: bool = True,
+    include_buildings: bool = True,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    units_resp = (
+        try_send_session_command(client, "Game.Query", {"path": "game.objects_units_map"}, timeout_ms)
+        if include_units
+        else None
+    )
+    buildings_resp = (
+        try_send_session_command(client, "Game.Query", {"path": "game.objects_buildings_map"}, timeout_ms)
+        if include_buildings
+        else None
+    )
 
     units: list[dict[str, Any]] = []
     buildings: list[dict[str, Any]] = []
@@ -232,6 +249,23 @@ def query_objects_compact(client: PipeClient, timeout_ms: int) -> tuple[list[dic
             buildings = buildings_payload
 
     return units, buildings
+
+
+def refresh_objects_cache(client: PipeClient, timeout_ms: int) -> bool:
+    resp = try_send_session_command(client, "Game.Query", {"path": "game.objects_cache_refresh"}, timeout_ms)
+    if resp is None:
+        return False
+    if resp.get("ok") is False:
+        return False
+    payload = extract_payload(resp)
+    cache_version = payload.get("cache_version") if isinstance(payload, dict) else None
+    units_total = payload.get("units_total") if isinstance(payload, dict) else None
+    buildings_total = payload.get("buildings_total") if isinstance(payload, dict) else None
+    print(
+        f"[cache] refresh ok=True version={cache_version} units_total={units_total} buildings_total={buildings_total}",
+        flush=True,
+    )
+    return True
 
 
 def merge_compact_rows(
@@ -809,6 +843,20 @@ def queue_building_mix(
         ("Game.BuildBarracksSmart", max(0, int(stinger_sites_count)), {"building_template": "GLAStingerSite"}),
     ]
 
+    def resolve_build_target(cmd_name: str, args_map: dict[str, Any]) -> str:
+        explicit = args_map.get("building_template")
+        if isinstance(explicit, str) and explicit:
+            return explicit
+        fallback: dict[str, str] = {
+            "Game.BuildBlackMarketSmart": "GLABlackMarket",
+            "Game.BuildSupplyStashSmart": "GLASupplyStash",
+            "Game.BuildBarracksSmart": "GLABarracks",
+            "Game.BuildArmsDealerSmart": "GLAArmsDealer",
+            "Game.BuildPalaceSmart": "GLAPalace",
+            "Game.BuildCommandCenterSmart": "GLACommandCenter",
+        }
+        return fallback.get(cmd_name, cmd_name)
+
     for cmd, count, extra_args in requests:
         for _ in range(count):
             if zone_center is not None and zone_radius is not None and buildings is not None:
@@ -830,6 +878,7 @@ def queue_building_mix(
 
             command_args = make_args()
             command_args.update(extra_args)
+            build_target = resolve_build_target(cmd, command_args)
             resp = try_send_session_command(client, cmd, command_args, timeout_ms)
             if resp is None:
                 continue
@@ -837,7 +886,8 @@ def queue_building_mix(
             last_code = resp.get("code")
             last_reason = resp.get("reason")
             print(
-                f"[loop {cycle}] building_mix cmd={cmd} ok={ok} code={last_code} reason={last_reason}",
+                f"[loop {cycle}] building_mix cmd={cmd} target={build_target} "
+                f"ok={ok} code={last_code} reason={last_reason}",
                 flush=True,
             )
             if ok:
@@ -858,6 +908,7 @@ def maybe_transition_phase(
     phase_index: int,
     opening_step_index: int,
     assets: dict[str, int],
+    opening_core_ready: bool,
     now_monotonic: float,
     phase_entered_at_monotonic: float,
     cycle: int,
@@ -866,7 +917,7 @@ def maybe_transition_phase(
         return phase_index, phase_entered_at_monotonic, ""
     current_phase = PLAN_PHASES[phase_index]
     for rule in current_phase.exit_when:
-        if rule == RULE_PALACE_STARTED and assets.get("palaces", 0) > 0:
+        if rule == RULE_PALACE_STARTED and assets.get("palaces", 0) > 0 and opening_core_ready:
             if phase_index + 1 < len(PLAN_PHASES):
                 next_phase = PLAN_PHASES[phase_index + 1]
                 print(
@@ -1002,9 +1053,13 @@ def main() -> int:
         flush=True,
     )
 
-    startup_units, startup_buildings = query_objects_compact(client, args.timeout_ms)
-    if not startup_units and not startup_buildings:
-        startup_units, startup_buildings = query_objects_full(client, args.timeout_ms)
+    refresh_objects_cache(client, args.timeout_ms)
+    startup_units, startup_buildings = query_objects_compact(
+        client,
+        args.timeout_ms,
+        include_units=False,
+        include_buildings=True,
+    )
     command_center_ids, stash_ids = collect_producer_ids(startup_buildings)
     existing_workers = count_matching_templates(startup_units, ("worker", "dozer"))
     startup_has_palace = has_palace_started(startup_buildings)
@@ -1029,12 +1084,14 @@ def main() -> int:
         phase_index=phase_index,
         opening_step_index=opening_step_index,
         assets=startup_assets,
+        opening_core_ready=opening_building_mix_ready(startup_buildings),
         now_monotonic=startup_now,
         phase_entered_at_monotonic=phase_entered_at_monotonic,
         cycle=0,
     )
     sustain_step_index = 0
     last_attempt_at = 0.0
+    last_worker_topup_at = 0.0
     cycle = 1
     pending_until_by_key: dict[str, float] = {}
     cached_units = startup_units
@@ -1062,7 +1119,19 @@ def main() -> int:
                     cached_units = full_units
                     cached_buildings = full_buildings
             else:
-                compact_units, compact_buildings = query_objects_compact(client, args.timeout_ms)
+                if cycle % max(1, OBJECTS_CACHE_REFRESH_EVERY_CYCLES) == 1:
+                    refresh_objects_cache(client, args.timeout_ms)
+                include_units = (cycle % max(1, OBJECTS_UNITS_QUERY_EVERY_CYCLES) == 1)
+                include_buildings = (cycle % max(1, OBJECTS_BUILDINGS_QUERY_EVERY_CYCLES) == 1)
+                compact_units: list[dict[str, Any]] = []
+                compact_buildings: list[dict[str, Any]] = []
+                if include_units or include_buildings:
+                    compact_units, compact_buildings = query_objects_compact(
+                        client,
+                        args.timeout_ms,
+                        include_units=include_units,
+                        include_buildings=include_buildings,
+                    )
                 if compact_units:
                     cached_units = merge_compact_rows(cached_units, compact_units)
                 if compact_buildings:
@@ -1082,6 +1151,7 @@ def main() -> int:
                 phase_index=phase_index,
                 opening_step_index=opening_step_index,
                 assets=assets,
+                opening_core_ready=opening_building_mix_ready(buildings),
                 now_monotonic=now,
                 phase_entered_at_monotonic=phase_entered_at_monotonic,
                 cycle=cycle,
@@ -1093,57 +1163,53 @@ def main() -> int:
 
             # After we are partway into opening (or in sustain), keep worker producers filled.
             if phase_index > 0 or opening_step_index >= 2:
-                command_center_id = pick_command_center_needing_workers(command_center_worker_issued)
-                if command_center_id is not None:
-                    cc_key = f"Game.BuildWorker:{command_center_id}"
-                    if is_pending(pending_until_by_key, cc_key, now):
-                        time.sleep(args.tick_sec)
-                        continue
-                    cc_added = issue_worker_for_producer(
-                        client=client,
-                        timeout_ms=args.timeout_ms,
-                        cycle=cycle,
-                        producer_label="command_center",
-                        producer_id=command_center_id,
-                        producer_target=COMMAND_CENTER_WORKER_TARGET,
-                        producer_worker_issued=command_center_worker_issued,
-                    )
-                    if cc_added > 0:
-                        mark_pending(
-                            pending_until_by_key,
-                            cc_key,
-                            now,
-                            max(2.0, float(args.pending_cooldown_sec) * 0.5),
-                        )
-                    last_attempt_at = now
-                    time.sleep(args.tick_sec)
-                    continue
-
-                stash_id = pick_stash_needing_workers(stash_worker_issued)
-                if stash_id is not None:
-                    stash_key = f"Game.BuildWorker:{stash_id}"
-                    if is_pending(pending_until_by_key, stash_key, now):
-                        time.sleep(args.tick_sec)
-                        continue
-                    stash_added = issue_worker_for_producer(
-                        client=client,
-                        timeout_ms=args.timeout_ms,
-                        cycle=cycle,
-                        producer_label="stash",
-                        producer_id=stash_id,
-                        producer_target=STASH_WORKER_TARGET,
-                        producer_worker_issued=stash_worker_issued,
-                    )
-                    if stash_added > 0:
-                        mark_pending(
-                            pending_until_by_key,
-                            stash_key,
-                            now,
-                            max(2.0, float(args.pending_cooldown_sec) * 0.5),
-                        )
-                    last_attempt_at = now
-                    time.sleep(args.tick_sec)
-                    continue
+                if (now - last_worker_topup_at) >= DEFAULT_WORKER_TOPUP_COOLDOWN_SEC:
+                    worker_topup_done = False
+                    command_center_id = pick_command_center_needing_workers(command_center_worker_issued)
+                    if command_center_id is not None:
+                        cc_key = f"Game.BuildWorker:{command_center_id}"
+                        if not is_pending(pending_until_by_key, cc_key, now):
+                            cc_added = issue_worker_for_producer(
+                                client=client,
+                                timeout_ms=args.timeout_ms,
+                                cycle=cycle,
+                                producer_label="command_center",
+                                producer_id=command_center_id,
+                                producer_target=COMMAND_CENTER_WORKER_TARGET,
+                                producer_worker_issued=command_center_worker_issued,
+                            )
+                            if cc_added > 0:
+                                mark_pending(
+                                    pending_until_by_key,
+                                    cc_key,
+                                    now,
+                                    max(2.0, float(args.pending_cooldown_sec) * 0.5),
+                                )
+                                worker_topup_done = True
+                    if not worker_topup_done:
+                        stash_id = pick_stash_needing_workers(stash_worker_issued)
+                        if stash_id is not None:
+                            stash_key = f"Game.BuildWorker:{stash_id}"
+                            if not is_pending(pending_until_by_key, stash_key, now):
+                                stash_added = issue_worker_for_producer(
+                                    client=client,
+                                    timeout_ms=args.timeout_ms,
+                                    cycle=cycle,
+                                    producer_label="stash",
+                                    producer_id=stash_id,
+                                    producer_target=STASH_WORKER_TARGET,
+                                    producer_worker_issued=stash_worker_issued,
+                                )
+                                if stash_added > 0:
+                                    mark_pending(
+                                        pending_until_by_key,
+                                        stash_key,
+                                        now,
+                                        max(2.0, float(args.pending_cooldown_sec) * 0.5),
+                                    )
+                                    worker_topup_done = True
+                    if worker_topup_done:
+                        last_worker_topup_at = now
 
             current_phase = PLAN_PHASES[phase_index]
             if current_phase.name == PHASE_OPENING_NAME:
@@ -1167,6 +1233,7 @@ def main() -> int:
                         phase_index=phase_index,
                         opening_step_index=opening_step_index,
                         assets=assets,
+                        opening_core_ready=opening_building_mix_ready(buildings),
                         now_monotonic=now,
                         phase_entered_at_monotonic=phase_entered_at_monotonic,
                         cycle=cycle,
@@ -1264,7 +1331,12 @@ def main() -> int:
                 last_attempt_at = now
 
                 if current.cmd == "Script.BuildingMix":
-                    refreshed_units, refreshed_buildings = query_objects_compact(client, args.timeout_ms)
+                    refreshed_units, refreshed_buildings = query_objects_compact(
+                        client,
+                        args.timeout_ms,
+                        include_units=False,
+                        include_buildings=True,
+                    )
                     if refreshed_units:
                         cached_units = merge_compact_rows(cached_units, refreshed_units)
                     if refreshed_buildings:
@@ -1304,6 +1376,7 @@ def main() -> int:
                     phase_index=phase_index,
                     opening_step_index=opening_step_index,
                     assets=assets,
+                    opening_core_ready=opening_building_mix_ready(cached_buildings),
                     now_monotonic=now,
                     phase_entered_at_monotonic=phase_entered_at_monotonic,
                     cycle=cycle,

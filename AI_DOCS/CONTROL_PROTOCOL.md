@@ -356,7 +356,14 @@ Common `path` values:
 12. `game.objects_units_map`
 13. `game.objects_buildings_map`
 14. `game.idle_workers`
-15. `game.visible_enemies`
+15. `game.objects_cache_status`
+16. `game.objects_cache_refresh`
+17. `game.visible_enemies`
+
+`game.objects_units_map`, `game.objects_buildings_map`, and `game.idle_workers` are served from a short-lived adapter cache (owned objects for the selected player). Responses include:
+
+1. `cache_version` (monotonic per refresh)
+2. `cache_age_ms` (age of the cached snapshot)
 
 ## Acknowledgements
 
