@@ -114,10 +114,11 @@ Supported `cmd` values (v1):
 28. `Game.BuildBarracksSmart`
 29. `Game.BuildCommandCenterSmart`
 30. `Game.AttackMove`
-31. `Game.Camera.Set`
-32. `Game.Camera.LookAt`
-33. `Game.Camera.SetZoomLimited`
-34. `Game.Camera.Get`
+31. `Game.AttackMove.RaidSmart`
+32. `Game.Camera.Set`
+33. `Game.Camera.LookAt`
+34. `Game.Camera.SetZoomLimited`
+35. `Game.Camera.Get`
 
 `Lobby.Join` args:
 
@@ -291,6 +292,14 @@ Supported `cmd` values (v1):
 4. `object_id` (optional int, single controlled object)
 5. `object_ids` (optional int[], multiple controlled objects)
 
+`Game.AttackMove.RaidSmart` args:
+
+1. `player_index` (optional int, default local player)
+2. `min_units` (optional int, default `20`)
+3. `group_size` (optional int, default `20`)
+4. `distance` (optional number, default `3000`)
+5. `direction_index` (optional int `0..3`; right/left/down/up cycle if omitted)
+
 `Game.Camera.Set` args:
 
 1. `angle` (optional number, radians)
@@ -358,12 +367,19 @@ Common `path` values:
 14. `game.idle_workers`
 15. `game.objects_cache_status`
 16. `game.objects_cache_refresh`
-17. `game.visible_enemies`
+17. `game.zone_counts`
+18. `game.visible_enemies`
 
 `game.objects_units_map`, `game.objects_buildings_map`, and `game.idle_workers` are served from a short-lived adapter cache (owned objects for the selected player). Responses include:
 
 1. `cache_version` (monotonic per refresh)
 2. `cache_age_ms` (age of the cached snapshot)
+
+`game.zone_counts` args:
+
+1. `player_index` (optional int, default local player)
+2. `zone_center` (optional object `{x,y}`; omitted means whole owned map state)
+3. `zone_radius` (optional number; default adapter-defined)
 
 ## Acknowledgements
 

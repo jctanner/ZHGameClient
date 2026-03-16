@@ -3494,6 +3494,176 @@
 			return true;
 		}
 
+		bool executeGameAttackMoveRaidSmart(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheGameLogic == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			Int minUnits = 20;
+			Int groupSize = 20;
+			Real distance = 3000.0f;
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				const auto minUnitsIt = argsIt->find("min_units");
+				if (minUnitsIt != argsIt->end() && minUnitsIt->is_number_integer())
+				{
+					minUnits = std::max<Int>(1, minUnitsIt->get<Int>());
+				}
+				const auto groupSizeIt = argsIt->find("group_size");
+				if (groupSizeIt != argsIt->end() && groupSizeIt->is_number_integer())
+				{
+					groupSize = std::max<Int>(1, groupSizeIt->get<Int>());
+				}
+				const auto distanceIt = argsIt->find("distance");
+				if (distanceIt != argsIt->end() && distanceIt->is_number())
+				{
+					distance = std::max<Real>(256.0f, distanceIt->get<Real>());
+				}
+			}
+
+			struct CombatCollectContext
+			{
+				std::vector<Object*> units;
+			};
+			CombatCollectContext collectCtx;
+			player->iterateObjects([](Object* obj, void* userData)
+			{
+				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+				{
+					return;
+				}
+				if (obj->isKindOf(KINDOF_STRUCTURE) || obj->isKindOf(KINDOF_DOZER) || obj->isKindOf(KINDOF_HARVESTER))
+				{
+					return;
+				}
+				if (!obj->isKindOf(KINDOF_INFANTRY) && !obj->isKindOf(KINDOF_VEHICLE) && !obj->isKindOf(KINDOF_AIRCRAFT))
+				{
+					return;
+				}
+				if (obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+				{
+					return;
+				}
+				if (obj->getAI() == nullptr)
+				{
+					return;
+				}
+
+				CombatCollectContext* ctx = static_cast<CombatCollectContext*>(userData);
+				ctx->units.push_back(obj);
+			}, &collectCtx);
+
+			if (static_cast<Int>(collectCtx.units.size()) < minUnits)
+			{
+				reason = "insufficient_combat_units";
+				return false;
+			}
+
+			Coord3D anchor;
+			anchor.x = 0.0f;
+			anchor.y = 0.0f;
+			anchor.z = 0.0f;
+			bool hasAnchor = false;
+
+			Object* cc = findPrimaryCommandCenter(player);
+			if (cc != nullptr && cc->getPosition() != nullptr)
+			{
+				anchor = *cc->getPosition();
+				hasAnchor = true;
+			}
+			if (!hasAnchor)
+			{
+				nlohmann::json playerPos = buildPlayerMapPositionSummary(player);
+				const auto pxIt = playerPos.find("x");
+				const auto pyIt = playerPos.find("y");
+				if (pxIt != playerPos.end() && pyIt != playerPos.end() && pxIt->is_number() && pyIt->is_number())
+				{
+					anchor.x = pxIt->get<Real>();
+					anchor.y = pyIt->get<Real>();
+					anchor.z = 0.0f;
+					hasAnchor = true;
+				}
+			}
+			if (!hasAnchor)
+			{
+				reason = "anchor_position_unknown";
+				return false;
+			}
+
+			Int directionIndex = static_cast<Int>(::GetTickCount() & 3u);
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				const auto directionIt = argsIt->find("direction_index");
+				if (directionIt != argsIt->end() && directionIt->is_number_integer())
+				{
+					const Int requested = directionIt->get<Int>();
+					if (requested >= 0)
+					{
+						directionIndex = requested % 4;
+					}
+				}
+			}
+
+			Real dx = 0.0f;
+			Real dy = 0.0f;
+			if (directionIndex == 0)
+			{
+				dx = 1.0f;
+			}
+			else if (directionIndex == 1)
+			{
+				dx = -1.0f;
+			}
+			else if (directionIndex == 2)
+			{
+				dy = 1.0f;
+			}
+			else
+			{
+				dy = -1.0f;
+			}
+
+			Coord3D target;
+			target.x = anchor.x + (dx * distance);
+			target.y = anchor.y + (dy * distance);
+			target.z = 0.0f;
+
+			Int commanded = 0;
+			const std::size_t maxToCommand = std::min<std::size_t>(collectCtx.units.size(), static_cast<std::size_t>(groupSize));
+			for (std::size_t i = 0; i < maxToCommand; ++i)
+			{
+				Object* obj = collectCtx.units[i];
+				if (obj == nullptr)
+				{
+					continue;
+				}
+				AIUpdateInterface* ai = obj->getAI();
+				if (ai == nullptr)
+				{
+					continue;
+				}
+				ai->aiAttackMoveToPosition(&target, 0, CMD_FROM_AI);
+				++commanded;
+			}
+
+			if (commanded <= 0)
+			{
+				reason = "no_valid_objects";
+				return false;
+			}
+			return true;
+		}
+
 		bool executeGameCameraSet(const nlohmann::json& message, std::string& reason)
 		{
 			if (TheTacticalView == nullptr)

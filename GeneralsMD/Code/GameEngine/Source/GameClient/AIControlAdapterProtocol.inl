@@ -208,6 +208,7 @@
 						"game_palace_build_smart",
 						"game_black_market_build_smart",
 						"game_attackmove_all_combat_to_player",
+						"game_attackmove_raid_smart",
 						"game_camera_set",
 						"game_camera_set_zoom_limited",
 						"game_camera_lookat",
@@ -561,6 +562,18 @@
 			{
 				std::string reason;
 				if (!executeGameAttackMoveAllCombatToPlayer(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.AttackMove.RaidSmart")
+			{
+				std::string reason;
+				if (!executeGameAttackMoveRaidSmart(message, reason))
 				{
 					sendActionAck(requestId, false, "invalid_state", reason.c_str());
 					return;
