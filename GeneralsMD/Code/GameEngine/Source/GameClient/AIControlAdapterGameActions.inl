@@ -1226,6 +1226,147 @@
 			return out;
 		}
 
+		static bool canIssuePlayerScopedMessage(Player* player, std::string& reason)
+		{
+			if (player == nullptr)
+			{
+				reason = "player_not_found";
+				return false;
+			}
+			if (TheMessageStream == nullptr)
+			{
+				reason = "message_stream_not_ready";
+				return false;
+			}
+			if (ThePlayerList == nullptr)
+			{
+				reason = "player_state_not_ready";
+				return false;
+			}
+
+			Player* localPlayer = ThePlayerList->getLocalPlayer();
+			if (localPlayer == nullptr)
+			{
+				reason = "local_player_missing";
+				return false;
+			}
+
+			if (TheGameLogic != nullptr &&
+				TheGameLogic->isInMultiplayerGame() &&
+				player->getPlayerIndex() != localPlayer->getPlayerIndex())
+			{
+				reason = "remote_player_control_not_supported_in_multiplayer";
+				return false;
+			}
+
+			return true;
+		}
+
+		static GameMessage* appendPlayerMessage(Player* player, GameMessage::Type type)
+		{
+			if (TheMessageStream == nullptr)
+			{
+				return nullptr;
+			}
+
+			GameMessage* msg = TheMessageStream->appendMessage(type);
+			if (msg != nullptr && player != nullptr)
+			{
+				msg->friend_setPlayerIndex(player->getPlayerIndex());
+			}
+			return msg;
+		}
+
+		static std::vector<ObjectID> getCurrentSelectionObjectIds(Player* player)
+		{
+			std::vector<ObjectID> ids;
+			if (player == nullptr || TheAI == nullptr)
+			{
+				return ids;
+			}
+
+#if RETAIL_COMPATIBLE_AIGROUP
+			AIGroup* group = TheAI->createGroup();
+			if (group == nullptr)
+			{
+				return ids;
+			}
+			player->getCurrentSelectionAsAIGroup(group);
+			ids = group->getAllIDs();
+			TheAI->destroyGroup(group);
+#else
+			AIGroupPtr group = TheAI->createGroup();
+			if (group == nullptr)
+			{
+				return ids;
+			}
+			player->getCurrentSelectionAsAIGroup(group.Peek());
+			ids = group->getAllIDs();
+			group->removeAll();
+#endif
+			return ids;
+		}
+
+		static void appendSelectionMessage(Player* player, const std::vector<ObjectID>& ids, bool noSound)
+		{
+			if (player == nullptr)
+			{
+				return;
+			}
+
+			if (ids.empty())
+			{
+				appendPlayerMessage(player, GameMessage::MSG_DESTROY_SELECTED_GROUP);
+				return;
+			}
+
+			GameMessage* msg = appendPlayerMessage(
+				player,
+				noSound ? GameMessage::MSG_CREATE_SELECTED_GROUP_NO_SOUND : GameMessage::MSG_CREATE_SELECTED_GROUP);
+			if (msg == nullptr)
+			{
+				return;
+			}
+
+			msg->appendBooleanArgument(TRUE);
+			for (std::vector<ObjectID>::const_iterator it = ids.begin(); it != ids.end(); ++it)
+			{
+				msg->appendObjectIDArgument(*it);
+			}
+		}
+
+		template <typename TCommandBuilder>
+		bool executeScopedSelectionCommand(
+			Player* player,
+			const std::vector<ObjectID>& selectedIds,
+			std::string& reason,
+			TCommandBuilder&& buildCommand)
+		{
+			if (!canIssuePlayerScopedMessage(player, reason))
+			{
+				return false;
+			}
+			if (selectedIds.empty())
+			{
+				reason = "no_valid_objects";
+				return false;
+			}
+
+			const std::vector<ObjectID> priorSelection = getCurrentSelectionObjectIds(player);
+			appendSelectionMessage(player, selectedIds, true);
+			if (!buildCommand())
+			{
+				appendSelectionMessage(player, priorSelection, true);
+				if (reason.empty())
+				{
+					reason = "command_build_failed";
+				}
+				return false;
+			}
+			appendSelectionMessage(player, priorSelection, true);
+			return true;
+		}
+
 		bool moveWorkerToPosition(Object* worker, const Coord3D* moveTarget, std::string& reason)
 		{
 			if (worker == nullptr)
@@ -1244,10 +1385,27 @@
 				reason = "move_target_not_found";
 				return false;
 			}
+			Player* player = worker->getControllingPlayer();
+			if (player == nullptr)
+			{
+				reason = "player_not_found";
+				return false;
+			}
+
 			Coord3D target = *moveTarget;
 			target.z = 0.0f;
-			ai->aiMoveToPosition(&target, CMD_FROM_AI);
-			return true;
+			const ObjectID workerId = worker->getID();
+			return executeScopedSelectionCommand(player, std::vector<ObjectID>(1, workerId), reason, [&]() -> bool
+			{
+				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_MOVETO);
+				if (msg == nullptr)
+				{
+					reason = "message_stream_not_ready";
+					return false;
+				}
+				msg->appendLocationArgument(target);
+				return true;
+			});
 		}
 
 		bool findBuildLocationInZone(
@@ -1442,7 +1600,8 @@
 
 			const Money* wallet = player->getMoney();
 			const UnsignedInt currentMoney = wallet != nullptr ? wallet->countMoney() : 0u;
-			if (buildingTemplate->calcCostToBuild(player) > currentMoney)
+			const UnsignedInt buildCost = static_cast<UnsignedInt>(std::max<Int>(0, buildingTemplate->calcCostToBuild(player)));
+			if (buildCost > currentMoney)
 			{
 				reason = "no_money";
 				return false;
@@ -1479,44 +1638,22 @@
 				return false;
 			}
 
-			if (TheBuildAssistant->buildObjectNow(worker, buildingTemplate, &location, angle, player) == nullptr)
+			const Int templateId = buildingTemplate->getTemplateID();
+			const ObjectID workerId = worker->getID();
+			if (!executeScopedSelectionCommand(player, std::vector<ObjectID>(1, workerId), reason, [&]() -> bool
 			{
-				const CanMakeType canMake = TheBuildAssistant->canMakeUnit(worker, buildingTemplate);
-				switch (canMake)
+				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DOZER_CONSTRUCT);
+				if (msg == nullptr)
 				{
-				case CANMAKE_NO_PREREQ:
-					reason = "no_prereq";
+					reason = "message_stream_not_ready";
 					return false;
-				case CANMAKE_NO_MONEY:
-					reason = "no_money";
-					return false;
-				case CANMAKE_FACTORY_IS_DISABLED:
-					reason = "factory_disabled";
-					return false;
-				default:
-					break;
 				}
-
-				const LegalBuildCode postLegal = TheBuildAssistant->isLocationLegalToBuild(&location, buildingTemplate, angle, legalOpts, worker, nullptr);
-				switch (postLegal)
-				{
-				case LBC_SHROUD:
-					reason = "blocked_by_shroud";
-					return false;
-				case LBC_OBJECTS_IN_THE_WAY:
-					reason = "blocked_by_objects";
-					return false;
-				case LBC_NO_CLEAR_PATH:
-					reason = "no_clear_path";
-					return false;
-				case LBC_TOO_CLOSE_TO_SUPPLIES:
-					reason = "too_close_to_supply";
-					return false;
-				default:
-					break;
-				}
-
-				reason = "construct_failed";
+				msg->appendIntegerArgument(templateId);
+				msg->appendLocationArgument(location);
+				msg->appendRealArgument(angle);
+				return true;
+			}))
+			{
 				return false;
 			}
 
@@ -1525,6 +1662,127 @@
 			// lag for a few frames or temporarily report idle.
 			reserveWorkerForBuild(worker, 45000u);
 			return true;
+		}
+
+		static Int parseQueueCountArg(const nlohmann::json& message)
+		{
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				return 1;
+			}
+			const auto countIt = argsIt->find("count");
+			if (countIt == argsIt->end() || !countIt->is_number_integer())
+			{
+				return 1;
+			}
+			Int value = countIt->get<Int>();
+			if (value < 1)
+			{
+				value = 1;
+			}
+			if (value > 9)
+			{
+				value = 9;
+			}
+			return value;
+		}
+
+		static Int parseCountArgFromObject(const nlohmann::json& obj, const char* key = "count")
+		{
+			const auto countIt = obj.find(key);
+			if (countIt == obj.end() || !countIt->is_number_integer())
+			{
+				return 1;
+			}
+
+			Int value = countIt->get<Int>();
+			if (value < 1)
+			{
+				value = 1;
+			}
+			if (value > 9)
+			{
+				value = 9;
+			}
+			return value;
+		}
+
+		template <typename TSingleAttempt>
+		bool executeRepeatedBuildAttempts(const nlohmann::json& message, std::string& reason, TSingleAttempt&& singleAttempt)
+		{
+			const Int count = parseQueueCountArg(message);
+			if (count <= 1)
+			{
+				return singleAttempt(message, reason);
+			}
+
+			nlohmann::json singleMessage = message;
+			nlohmann::json singleArgs = nlohmann::json::object();
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				singleArgs = *argsIt;
+			}
+			singleArgs["count"] = 1;
+			singleMessage["args"] = singleArgs;
+
+			Int issued = 0;
+			std::string lastReason = "build_failed";
+			for (Int i = 0; i < count; ++i)
+			{
+				std::string attemptReason;
+				if (singleAttempt(singleMessage, attemptReason))
+				{
+					++issued;
+					continue;
+				}
+				if (!attemptReason.empty())
+				{
+					lastReason = attemptReason;
+				}
+
+				if (attemptReason == "no_money" ||
+					attemptReason == "idle_worker_not_found" ||
+					attemptReason == "worker_not_found" ||
+					attemptReason == "black_market_prereq_missing")
+				{
+					break;
+				}
+			}
+
+			if (issued <= 0)
+			{
+				reason = lastReason;
+				return false;
+			}
+			return true;
+		}
+
+		static void mergeJsonObjectInto(nlohmann::json& dest, const nlohmann::json& src)
+		{
+			if (!dest.is_object())
+			{
+				dest = nlohmann::json::object();
+			}
+			if (!src.is_object())
+			{
+				return;
+			}
+
+			for (nlohmann::json::const_iterator it = src.begin(); it != src.end(); ++it)
+			{
+				dest[it.key()] = *it;
+			}
+		}
+
+		static std::string normalizeBuildingMixKind(std::string value)
+		{
+			std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) -> unsigned char
+			{
+				return static_cast<unsigned char>(std::tolower(ch));
+			});
+			return value;
 		}
 
 		bool executeGameQueueUnit(const nlohmann::json& message, std::string& reason)
@@ -1553,6 +1811,7 @@
 				reason = "missing_unit_template";
 				return false;
 			}
+			const Int count = parseQueueCountArg(message);
 
 			const std::string producerKind = getJsonString(*argsIt, "producer_kind");
 			const bool requireCommandCenter = producerKind.empty() || producerKind == "command_center";
@@ -1613,13 +1872,71 @@
 				return false;
 			}
 
-			const ProductionID productionId = production->requestUniqueUnitID();
-			if (!production->queueCreateUnit(unitTemplate, productionId))
+			const Int templateId = unitTemplate->getTemplateID();
+			const ObjectID producerId = producer->getID();
+			Int queuedCount = 0;
+			for (Int i = 0; i < count; ++i)
 			{
-				reason = "unit_queue_rejected_internal";
-				return false;
+				const CanMakeType canMakeNow = TheBuildAssistant->canMakeUnit(producer, unitTemplate);
+				if (canMakeNow != CANMAKE_OK)
+				{
+					switch (canMakeNow)
+					{
+					case CANMAKE_NO_PREREQ:
+						reason = "no_prereq";
+						break;
+					case CANMAKE_NO_MONEY:
+						reason = "no_money";
+						break;
+					case CANMAKE_FACTORY_IS_DISABLED:
+						reason = "factory_disabled";
+						break;
+					case CANMAKE_QUEUE_FULL:
+						reason = "queue_full";
+						break;
+					case CANMAKE_PARKING_PLACES_FULL:
+						reason = "parking_full";
+						break;
+					case CANMAKE_MAXED_OUT_FOR_PLAYER:
+						reason = "maxed_out_for_player";
+						break;
+					default:
+						reason = "cannot_make_unit";
+						break;
+					}
+					break;
+				}
+
+				const ProductionID productionId = production->requestUniqueUnitID();
+				std::string queueReason;
+				const bool queued = executeScopedSelectionCommand(player, std::vector<ObjectID>(1, producerId), queueReason, [&]() -> bool
+				{
+					GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_QUEUE_UNIT_CREATE);
+					if (msg == nullptr)
+					{
+						queueReason = "message_stream_not_ready";
+						return false;
+					}
+					msg->appendIntegerArgument(templateId);
+					msg->appendIntegerArgument(static_cast<Int>(productionId));
+					return true;
+				});
+				if (!queued)
+				{
+					reason = queueReason.empty() ? "unit_queue_rejected_internal" : queueReason;
+					break;
+				}
+				++queuedCount;
 			}
 
+			if (queuedCount <= 0)
+			{
+				if (reason.empty())
+				{
+					reason = "unit_queue_rejected_internal";
+				}
+				return false;
+			}
 			return true;
 		}
 
@@ -1663,30 +1980,6 @@
 				ctx->producers.push_back(obj);
 				return;
 			}
-		}
-
-		static Int parseQueueCountArg(const nlohmann::json& message)
-		{
-			const auto argsIt = message.find("args");
-			if (argsIt == message.end() || !argsIt->is_object())
-			{
-				return 1;
-			}
-			const auto countIt = argsIt->find("count");
-			if (countIt == argsIt->end() || !countIt->is_number_integer())
-			{
-				return 1;
-			}
-			Int value = countIt->get<Int>();
-			if (value < 1)
-			{
-				value = 1;
-			}
-			if (value > 9)
-			{
-				value = 9;
-			}
-			return value;
 		}
 
 		std::string inferSoldierTemplateForPlayer(const Player* player, Object* producer) const
@@ -2321,6 +2614,7 @@
 			}
 
 			std::string unitTemplateName;
+			const Int count = parseQueueCountArg(message);
 			if (argsIt != message.end() && argsIt->is_object())
 			{
 				unitTemplateName = getJsonString(*argsIt, "unit_template");
@@ -2421,14 +2715,22 @@
 			std::string lastReason = "queue_failed";
 			for (Object* targetProducer : targetProducers)
 			{
-				std::string producerReason;
-				if (queueWorkerAtProducer(targetProducer, producerReason))
+				for (Int i = 0; i < count; ++i)
 				{
-					++queuedCount;
-				}
-				else if (!producerReason.empty())
-				{
-					lastReason = producerReason;
+					std::string producerReason;
+					if (queueWorkerAtProducer(targetProducer, producerReason))
+					{
+						++queuedCount;
+						continue;
+					}
+					if (!producerReason.empty())
+					{
+						lastReason = producerReason;
+					}
+					if (producerReason == "queue_full" || producerReason == "no_money")
+					{
+						break;
+					}
 				}
 			}
 
@@ -2733,7 +3035,7 @@
 			return executeGameDozerConstruct(bridged, reason);
 		}
 
-		bool executeGameBuildSupplyStashSmart(const nlohmann::json& message, std::string& reason)
+		bool executeGameBuildSupplyStashSmartSingle(const nlohmann::json& message, std::string& reason)
 		{
 			// First try the normal auto-build path.
 			std::string buildReason;
@@ -2901,11 +3203,10 @@
 				}
 			}
 			target.z = 0.0f;
-			ai->aiMoveToPosition(&target, CMD_FROM_AI);
-			return true;
+			return moveWorkerToPosition(worker, &target, reason);
 		}
 
-		bool executeGameBuildBarracksSmart(const nlohmann::json& message, std::string& reason)
+		bool executeGameBuildBarracksSmartSingle(const nlohmann::json& message, std::string& reason)
 		{
 			if (TheThingFactory == nullptr || TheGameLogic == nullptr || TheBuildAssistant == nullptr)
 			{
@@ -3002,7 +3303,7 @@
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
 		}
 
-		bool executeGameBuildCommandCenterSmart(const nlohmann::json& message, std::string& reason)
+		bool executeGameBuildCommandCenterSmartSingle(const nlohmann::json& message, std::string& reason)
 		{
 			if (TheThingFactory == nullptr || TheGameLogic == nullptr || TheBuildAssistant == nullptr)
 			{
@@ -3104,7 +3405,7 @@
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
 		}
 
-		bool executeGameBuildArmsDealerSmart(const nlohmann::json& message, std::string& reason)
+		bool executeGameBuildArmsDealerSmartSingle(const nlohmann::json& message, std::string& reason)
 		{
 			if (TheThingFactory == nullptr || TheGameLogic == nullptr || TheBuildAssistant == nullptr)
 			{
@@ -3201,7 +3502,7 @@
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
 		}
 
-		bool executeGameBuildPalaceSmart(const nlohmann::json& message, std::string& reason)
+		bool executeGameBuildPalaceSmartSingle(const nlohmann::json& message, std::string& reason)
 		{
 			if (TheThingFactory == nullptr || TheGameLogic == nullptr || TheBuildAssistant == nullptr)
 			{
@@ -3298,7 +3599,7 @@
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
 		}
 
-		bool executeGameBuildBlackMarketSmart(const nlohmann::json& message, std::string& reason)
+		bool executeGameBuildBlackMarketSmartSingle(const nlohmann::json& message, std::string& reason)
 		{
 			if (TheThingFactory == nullptr || TheGameLogic == nullptr || TheBuildAssistant == nullptr)
 			{
@@ -3395,6 +3696,182 @@
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
 		}
 
+		bool executeGameBuildSupplyStashSmart(const nlohmann::json& message, std::string& reason)
+		{
+			return executeRepeatedBuildAttempts(message, reason, [&](const nlohmann::json& singleMessage, std::string& singleReason) -> bool
+			{
+				return executeGameBuildSupplyStashSmartSingle(singleMessage, singleReason);
+			});
+		}
+
+		bool executeGameBuildBarracksSmart(const nlohmann::json& message, std::string& reason)
+		{
+			return executeRepeatedBuildAttempts(message, reason, [&](const nlohmann::json& singleMessage, std::string& singleReason) -> bool
+			{
+				return executeGameBuildBarracksSmartSingle(singleMessage, singleReason);
+			});
+		}
+
+		bool executeGameBuildCommandCenterSmart(const nlohmann::json& message, std::string& reason)
+		{
+			return executeRepeatedBuildAttempts(message, reason, [&](const nlohmann::json& singleMessage, std::string& singleReason) -> bool
+			{
+				return executeGameBuildCommandCenterSmartSingle(singleMessage, singleReason);
+			});
+		}
+
+		bool executeGameBuildArmsDealerSmart(const nlohmann::json& message, std::string& reason)
+		{
+			return executeRepeatedBuildAttempts(message, reason, [&](const nlohmann::json& singleMessage, std::string& singleReason) -> bool
+			{
+				return executeGameBuildArmsDealerSmartSingle(singleMessage, singleReason);
+			});
+		}
+
+		bool executeGameBuildPalaceSmart(const nlohmann::json& message, std::string& reason)
+		{
+			return executeRepeatedBuildAttempts(message, reason, [&](const nlohmann::json& singleMessage, std::string& singleReason) -> bool
+			{
+				return executeGameBuildPalaceSmartSingle(singleMessage, singleReason);
+			});
+		}
+
+		bool executeGameBuildBlackMarketSmart(const nlohmann::json& message, std::string& reason)
+		{
+			return executeRepeatedBuildAttempts(message, reason, [&](const nlohmann::json& singleMessage, std::string& singleReason) -> bool
+			{
+				return executeGameBuildBlackMarketSmartSingle(singleMessage, singleReason);
+			});
+		}
+
+		bool executeGameBuildBuildingMix(const nlohmann::json& message, std::string& reason)
+		{
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			const auto buildingsIt = argsIt->find("buildings");
+			if (buildingsIt == argsIt->end() || !buildingsIt->is_array() || buildingsIt->empty())
+			{
+				reason = "missing_buildings";
+				return false;
+			}
+
+			nlohmann::json sharedArgs = *argsIt;
+			sharedArgs.erase("buildings");
+
+			auto executeNamedBuild = [&](const std::string& buildCmd, const nlohmann::json& request, std::string& outReason) -> bool
+			{
+				if (buildCmd == "Game.BuildSupplyStashSmart")
+				{
+					return executeGameBuildSupplyStashSmart(request, outReason);
+				}
+				if (buildCmd == "Game.BuildBarracksSmart")
+				{
+					return executeGameBuildBarracksSmart(request, outReason);
+				}
+				if (buildCmd == "Game.BuildCommandCenterSmart")
+				{
+					return executeGameBuildCommandCenterSmart(request, outReason);
+				}
+				if (buildCmd == "Game.BuildArmsDealerSmart")
+				{
+					return executeGameBuildArmsDealerSmart(request, outReason);
+				}
+				if (buildCmd == "Game.BuildPalaceSmart")
+				{
+					return executeGameBuildPalaceSmart(request, outReason);
+				}
+				if (buildCmd == "Game.BuildBlackMarketSmart")
+				{
+					return executeGameBuildBlackMarketSmart(request, outReason);
+				}
+
+				outReason = "unsupported_building_mix_command";
+				return false;
+			};
+
+			Int issued = 0;
+			std::string lastReason = "build_failed";
+			for (nlohmann::json::const_iterator it = buildingsIt->begin(); it != buildingsIt->end(); ++it)
+			{
+				if (!it->is_object())
+				{
+					lastReason = "invalid_building_mix_entry";
+					continue;
+				}
+
+				nlohmann::json itemArgs = sharedArgs;
+				mergeJsonObjectInto(itemArgs, *it);
+
+				std::string buildCmd = getJsonString(*it, "cmd");
+				if (buildCmd.empty())
+				{
+					const std::string kind = normalizeBuildingMixKind(getJsonString(*it, "kind"));
+					if (kind == "supply_stash" || kind == "supply" || kind == "stash")
+					{
+						buildCmd = "Game.BuildSupplyStashSmart";
+					}
+					else if (kind == "barracks")
+					{
+						buildCmd = "Game.BuildBarracksSmart";
+					}
+					else if (kind == "command_center" || kind == "commandcenter")
+					{
+						buildCmd = "Game.BuildCommandCenterSmart";
+					}
+					else if (kind == "arms_dealer" || kind == "armsdealer")
+					{
+						buildCmd = "Game.BuildArmsDealerSmart";
+					}
+					else if (kind == "palace")
+					{
+						buildCmd = "Game.BuildPalaceSmart";
+					}
+					else if (kind == "black_market" || kind == "blackmarket" || kind == "market")
+					{
+						buildCmd = "Game.BuildBlackMarketSmart";
+					}
+				}
+
+				if (buildCmd.empty())
+				{
+					lastReason = "unsupported_building_mix_kind";
+					continue;
+				}
+
+				const Int count = parseCountArgFromObject(itemArgs);
+				itemArgs["count"] = count;
+				itemArgs.erase("kind");
+				itemArgs.erase("cmd");
+
+				nlohmann::json buildMessage = message;
+				buildMessage["args"] = itemArgs;
+
+				std::string buildReason;
+				if (executeNamedBuild(buildCmd, buildMessage, buildReason))
+				{
+					issued += count;
+					continue;
+				}
+
+				if (!buildReason.empty())
+				{
+					lastReason = buildReason;
+				}
+			}
+
+			if (issued <= 0)
+			{
+				reason = lastReason;
+				return false;
+			}
+			return true;
+		}
+
 		bool executeGameAttackMove(const nlohmann::json& message, std::string& reason)
 		{
 			if (TheGameLogic == nullptr)
@@ -3463,7 +3940,7 @@
 				return false;
 			}
 
-			Int commanded = 0;
+			std::vector<ObjectID> selectedIds;
 			for (Int id : objectIds)
 			{
 				Object* obj = TheGameLogic->findObjectByID(static_cast<ObjectID>(id));
@@ -3475,23 +3952,30 @@
 				{
 					continue;
 				}
-
-				AIUpdateInterface* ai = obj->getAI();
-				if (ai == nullptr)
+				if (obj->getAI() == nullptr)
 				{
 					continue;
 				}
 
-				ai->aiAttackMoveToPosition(&target, 0, CMD_FROM_AI);
-				++commanded;
+				selectedIds.push_back(obj->getID());
 			}
 
-			if (commanded == 0)
+			if (selectedIds.empty())
 			{
 				reason = "no_valid_objects";
 				return false;
 			}
-			return true;
+			return executeScopedSelectionCommand(player, selectedIds, reason, [&]() -> bool
+			{
+				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_ATTACKMOVETO);
+				if (msg == nullptr)
+				{
+					reason = "message_stream_not_ready";
+					return false;
+				}
+				msg->appendLocationArgument(target);
+				return true;
+			});
 		}
 
 		bool executeGameAttackMoveRaidSmart(const nlohmann::json& message, std::string& reason)
@@ -3681,30 +4165,34 @@
 				target.y = anchor.y + (dy * distance);
 			}
 
-			Int commanded = 0;
+			std::vector<ObjectID> selectedIds;
 			const std::size_t maxToCommand = std::min<std::size_t>(collectCtx.units.size(), static_cast<std::size_t>(groupSize));
 			for (std::size_t i = 0; i < maxToCommand; ++i)
 			{
 				Object* obj = collectCtx.units[i];
-				if (obj == nullptr)
+				if (obj == nullptr || obj->getAI() == nullptr)
 				{
 					continue;
 				}
-				AIUpdateInterface* ai = obj->getAI();
-				if (ai == nullptr)
-				{
-					continue;
-				}
-				ai->aiAttackMoveToPosition(&target, 0, CMD_FROM_AI);
-				++commanded;
+				selectedIds.push_back(obj->getID());
 			}
 
-			if (commanded <= 0)
+			if (selectedIds.empty())
 			{
 				reason = "no_valid_objects";
 				return false;
 			}
-			return true;
+			return executeScopedSelectionCommand(player, selectedIds, reason, [&]() -> bool
+			{
+				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_ATTACKMOVETO);
+				if (msg == nullptr)
+				{
+					reason = "message_stream_not_ready";
+					return false;
+				}
+				msg->appendLocationArgument(target);
+				return true;
+			});
 		}
 
 		bool executeGameGuardAllIdleGroundCombat(const nlohmann::json& message, std::string& reason)
@@ -3721,7 +4209,17 @@
 				return false;
 			}
 
-			Int commanded = 0;
+			struct GuardCommand
+			{
+				ObjectID id;
+				Coord3D pos;
+			};
+			struct GuardCollectContext
+			{
+				std::vector<GuardCommand> commands;
+			};
+
+			GuardCollectContext collectCtx;
 			player->iterateObjects([](Object* obj, void* userData)
 			{
 				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
@@ -3742,11 +4240,7 @@
 				}
 
 				AIUpdateInterface* ai = obj->getAI();
-				if (ai == nullptr)
-				{
-					return;
-				}
-				if (!ai->isIdle() || ai->isMoving())
+				if (ai == nullptr || !ai->isIdle() || ai->isMoving())
 				{
 					return;
 				}
@@ -3757,15 +4251,40 @@
 					return;
 				}
 
-				ai->aiGuardPosition(pos, GUARDMODE_NORMAL, CMD_FROM_AI);
-				++(*static_cast<Int*>(userData));
-			}, &commanded);
+				GuardCollectContext* ctx = static_cast<GuardCollectContext*>(userData);
+				GuardCommand command = {};
+				command.id = obj->getID();
+				command.pos = *pos;
+				command.pos.z = 0.0f;
+				ctx->commands.push_back(command);
+			}, &collectCtx);
 
-			if (commanded <= 0)
+			if (collectCtx.commands.empty())
 			{
 				reason = "no_valid_objects";
 				return false;
 			}
+
+			if (!canIssuePlayerScopedMessage(player, reason))
+			{
+				return false;
+			}
+
+			const std::vector<ObjectID> priorSelection = getCurrentSelectionObjectIds(player);
+			for (std::vector<GuardCommand>::const_iterator it = collectCtx.commands.begin(); it != collectCtx.commands.end(); ++it)
+			{
+				appendSelectionMessage(player, std::vector<ObjectID>(1, it->id), true);
+				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_GUARD_POSITION);
+				if (msg == nullptr)
+				{
+					appendSelectionMessage(player, priorSelection, true);
+					reason = "message_stream_not_ready";
+					return false;
+				}
+				msg->appendLocationArgument(it->pos);
+				msg->appendIntegerArgument(static_cast<Int>(GUARDMODE_NORMAL));
+			}
+			appendSelectionMessage(player, priorSelection, true);
 			return true;
 		}
 
@@ -3906,6 +4425,23 @@
 			}
 
 			TheTacticalView->setZoomLimited(enabled ? TRUE : FALSE);
+			return true;
+		}
+
+		bool executeGameCameraReset(std::string& reason)
+		{
+			if (TheTacticalView == nullptr)
+			{
+				reason = "camera_not_ready";
+				return false;
+			}
+
+			TheTacticalView->setAngleAndPitchToDefault();
+			TheTacticalView->setZoomToDefault();
+			if (TheGlobalData != nullptr)
+			{
+				TheTacticalView->setHeightAboveGround(TheGlobalData->m_cameraHeight);
+			}
 			return true;
 		}
 
@@ -4102,22 +4638,31 @@
 				return false;
 			}
 
-			Int commanded = 0;
-			for (Object* obj : collectCtx.units)
+			std::vector<ObjectID> selectedIds;
+			for (std::vector<Object*>::const_iterator it = collectCtx.units.begin(); it != collectCtx.units.end(); ++it)
 			{
-				AIUpdateInterface* ai = obj->getAI();
-				if (ai == nullptr)
+				Object* obj = *it;
+				if (obj == nullptr || obj->getAI() == nullptr)
 				{
 					continue;
 				}
-				ai->aiAttackMoveToPosition(&target, 0, CMD_FROM_AI);
-				++commanded;
+				selectedIds.push_back(obj->getID());
 			}
 
-			if (commanded <= 0)
+			if (selectedIds.empty())
 			{
 				reason = "no_valid_objects";
 				return false;
 			}
-			return true;
+			return executeScopedSelectionCommand(player, selectedIds, reason, [&]() -> bool
+			{
+				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_ATTACKMOVETO);
+				if (msg == nullptr)
+				{
+					reason = "message_stream_not_ready";
+					return false;
+				}
+				msg->appendLocationArgument(target);
+				return true;
+			});
 		}

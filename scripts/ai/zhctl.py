@@ -372,6 +372,7 @@ def cmd_queue_unit(args: argparse.Namespace) -> int:
     req_args: dict[str, Any] = {
         "unit_template": args.unit_template,
         "producer_kind": args.producer_kind,
+        "count": args.count,
     }
     if args.player_index is not None:
         req_args["player_index"] = args.player_index
@@ -389,7 +390,7 @@ def cmd_queue_unit(args: argparse.Namespace) -> int:
 
 
 def cmd_build_worker(args: argparse.Namespace) -> int:
-    req_args: dict[str, Any] = {}
+    req_args: dict[str, Any] = {"count": args.count}
     if args.player_index is not None:
         req_args["player_index"] = args.player_index
     if args.producer_object_id is not None:
@@ -671,7 +672,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--player-index", type=int, default=None)
     parser.add_argument("--unit-template", default="")
     parser.add_argument("--producer-object-id", type=int, default=None)
-    parser.add_argument("--producer-kind", choices=["command_center", "any"], default="command_center")
+    parser.add_argument("--producer-kind", choices=["command_center", "any", "supply_stash", "supply_center", "supply"], default="command_center")
+    parser.add_argument("--count", type=int, default=1)
     parser.add_argument("--building-template", default="")
     parser.add_argument("--supply-source-id", type=int, default=None)
     parser.add_argument("--worker-object-id", type=int, default=None)

@@ -204,15 +204,18 @@
 						"game_supply_build",
 						"game_supply_build_smart",
 						"game_barracks_build_smart",
+						"game_command_center_build_smart",
 						"game_arms_dealer_build_smart",
 						"game_palace_build_smart",
 						"game_black_market_build_smart",
+						"game_building_mix",
 						"game_attackmove_all_combat_to_player",
 						"game_attackmove_raid_smart",
 						"game_guard_all_idle_ground_combat",
 						"adapter_log_configure",
 						"adapter_log_reset",
 						"game_camera_set",
+						"game_camera_reset",
 						"game_camera_set_zoom_limited",
 						"game_camera_lookat",
 						"game_camera_get"
@@ -549,6 +552,18 @@
 				return;
 			}
 
+			if (cmd == "Game.BuildBuildingMix")
+			{
+				std::string reason;
+				if (!executeGameBuildBuildingMix(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
 			if (cmd == "Game.AttackMove")
 			{
 				std::string reason;
@@ -655,6 +670,18 @@
 			{
 				std::string reason;
 				if (!executeGameCameraSet(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.Camera.Reset")
+			{
+				std::string reason;
+				if (!executeGameCameraReset(reason))
 				{
 					sendActionAck(requestId, false, "invalid_state", reason.c_str());
 					return;
