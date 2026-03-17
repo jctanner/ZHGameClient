@@ -46,6 +46,105 @@
 			};
 		}
 
+		nlohmann::json buildUnitCompositionSummary(Player* player) const
+		{
+			nlohmann::json counts = nlohmann::json::object({
+				{"workers", 0},
+				{"rebels", 0},
+				{"rpg", 0},
+				{"radar_vans", 0},
+				{"quads", 0},
+				{"scorpions", 0},
+				{"combat_units", 0},
+				{"ground_combat_units", 0},
+				{"units_total", 0}
+			});
+
+			if (player == nullptr)
+			{
+				return counts;
+			}
+
+			auto toLower = [](std::string value) -> std::string
+			{
+				std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) -> unsigned char
+				{
+					return static_cast<unsigned char>(std::tolower(ch));
+				});
+				return value;
+			};
+
+			player->iterateObjects([](Object* obj, void* userData)
+			{
+				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead() || obj->isKindOf(KINDOF_STRUCTURE))
+				{
+					return;
+				}
+
+				nlohmann::json* counts = static_cast<nlohmann::json*>(userData);
+				(*counts)["units_total"] = counts->value("units_total", 0) + 1;
+
+				const bool isDozer = obj->isKindOf(KINDOF_DOZER);
+				const bool isHarvester = obj->isKindOf(KINDOF_HARVESTER);
+				const bool isAircraft = obj->isKindOf(KINDOF_AIRCRAFT);
+				const bool isGroundCombat =
+					!isDozer &&
+					!isHarvester &&
+					!isAircraft &&
+					(obj->isKindOf(KINDOF_INFANTRY) || obj->isKindOf(KINDOF_VEHICLE)) &&
+					obj->isAbleToAttack();
+				if (isGroundCombat)
+				{
+					(*counts)["ground_combat_units"] = counts->value("ground_combat_units", 0) + 1;
+					(*counts)["combat_units"] = counts->value("combat_units", 0) + 1;
+				}
+				else if (!isDozer && !isHarvester && obj->isAbleToAttack())
+				{
+					(*counts)["combat_units"] = counts->value("combat_units", 0) + 1;
+				}
+
+				const ThingTemplate* tmpl = obj->getTemplate();
+				const std::string name = tmpl != nullptr ? tmpl->getName().str() : "";
+				std::string text = name;
+				std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) -> unsigned char
+				{
+					return static_cast<unsigned char>(std::tolower(ch));
+				});
+
+				auto contains = [&text](const char* needle) -> bool
+				{
+					return text.find(needle) != std::string::npos;
+				};
+
+				if (contains("worker") || contains("dozer"))
+				{
+					(*counts)["workers"] = counts->value("workers", 0) + 1;
+				}
+				if (contains("rebel"))
+				{
+					(*counts)["rebels"] = counts->value("rebels", 0) + 1;
+				}
+				if (contains("rpg") || contains("tunneldefender"))
+				{
+					(*counts)["rpg"] = counts->value("rpg", 0) + 1;
+				}
+				if (contains("radarvan") || contains("radar_van"))
+				{
+					(*counts)["radar_vans"] = counts->value("radar_vans", 0) + 1;
+				}
+				if (contains("quad"))
+				{
+					(*counts)["quads"] = counts->value("quads", 0) + 1;
+				}
+				if (contains("scorpion"))
+				{
+					(*counts)["scorpions"] = counts->value("scorpions", 0) + 1;
+				}
+			}, &counts);
+
+			return counts;
+		}
+
 		static const char* classifyObjectClass(const Object* obj)
 		{
 			if (obj == nullptr)
@@ -744,6 +843,14 @@
 			{
 				result = buildUnitCountsSummary(selectedPlayer);
 				result["player_index"] = selectedPlayer->getPlayerIndex();
+				return true;
+			}
+
+			if (path == "game.unit_composition")
+			{
+				result = buildUnitCompositionSummary(selectedPlayer);
+				result["player_index"] = selectedPlayer != nullptr ? selectedPlayer->getPlayerIndex() : -1;
+				result["path"] = "game.unit_composition";
 				return true;
 			}
 

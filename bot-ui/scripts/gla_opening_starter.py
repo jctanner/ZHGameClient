@@ -4,7 +4,6 @@ import argparse
 import random
 import sys
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -16,6 +15,14 @@ if str(SRC) not in sys.path:
 
 from protocol.client import PipeClient
 from protocol.messages import hello_message, session_command_message
+from macro_phases import (
+    PHASE_OPENING,
+    PHASE_OPENING_NAME,
+    PHASE_SUSTAIN,
+    PLAN_PHASES,
+    Step,
+    maybe_transition_phase,
+)
 
 
 class TeeWriter:
@@ -33,73 +40,8 @@ class TeeWriter:
         self._secondary.flush()
 
 
-@dataclass(frozen=True)
-class Step:
-    name: str
-    cmd: str
-    args: dict[str, Any]
-    repeat: int = 1
-
-
-@dataclass(frozen=True)
-class Phase:
-    name: str
-    steps: tuple[Step, ...]
-    exit_when: tuple[str, ...] = ()
-
-
-PHASE_OPENING_NAME = "opening"
-PHASE_SUSTAIN_NAME = "sustain"
-RULE_PALACE_STARTED = "palace_started"
-RULE_OPENING_COMPLETE = "opening_complete"
-
-OPENING_BUILDING_MIX: dict[str, int] = {
-    "stash": 2,
-    "barracks": 1,
-    "arms": 1,
-    "tunnel_networks": 4,
-    "stinger_sites": 4,
-}
-OPENING_INFANTRY_MIX: dict[str, int] = {"soldiers": 3, "rpg": 6}
-OPENING_VEHICLE_MIX: dict[str, int] = {"radar": 0, "quads": 3, "scorpions": 3}
-
-SUSTAIN_BUILDING_MIX: dict[str, int] = {
-    "stash": 1,
-    "barracks": 1,
-    "arms": 1,
-    "black_markets": 2,
-    "tunnel_networks": 4,
-    "stinger_sites": 4,
-}
-SUSTAIN_INFANTRY_MIX: dict[str, int] = {"soldiers": 2, "rpg": 2}
-SUSTAIN_VEHICLE_MIX: dict[str, int] = {"radar": 0, "quads": 3, "scorpions": 3}
-
-
-PHASE_OPENING = Phase(
-    name=PHASE_OPENING_NAME,
-    steps=(
-    Step("Build 9 workers", "Game.BuildWorker", {"producer_kind": "command_center"}, repeat=9),
-    Step("Build opening mix", "Script.BuildingMix", OPENING_BUILDING_MIX),
-    Step("Queue infantry mix opening", "Script.QueueInfantryMix", OPENING_INFANTRY_MIX),
-    Step("Queue vehicle mix opening", "Script.QueueVehicleMix", OPENING_VEHICLE_MIX),
-    ),
-    exit_when=(RULE_PALACE_STARTED, RULE_OPENING_COMPLETE),
-)
-
-PHASE_SUSTAIN = Phase(
-    name=PHASE_SUSTAIN_NAME,
-    steps=(
-    Step("Queue infantry mix sustain", "Script.QueueInfantryMix", SUSTAIN_INFANTRY_MIX),
-    Step("Queue vehicle mix sustain", "Script.QueueVehicleMix", SUSTAIN_VEHICLE_MIX),
-    Step("Build sustain mix", "Script.BuildingMix", SUSTAIN_BUILDING_MIX),
-    ),
-    exit_when=(),
-)
-
-PLAN_PHASES: tuple[Phase, ...] = (PHASE_OPENING, PHASE_SUSTAIN)
-
 STASH_WORKER_TARGET = 9
-COMMAND_CENTER_WORKER_TARGET = 9
+COMMAND_CENTER_WORKER_TARGET = 2
 PALACE_MARKET_RATIO = 8
 MIN_MONEY_FOR_PALACE_ATTEMPT = 7000
 DEFAULT_ZONE_RADIUS = 420.0
@@ -108,27 +50,29 @@ DEFAULT_ZONE_COUNT = 64
 SUSTAIN_MARKET_ATTEMPT_EVERY = 3
 SUSTAIN_PALACE_ATTEMPT_EVERY = 8
 SUSTAIN_STASH_EVERY_CYCLES = 6
-SUSTAIN_STASH_MIN_MONEY = 9000
+SUSTAIN_STASH_MIN_MONEY = 3500
+SUSTAIN_BLACK_MARKET_MIN_MONEY = 2500
 DEFAULT_PENDING_COOLDOWN_SEC = 20.0
 BUDGET_RESERVE_CASH = 5000
 BUDGET_INFANTRY_MIX_MIN = 1200
 BUDGET_VEHICLE_MIX_MIN = 2600
 OBJECTS_FULL_REFRESH_EVERY = 0
 OBJECTS_CACHE_REFRESH_EVERY_CYCLES = 6
-OBJECTS_UNITS_QUERY_EVERY_CYCLES = 12
+OBJECTS_UNITS_QUERY_EVERY_CYCLES = 0
 OBJECTS_BUILDINGS_QUERY_EVERY_CYCLES = 3
 HEAVY_QUERY_BACKOFF_SEC = 20.0
 IDLE_WORKERS_QUERY_EVERY_CYCLES = 2
-DEFAULT_RAID_MIN_UNITS = 20
-DEFAULT_RAID_GROUP_SIZE = 20
+UNIT_COMPOSITION_QUERY_EVERY_CYCLES = 1
+DEFAULT_RAID_MIN_UNITS = 50
+DEFAULT_RAID_GROUP_SIZE = 50
 DEFAULT_RAID_EVERY_CYCLES = 4
 DEFAULT_RAID_DISTANCE = 3000.0
 DEFAULT_RAID_COOLDOWN_SEC = 20.0
 DEFAULT_GUARD_IDLE_EVERY_CYCLES = 3
 DEFAULT_GUARD_IDLE_COOLDOWN_SEC = 10.0
-WORKER_TRICKLE_PER_PRODUCER_PER_TICK = 1
-DEFAULT_WORKER_TOPUP_COOLDOWN_SEC = 8.0
-DEFAULT_WORKER_TOPUP_MIN_MONEY = 7000
+WORKER_TRICKLE_PER_PRODUCER_PER_TICK = 2
+DEFAULT_WORKER_TOPUP_COOLDOWN_SEC = 1.0
+DEFAULT_WORKER_TOPUP_MIN_MONEY = 3000
 DEFAULT_IDLE_WORKERS_SKIP_TOPUP_THRESHOLD = 1
 RADAR_KEEPALIVE_INFLIGHT_SEC = 90.0
 RADAR_KEEPALIVE_WATCHDOG_SEC = 240.0
@@ -324,6 +268,32 @@ def query_idle_workers_count(client: PipeClient, timeout_ms: int, previous_count
         if isinstance(workers, list):
             return max(0, len(workers))
     return previous_count
+
+
+def query_unit_composition(client: PipeClient, timeout_ms: int, previous_counts: dict[str, int] | None = None) -> dict[str, int]:
+    resp = try_send_session_command(client, "Game.Query", {"path": "game.unit_composition"}, timeout_ms)
+    if resp is None or resp.get("ok") is False:
+        return dict(previous_counts or {})
+    payload = extract_payload(resp)
+    if not isinstance(payload, dict):
+        return dict(previous_counts or {})
+    keys = (
+        "workers",
+        "rebels",
+        "rpg",
+        "radar_vans",
+        "quads",
+        "scorpions",
+        "combat_units",
+        "ground_combat_units",
+        "units_total",
+    )
+    counts = dict(previous_counts or {})
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, int):
+            counts[key] = max(0, int(value))
+    return counts
 
 
 def merge_compact_rows(
@@ -551,14 +521,13 @@ def distribute_existing_workers(
     return issued
 
 
-def initialize_plan_progress(units: list[dict[str, Any]], buildings: list[dict[str, Any]]) -> tuple[int, int]:
-    workers = count_matching_templates(units, ("worker", "dozer"))
-    rebels = count_matching_templates(units, ("rebel",))
-    rpg = count_matching_templates(units, ("rpg", "tunneldefender"))
-    radar_vans = count_matching_templates(units, ("radarvan", "radar_van"))
-    quads = count_matching_templates(units, ("quad",))
-    scorpions = count_matching_templates(units, ("scorpion",))
-
+def initialize_plan_progress(unit_counts: dict[str, int], buildings: list[dict[str, Any]]) -> tuple[int, int]:
+    workers = int(unit_counts.get("workers", 0))
+    rebels = int(unit_counts.get("rebels", 0))
+    rpg = int(unit_counts.get("rpg", 0))
+    radar_vans = int(unit_counts.get("radar_vans", 0))
+    quads = int(unit_counts.get("quads", 0))
+    scorpions = int(unit_counts.get("scorpions", 0))
     stashes = count_complete_matching_templates(buildings, ("supplystash", "supplycenter"))
     barracks = count_complete_matching_templates(buildings, ("barracks",))
     arms = count_complete_matching_templates(buildings, ("armsdealer", "warfactory"))
@@ -605,11 +574,10 @@ def sync_producers(
 
 
 def recompute_producer_worker_issued(
-    units: list[dict[str, Any]],
     buildings: list[dict[str, Any]],
+    existing_workers: int,
 ) -> tuple[dict[int, int], dict[int, int], int]:
     command_center_ids, stash_ids = collect_producer_ids(buildings)
-    existing_workers = count_matching_templates(units, ("worker", "dozer"))
     command_center_worker_issued = distribute_existing_workers(
         command_center_ids,
         COMMAND_CENTER_WORKER_TARGET,
@@ -681,19 +649,60 @@ def issue_worker_for_producer(
     return sent_ok
 
 
-def summarize_assets(units: list[dict[str, Any]], buildings: list[dict[str, Any]]) -> dict[str, int]:
+def top_up_workers_for_producers(
+    client: PipeClient,
+    timeout_ms: int,
+    cycle: int,
+    producer_label: str,
+    producer_target: int,
+    producer_worker_issued: dict[int, int],
+    pending_until_by_key: dict[str, float],
+    now: float,
+    pending_cooldown_sec: float,
+) -> int:
+    total_added = 0
+    for producer_id in sorted(producer_worker_issued):
+        if producer_worker_issued.get(producer_id, 0) >= producer_target:
+            continue
+        pending_key = f"Game.BuildWorker:{producer_id}"
+        if is_pending(pending_until_by_key, pending_key, now):
+            continue
+        added = issue_worker_for_producer(
+            client=client,
+            timeout_ms=timeout_ms,
+            cycle=cycle,
+            producer_label=producer_label,
+            producer_id=producer_id,
+            producer_target=producer_target,
+            producer_worker_issued=producer_worker_issued,
+        )
+        if added > 0:
+            mark_pending(
+                pending_until_by_key,
+                pending_key,
+                now,
+                pending_cooldown_sec,
+            )
+            total_added += added
+    return total_added
+
+
+def summarize_assets(unit_counts: dict[str, int], buildings: list[dict[str, Any]]) -> dict[str, int]:
     return {
         "palaces": count_matching_templates(buildings, ("palace",)),
         "black_markets": count_matching_templates(buildings, ("blackmarket", "black_market")),
         "arms": count_matching_templates(buildings, ("armsdealer", "warfactory")),
         "barracks": count_matching_templates(buildings, ("barracks",)),
         "stashes": count_matching_templates(buildings, ("supplystash", "supplycenter")),
-        "workers": count_matching_templates(units, ("worker", "dozer")),
-        "rebels": count_matching_templates(units, ("rebel",)),
-        "rpg": count_matching_templates(units, ("rpg", "tunneldefender")),
-        "quads": count_matching_templates(units, ("quad",)),
-        "scorpions": count_matching_templates(units, ("scorpion",)),
-        "radar_vans": count_matching_templates(units, ("radarvan", "radar_van")),
+        "workers": int(unit_counts.get("workers", 0)),
+        "rebels": int(unit_counts.get("rebels", 0)),
+        "rpg": int(unit_counts.get("rpg", 0)),
+        "quads": int(unit_counts.get("quads", 0)),
+        "scorpions": int(unit_counts.get("scorpions", 0)),
+        "radar_vans": int(unit_counts.get("radar_vans", 0)),
+        "combat_units": int(unit_counts.get("combat_units", 0)),
+        "ground_combat_units": int(unit_counts.get("ground_combat_units", 0)),
+        "units_total": int(unit_counts.get("units_total", 0)),
     }
 
 
@@ -986,40 +995,6 @@ def mark_pending(pending_until: dict[str, float], key: str, now_monotonic: float
     pending_until[key] = now_monotonic + max(0.0, cooldown_sec)
 
 
-def maybe_transition_phase(
-    phase_index: int,
-    opening_step_index: int,
-    assets: dict[str, int],
-    opening_core_ready: bool,
-    now_monotonic: float,
-    phase_entered_at_monotonic: float,
-    cycle: int,
-) -> tuple[int, float, str]:
-    if phase_index < 0 or phase_index >= len(PLAN_PHASES):
-        return phase_index, phase_entered_at_monotonic, ""
-    current_phase = PLAN_PHASES[phase_index]
-    for rule in current_phase.exit_when:
-        if rule == RULE_PALACE_STARTED and assets.get("palaces", 0) > 0 and opening_core_ready:
-            if phase_index + 1 < len(PLAN_PHASES):
-                next_phase = PLAN_PHASES[phase_index + 1]
-                print(
-                    f"[transition] {current_phase.name}->{next_phase.name} "
-                    f"reason={RULE_PALACE_STARTED} cycle={cycle}",
-                    flush=True,
-                )
-                return phase_index + 1, now_monotonic, RULE_PALACE_STARTED
-        if rule == RULE_OPENING_COMPLETE and opening_step_index >= len(current_phase.steps):
-            if phase_index + 1 < len(PLAN_PHASES):
-                next_phase = PLAN_PHASES[phase_index + 1]
-                print(
-                    f"[transition] {current_phase.name}->{next_phase.name} "
-                    f"reason={RULE_OPENING_COMPLETE} cycle={cycle}",
-                    flush=True,
-                )
-                return phase_index + 1, now_monotonic, RULE_OPENING_COMPLETE
-    return phase_index, phase_entered_at_monotonic, ""
-
-
 def configure_file_logging(log_path: Path) -> TextIO:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     file_handle = log_path.open("w", encoding="utf-8", buffering=1)
@@ -1180,8 +1155,9 @@ def main() -> int:
         include_buildings=True,
     )
     startup_counts = query_zone_counts(client, args.timeout_ms)
+    startup_unit_counts = query_unit_composition(client, args.timeout_ms, previous_counts={})
     command_center_ids, stash_ids = collect_producer_ids(startup_buildings)
-    existing_workers = count_matching_templates(startup_units, ("worker", "dozer"))
+    existing_workers = int(startup_unit_counts.get("workers", 0))
     startup_has_palace = has_palace_started(startup_buildings) or (
         isinstance(startup_counts, dict) and int(startup_counts.get("palaces", 0)) > 0
     )
@@ -1192,13 +1168,13 @@ def main() -> int:
     # Seed per-producer worker issuance from observed current worker count so restarts
     # do not assume a fresh game state.
     command_center_worker_issued, stash_worker_issued, existing_workers = recompute_producer_worker_issued(
-        startup_units,
         startup_buildings,
+        existing_workers,
     )
 
-    opening_step_index, opening_step_attempt_count = initialize_plan_progress(startup_units, startup_buildings)
+    opening_step_index, opening_step_attempt_count = initialize_plan_progress(startup_unit_counts, startup_buildings)
     phase_index = 0
-    startup_assets = summarize_assets(startup_units, startup_buildings)
+    startup_assets = summarize_assets(startup_unit_counts, startup_buildings)
     startup_now = time.monotonic()
     phase_entered_at_monotonic = startup_now
     phase_last_transition_reason = ""
@@ -1212,6 +1188,7 @@ def main() -> int:
             and int(startup_counts.get("barracks", 0)) >= 1
             and int(startup_counts.get("arms_dealers", 0)) >= 1
         ),
+        money=0,
         now_monotonic=startup_now,
         phase_entered_at_monotonic=phase_entered_at_monotonic,
         cycle=0,
@@ -1228,6 +1205,7 @@ def main() -> int:
     pending_until_by_key: dict[str, float] = {}
     cached_units = startup_units
     cached_buildings = startup_buildings
+    cached_unit_counts = startup_unit_counts
     cached_money = query_money(client, args.timeout_ms, previous_money=0)
     cached_idle_workers = query_idle_workers_count(client, args.timeout_ms, previous_count=0)
 
@@ -1259,7 +1237,10 @@ def main() -> int:
                 )
                 if cycle % max(1, OBJECTS_CACHE_REFRESH_EVERY_CYCLES) == 1 and time.monotonic() >= heavy_query_backoff_until:
                     refresh_objects_cache(client, args.timeout_ms)
-                include_units = (cycle % max(1, OBJECTS_UNITS_QUERY_EVERY_CYCLES) == 1)
+                include_units = (
+                    OBJECTS_UNITS_QUERY_EVERY_CYCLES > 0
+                    and (cycle % max(1, OBJECTS_UNITS_QUERY_EVERY_CYCLES) == 1)
+                )
                 include_buildings = (cycle % max(1, OBJECTS_BUILDINGS_QUERY_EVERY_CYCLES) == 1)
                 compact_units: list[dict[str, Any]] = []
                 compact_buildings: list[dict[str, Any]] = []
@@ -1287,10 +1268,20 @@ def main() -> int:
                 if compact_buildings:
                     cached_buildings = merge_compact_rows(cached_buildings, compact_buildings)
 
+            if cycle % max(1, UNIT_COMPOSITION_QUERY_EVERY_CYCLES) == 1:
+                cached_unit_counts = query_unit_composition(
+                    client,
+                    args.timeout_ms,
+                    previous_counts=cached_unit_counts,
+                )
+
             units, buildings = cached_units, cached_buildings
-            existing_workers = count_matching_templates(units, ("worker", "dozer"))
-            sync_producers(buildings, command_center_worker_issued, stash_worker_issued)
-            assets = summarize_assets(units, buildings)
+            existing_workers = int(cached_unit_counts.get("workers", 0))
+            command_center_worker_issued, stash_worker_issued, existing_workers = recompute_producer_worker_issued(
+                buildings,
+                existing_workers,
+            )
+            assets = summarize_assets(cached_unit_counts, buildings)
             money = query_money(client, args.timeout_ms, previous_money=cached_money)
             cached_money = money
             if cycle % max(1, IDLE_WORKERS_QUERY_EVERY_CYCLES) == 1:
@@ -1306,6 +1297,7 @@ def main() -> int:
                 opening_step_index=opening_step_index,
                 assets=assets,
                 opening_core_ready=opening_building_mix_ready(buildings),
+                money=money,
                 now_monotonic=now,
                 phase_entered_at_monotonic=phase_entered_at_monotonic,
                 cycle=cycle,
@@ -1392,50 +1384,50 @@ def main() -> int:
                         )
                 if (allow_cc_topup or allow_stash_topup) and (now - last_worker_topup_at) >= DEFAULT_WORKER_TOPUP_COOLDOWN_SEC:
                     worker_topup_done = False
-                    if allow_cc_topup:
-                        command_center_id = pick_command_center_needing_workers(command_center_worker_issued)
-                        if command_center_id is not None:
-                            cc_key = f"Game.BuildWorker:{command_center_id}"
-                            if not is_pending(pending_until_by_key, cc_key, now):
-                                cc_added = issue_worker_for_producer(
-                                    client=client,
-                                    timeout_ms=args.timeout_ms,
-                                    cycle=cycle,
-                                    producer_label="command_center",
-                                    producer_id=command_center_id,
-                                    producer_target=COMMAND_CENTER_WORKER_TARGET,
-                                    producer_worker_issued=command_center_worker_issued,
-                                )
-                                if cc_added > 0:
-                                    mark_pending(
-                                        pending_until_by_key,
-                                        cc_key,
-                                        now,
-                                        max(2.0, float(args.pending_cooldown_sec) * 0.5),
-                                    )
-                                    worker_topup_done = True
+                    prefer_stash_topup = phase_index > 0
+                    worker_pending_cooldown = 1.0
+                    if prefer_stash_topup and not worker_topup_done and allow_stash_topup:
+                        stash_added = top_up_workers_for_producers(
+                            client=client,
+                            timeout_ms=args.timeout_ms,
+                            cycle=cycle,
+                            producer_label="stash",
+                            producer_target=STASH_WORKER_TARGET,
+                            producer_worker_issued=stash_worker_issued,
+                            pending_until_by_key=pending_until_by_key,
+                            now=now,
+                            pending_cooldown_sec=worker_pending_cooldown,
+                        )
+                        if stash_added > 0:
+                            worker_topup_done = True
+                    if not worker_topup_done and allow_cc_topup:
+                        cc_added = top_up_workers_for_producers(
+                            client=client,
+                            timeout_ms=args.timeout_ms,
+                            cycle=cycle,
+                            producer_label="command_center",
+                            producer_target=COMMAND_CENTER_WORKER_TARGET,
+                            producer_worker_issued=command_center_worker_issued,
+                            pending_until_by_key=pending_until_by_key,
+                            now=now,
+                            pending_cooldown_sec=worker_pending_cooldown,
+                        )
+                        if cc_added > 0:
+                            worker_topup_done = True
                     if not worker_topup_done and allow_stash_topup:
-                        stash_id = pick_stash_needing_workers(stash_worker_issued)
-                        if stash_id is not None:
-                            stash_key = f"Game.BuildWorker:{stash_id}"
-                            if not is_pending(pending_until_by_key, stash_key, now):
-                                stash_added = issue_worker_for_producer(
-                                    client=client,
-                                    timeout_ms=args.timeout_ms,
-                                    cycle=cycle,
-                                    producer_label="stash",
-                                    producer_id=stash_id,
-                                    producer_target=STASH_WORKER_TARGET,
-                                    producer_worker_issued=stash_worker_issued,
-                                )
-                                if stash_added > 0:
-                                    mark_pending(
-                                        pending_until_by_key,
-                                        stash_key,
-                                        now,
-                                        max(2.0, float(args.pending_cooldown_sec) * 0.5),
-                                    )
-                                    worker_topup_done = True
+                        stash_added = top_up_workers_for_producers(
+                            client=client,
+                            timeout_ms=args.timeout_ms,
+                            cycle=cycle,
+                            producer_label="stash",
+                            producer_target=STASH_WORKER_TARGET,
+                            producer_worker_issued=stash_worker_issued,
+                            pending_until_by_key=pending_until_by_key,
+                            now=now,
+                            pending_cooldown_sec=worker_pending_cooldown,
+                        )
+                        if stash_added > 0:
+                            worker_topup_done = True
                     if worker_topup_done:
                         last_worker_topup_at = now
 
@@ -1465,6 +1457,7 @@ def main() -> int:
                             opening_step_index=opening_step_index,
                             assets=assets,
                             opening_core_ready=opening_building_mix_ready(buildings),
+                            money=money,
                             now_monotonic=now,
                             phase_entered_at_monotonic=phase_entered_at_monotonic,
                             cycle=cycle,
@@ -1632,6 +1625,7 @@ def main() -> int:
                     opening_step_index=opening_step_index,
                     assets=assets,
                     opening_core_ready=opening_building_mix_ready(cached_buildings),
+                    money=money,
                     now_monotonic=now,
                     phase_entered_at_monotonic=phase_entered_at_monotonic,
                     cycle=cycle,
@@ -1655,7 +1649,7 @@ def main() -> int:
                 low_money_skip_until_cycle = max(low_money_skip_until_cycle, cycle + low_money_skip_cycles)
             in_low_money_hold = (money < low_money_threshold) and (cycle < low_money_skip_until_cycle)
 
-            raid_cycle_gate = (cycle % raid_every == 0) or in_low_money_hold
+            raid_cycle_gate = (cycle % raid_every == 0) and not in_low_money_hold
             raid_cooldown_gate = not is_pending(pending_until_by_key, raid_key, now)
             if raid_cycle_gate and raid_cooldown_gate:
                 raid_resp = try_send_session_command(
@@ -1683,7 +1677,9 @@ def main() -> int:
                             max(1.0, float(args.raid_cooldown_sec)),
                         )
             else:
-                if not raid_cycle_gate:
+                if in_low_money_hold:
+                    raid_reason = f"low_money_hold money={money} threshold={low_money_threshold}"
+                elif not raid_cycle_gate:
                     raid_reason = f"cycle_gate cycle={cycle} every={raid_every}"
                 else:
                     pending_until = pending_until_by_key.get(raid_key, 0.0)
@@ -1723,16 +1719,6 @@ def main() -> int:
                     guard_idle_reason = f"cooldown_gate remaining_sec={remaining:.1f}"
                 print(f"[loop {cycle}] guard_idle_skip {guard_idle_reason}", flush=True)
 
-            if in_low_money_hold:
-                print(
-                    f"[loop {cycle}] sustain_hold low_money money={money} "
-                    f"threshold={low_money_threshold} resume_cycle={low_money_skip_until_cycle}",
-                    flush=True,
-                )
-                cycle += 1
-                time.sleep(args.tick_sec)
-                continue
-
             black_markets = assets["black_markets"]
             palaces = assets["palaces"]
             completed_palaces = count_complete_matching_templates(buildings, ("palace",))
@@ -1742,6 +1728,7 @@ def main() -> int:
                 completed_palaces > 0
                 and
                 black_markets < desired_markets_for_next_palace
+                and money >= SUSTAIN_BLACK_MARKET_MIN_MONEY
                 and (cycle % SUSTAIN_MARKET_ATTEMPT_EVERY == 0)
             )
             if should_try_market:
@@ -1773,6 +1760,12 @@ def main() -> int:
                 print(
                     f"[loop {cycle}] phase=sustain econ=black_market skip=no_completed_palace "
                     f"palaces={palaces} completed_palaces={completed_palaces}",
+                    flush=True,
+                )
+            elif (cycle % SUSTAIN_MARKET_ATTEMPT_EVERY == 0) and money < SUSTAIN_BLACK_MARKET_MIN_MONEY:
+                print(
+                    f"[loop {cycle}] phase=sustain econ=black_market skip=low_cash "
+                    f"money={money} required={SUSTAIN_BLACK_MARKET_MIN_MONEY}",
                     flush=True,
                 )
 
@@ -1857,6 +1850,17 @@ def main() -> int:
             # Economy guardrail: when cash is tight, let building mix recover economy first.
             reserve_cash = max(0, int(args.reserve_cash))
             if sustain_step.cmd == "Script.QueueInfantryMix":
+                if in_low_money_hold:
+                    print(
+                        f"[loop {cycle}] phase=sustain step={sustain_step_index + 1}/{len(PHASE_SUSTAIN.steps)} "
+                        f"name='{sustain_step.name}' skip=low_money_hold money={money} "
+                        f"threshold={low_money_threshold} resume_cycle={low_money_skip_until_cycle}",
+                        flush=True,
+                    )
+                    sustain_step_index = (sustain_step_index + 1) % len(PHASE_SUSTAIN.steps)
+                    cycle += 1
+                    time.sleep(args.tick_sec)
+                    continue
                 required = reserve_cash + BUDGET_INFANTRY_MIX_MIN
                 if money < required:
                     print(
@@ -1869,6 +1873,17 @@ def main() -> int:
                     time.sleep(args.tick_sec)
                     continue
             elif sustain_step.cmd == "Script.QueueVehicleMix":
+                if in_low_money_hold:
+                    print(
+                        f"[loop {cycle}] phase=sustain step={sustain_step_index + 1}/{len(PHASE_SUSTAIN.steps)} "
+                        f"name='{sustain_step.name}' skip=low_money_hold money={money} "
+                        f"threshold={low_money_threshold} resume_cycle={low_money_skip_until_cycle}",
+                        flush=True,
+                    )
+                    sustain_step_index = (sustain_step_index + 1) % len(PHASE_SUSTAIN.steps)
+                    cycle += 1
+                    time.sleep(args.tick_sec)
+                    continue
                 required = reserve_cash + BUDGET_VEHICLE_MIX_MIN
                 if money < required:
                     print(
@@ -1901,6 +1916,16 @@ def main() -> int:
             elif sustain_step.cmd == "Script.BuildingMix":
                 requested_stash_count = int(sustain_step.args.get("stash", 1))
                 stash_count_for_cycle = requested_stash_count
+                barracks_count_for_cycle = int(sustain_step.args.get("barracks", 1))
+                arms_count_for_cycle = int(sustain_step.args.get("arms", 1))
+                black_markets_count_for_cycle = int(sustain_step.args.get("black_markets", 0))
+                tunnel_networks_count_for_cycle = int(sustain_step.args.get("tunnel_networks", 0))
+                stinger_sites_count_for_cycle = int(sustain_step.args.get("stinger_sites", 0))
+                if in_low_money_hold:
+                    barracks_count_for_cycle = 0
+                    arms_count_for_cycle = 0
+                if money < SUSTAIN_BLACK_MARKET_MIN_MONEY:
+                    black_markets_count_for_cycle = 0
                 if requested_stash_count > 0:
                     if money < SUSTAIN_STASH_MIN_MONEY:
                         stash_count_for_cycle = 0
@@ -1921,11 +1946,11 @@ def main() -> int:
                     args.timeout_ms,
                     cycle,
                     stash_count=stash_count_for_cycle,
-                    barracks_count=int(sustain_step.args.get("barracks", 1)),
-                    arms_count=int(sustain_step.args.get("arms", 1)),
-                    black_markets_count=int(sustain_step.args.get("black_markets", 0)),
-                    tunnel_networks_count=int(sustain_step.args.get("tunnel_networks", 0)),
-                    stinger_sites_count=int(sustain_step.args.get("stinger_sites", 0)),
+                    barracks_count=barracks_count_for_cycle,
+                    arms_count=arms_count_for_cycle,
+                    black_markets_count=black_markets_count_for_cycle,
+                    tunnel_networks_count=tunnel_networks_count_for_cycle,
+                    stinger_sites_count=stinger_sites_count_for_cycle,
                     zone_center=zone_centers[zone_index],
                     zone_radius=float(args.zone_radius),
                     buildings=buildings,
