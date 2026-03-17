@@ -56,9 +56,20 @@ class BotUIApp:
         self.debug_inbound = tk.BooleanVar(value=True)
         self.queue_count_var = tk.IntVar(value=1)
         self.target_player_index_var = tk.IntVar(value=0)
+        self.chat_text_var = tk.StringVar(value="")
+        self.chat_scope_var = tk.StringVar(value="everyone")
+        self.query_preset_var = tk.StringVar(value="game.objects")
         self.pipe_name_var = tk.StringVar(value="zh_ai_control")
         self.connection_state_var = tk.StringVar(value="Disconnected")
         self.command_input_var = tk.StringVar(value='Session.Status {}')
+        self.build_mix_stash_var = tk.IntVar(value=0)
+        self.build_mix_barracks_var = tk.IntVar(value=0)
+        self.build_mix_command_var = tk.IntVar(value=0)
+        self.build_mix_arms_var = tk.IntVar(value=0)
+        self.build_mix_palace_var = tk.IntVar(value=0)
+        self.build_mix_market_var = tk.IntVar(value=0)
+        self.camera_angle_deg_var = tk.DoubleVar(value=0.0)
+        self.camera_zoom_var = tk.DoubleVar(value=1.0)
 
         self._build_ui()
         self._start_request_worker()
@@ -66,25 +77,62 @@ class BotUIApp:
         self.root.after(500, self._poll_loop)
 
     def _build_ui(self) -> None:
-        self.root.grid_columnconfigure(0, weight=1, uniform="cols")
-        self.root.grid_columnconfigure(1, weight=1, uniform="cols")
+        self.root.grid_columnconfigure(0, weight=1)
         self.root.grid_rowconfigure(0, weight=1)
 
-        left = ttk.Frame(self.root, padding=8)
+        notebook = ttk.Notebook(self.root)
+        notebook.grid(row=0, column=0, sticky="nsew")
+
+        ops_tab = ttk.Frame(notebook, padding=8)
+        menu_tab = ttk.Frame(notebook, padding=8)
+        notebook.add(ops_tab, text="Bot")
+        notebook.add(menu_tab, text="Menu")
+
+        ops_tab.grid_columnconfigure(0, weight=1, uniform="cols")
+        ops_tab.grid_columnconfigure(1, weight=1, uniform="cols")
+        ops_tab.grid_rowconfigure(0, weight=1)
+
+        left = ttk.Frame(ops_tab, padding=8)
         left.grid(row=0, column=0, sticky="nsew")
         left.grid_columnconfigure(0, weight=1)
+        left.grid_rowconfigure(3, weight=1)
 
-        right = ttk.Frame(self.root, padding=8)
+        right = ttk.Frame(ops_tab, padding=8)
         right.grid(row=0, column=1, sticky="nsew")
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(0, weight=1)
         right.grid_rowconfigure(1, weight=1)
 
-        self._build_left_panel(left)
-        self._build_right_top_map(right)
+        self._build_ops_left_panel(left)
+        self._build_right_top_players(right)
         self._build_right_bottom_controls(right)
+        self._build_left_bottom_map(left)
+        self._build_menu_tab(menu_tab)
 
-    def _build_left_panel(self, parent: ttk.Frame) -> None:
+    def _build_ops_left_panel(self, parent: ttk.Frame) -> None:
+        conn = ttk.LabelFrame(parent, text="Connection", padding=8)
+        conn.grid(row=0, column=0, sticky="ew")
+        conn.grid_columnconfigure(1, weight=1)
+
+        ttk.Label(conn, text="Pipe").grid(row=0, column=0, sticky="w")
+        ttk.Entry(conn, textvariable=self.pipe_name_var).grid(row=0, column=1, sticky="ew", padx=6)
+        ttk.Button(conn, text="Connect", command=self.connect).grid(row=0, column=2, padx=2)
+        ttk.Button(conn, text="Disconnect", command=self.disconnect).grid(row=0, column=3, padx=2)
+        ttk.Label(conn, textvariable=self.connection_state_var).grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+        chat = ttk.LabelFrame(parent, text="Chat", padding=8)
+        chat.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        chat.grid_columnconfigure(0, weight=1)
+        ttk.Entry(chat, textvariable=self.chat_text_var).grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        ttk.Combobox(chat, textvariable=self.chat_scope_var, values=("players", "allies", "everyone"), width=10, state="readonly").grid(
+            row=0, column=1, sticky="w", padx=(0, 6)
+        )
+        ttk.Button(chat, text="Send Chat", command=self._send_chat).grid(row=0, column=2, sticky="ew")
+
+    def _build_menu_tab(self, parent: ttk.Frame) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(1, weight=1)
+
         conn = ttk.LabelFrame(parent, text="Connection", padding=8)
         conn.grid(row=0, column=0, sticky="ew")
         conn.grid_columnconfigure(1, weight=1)
@@ -96,7 +144,7 @@ class BotUIApp:
         ttk.Label(conn, textvariable=self.connection_state_var).grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
 
         nav = ttk.LabelFrame(parent, text="Menu / Start Game", padding=8)
-        nav.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        nav.grid(row=1, column=0, sticky="nsew", pady=(8, 0))
         nav.grid_columnconfigure(0, weight=1)
         nav.grid_columnconfigure(1, weight=1)
         ttk.Button(nav, text="Main Multiplayer", command=lambda: self._menu_click(MAIN_MENU_ACTIONS["main_multiplayer"])).grid(
@@ -129,10 +177,14 @@ class BotUIApp:
         ttk.Button(nav, text="PLAY GAME", command=self._play_game).grid(row=4, column=1, sticky="ew", padx=2, pady=2)
         ttk.Button(nav, text="MAIN MENU", command=self._go_main_menu).grid(row=5, column=0, sticky="ew", padx=2, pady=2)
         ttk.Button(nav, text="SOLO Back", command=self._go_solo_back).grid(row=5, column=1, sticky="ew", padx=2, pady=2)
+        ttk.Button(nav, text="List Controls", command=self._list_controls).grid(row=6, column=0, sticky="ew", padx=2, pady=2)
+        ttk.Button(nav, text="Query Players", command=lambda: self._query("game.players", quiet=False)).grid(
+            row=6, column=1, sticky="ew", padx=2, pady=2
+        )
 
+    def _build_right_top_players(self, parent: ttk.Frame) -> None:
         players = ttk.LabelFrame(parent, text="Players", padding=8)
-        players.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
-        parent.grid_rowconfigure(2, weight=1)
+        players.grid(row=0, column=0, sticky="nsew")
         columns = ("idx", "name", "color", "team", "cash", "units", "bld", "promo", "pos")
         tree = ttk.Treeview(players, columns=columns, show="headings", height=12)
         self.player_tree = tree
@@ -155,9 +207,9 @@ class BotUIApp:
         players.grid_rowconfigure(0, weight=1)
         players.grid_columnconfigure(0, weight=1)
 
-    def _build_right_top_map(self, parent: ttk.Frame) -> None:
+    def _build_left_bottom_map(self, parent: ttk.Frame) -> None:
         map_frame = ttk.LabelFrame(parent, text="Map", padding=6)
-        map_frame.grid(row=0, column=0, sticky="nsew")
+        map_frame.grid(row=3, column=0, sticky="nsew", pady=(8, 0))
         map_frame.grid_rowconfigure(1, weight=1)
         map_frame.grid_columnconfigure(0, weight=1)
         toolbar = ttk.Frame(map_frame)
@@ -177,77 +229,150 @@ class BotUIApp:
 
         controls = ttk.LabelFrame(bottom, text="Bot Controls", padding=8)
         controls.grid(row=0, column=0, sticky="ew")
-        for i in range(6):
-            controls.grid_columnconfigure(i, weight=1)
+        controls.grid_columnconfigure(0, weight=1)
 
-        ttk.Button(controls, text="Build Stash", command=lambda: self._send_session_command("Game.BuildSupplyStashSmart", {})).grid(
-            row=0, column=0, sticky="ew", padx=2, pady=2
-        )
-        ttk.Button(controls, text="Build Barracks", command=lambda: self._send_session_command("Game.BuildBarracksSmart", {})).grid(
-            row=0, column=1, sticky="ew", padx=2, pady=2
-        )
-        ttk.Button(controls, text="Build Command", command=lambda: self._send_session_command("Game.BuildCommandCenterSmart", {})).grid(
+        buildings = ttk.LabelFrame(controls, text="Buildings", padding=6)
+        buildings.grid(row=0, column=0, sticky="ew")
+        for i in range(4):
+            buildings.grid_columnconfigure(i, weight=1)
+        ttk.Label(buildings, text="Build Count (1-9)").grid(row=0, column=0, sticky="e")
+        tk.Spinbox(buildings, from_=1, to=9, textvariable=self.queue_count_var, width=5).grid(row=0, column=1, sticky="w")
+        ttk.Button(buildings, text="Build Stash", command=self._build_stash).grid(
             row=0, column=2, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(controls, text="Build Arms Dealer", command=lambda: self._send_session_command("Game.BuildArmsDealerSmart", {})).grid(
+        ttk.Button(buildings, text="Build Barracks", command=self._build_barracks).grid(
             row=0, column=3, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(controls, text="Query Objects", command=lambda: self._query("game.objects_all", quiet=False)).grid(
-            row=0, column=4, sticky="ew", padx=2, pady=2
+        ttk.Button(buildings, text="Build Command", command=self._build_command_center).grid(
+            row=1, column=0, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(controls, text="Query Enemies", command=lambda: self._query("game.visible_enemies", quiet=False)).grid(
-            row=0, column=5, sticky="ew", padx=2, pady=2
+        ttk.Button(buildings, text="Build Arms Dealer", command=self._build_arms_dealer).grid(
+            row=1, column=1, sticky="ew", padx=2, pady=2
         )
-        ttk.Label(controls, text="Queue Count (1-9)").grid(row=1, column=0, sticky="e")
-        tk.Spinbox(controls, from_=1, to=9, textvariable=self.queue_count_var, width=5).grid(row=1, column=1, sticky="w")
-        ttk.Button(controls, text="Queue Soldiers", command=self._queue_soldiers_all_barracks).grid(
-            row=1, column=2, columnspan=2, sticky="ew", padx=2, pady=2
+        ttk.Button(buildings, text="Build Palace", command=self._build_palace).grid(
+            row=1, column=2, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(controls, text="Queue Quads", command=self._queue_quads_all_war_factories).grid(
-            row=1, column=4, columnspan=2, sticky="ew", padx=2, pady=2
+        ttk.Button(buildings, text="Build Black Market", command=self._build_black_market).grid(
+            row=1, column=3, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(controls, text="Queue RPG", command=self._queue_rpg_troopers_all_barracks).grid(
-            row=2, column=2, columnspan=2, sticky="ew", padx=2, pady=2
+        ttk.Button(buildings, text="Find Supplies", command=self._find_supply_sources).grid(
+            row=2, column=0, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(controls, text="Queue Scorpions", command=self._queue_scorpions_all_war_factories).grid(
-            row=2, column=4, columnspan=2, sticky="ew", padx=2, pady=2
+        ttk.Button(buildings, text="Dozer Construct", command=self._dozer_construct_supply).grid(
+            row=2, column=1, sticky="ew", padx=2, pady=2
         )
-        ttk.Label(controls, text="Target Player Idx").grid(row=2, column=0, sticky="e")
-        tk.Spinbox(controls, from_=0, to=11, textvariable=self.target_player_index_var, width=5).grid(row=2, column=1, sticky="w")
-        ttk.Button(controls, text="Build Worker (CC)", command=self._build_worker_command_center).grid(
-            row=3, column=0, columnspan=2, sticky="ew", padx=2, pady=2
+        mix = ttk.LabelFrame(buildings, text="Build Mix", padding=6)
+        mix.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        for i in range(6):
+            mix.grid_columnconfigure(i, weight=1)
+        self._build_mix_spinbox(mix, 0, "Stash", self.build_mix_stash_var)
+        self._build_mix_spinbox(mix, 1, "Barracks", self.build_mix_barracks_var)
+        self._build_mix_spinbox(mix, 2, "Command", self.build_mix_command_var)
+        self._build_mix_spinbox(mix, 3, "Arms", self.build_mix_arms_var)
+        self._build_mix_spinbox(mix, 4, "Palace", self.build_mix_palace_var)
+        self._build_mix_spinbox(mix, 5, "Markets", self.build_mix_market_var)
+        ttk.Button(mix, text="Send Build Mix", command=self._build_mix).grid(
+            row=2, column=0, columnspan=6, sticky="ew", padx=2, pady=(6, 0)
         )
-        ttk.Button(controls, text="Build Worker (All Stashes)", command=self._build_worker_supply_stash).grid(
-            row=3, column=2, columnspan=2, sticky="ew", padx=2, pady=2
+
+        units = ttk.LabelFrame(controls, text="Units", padding=6)
+        units.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        for i in range(4):
+            units.grid_columnconfigure(i, weight=1)
+        ttk.Label(units, text="Queue Count (1-9)").grid(row=0, column=0, sticky="e")
+        tk.Spinbox(units, from_=1, to=9, textvariable=self.queue_count_var, width=5).grid(row=0, column=1, sticky="w")
+        ttk.Button(units, text="Build Worker (CC)", command=self._build_worker_command_center).grid(
+            row=0, column=2, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(controls, text="Build Palace", command=self._build_palace).grid(
-            row=3, column=4, columnspan=2, sticky="ew", padx=2, pady=2
+        ttk.Button(units, text="Build Worker (All Stashes)", command=self._build_worker_supply_stash).grid(
+            row=0, column=3, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(controls, text="Build Black Market", command=self._build_black_market).grid(
-            row=4, column=4, columnspan=2, sticky="ew", padx=2, pady=2
+        ttk.Button(units, text="Queue Soldiers", command=self._queue_soldiers_all_barracks).grid(
+            row=1, column=0, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(controls, text="AttackMove -> Player", command=self._attackmove_all_combat_to_player).grid(
-            row=5, column=4, columnspan=2, sticky="ew", padx=2, pady=2
+        ttk.Button(units, text="Queue RPG", command=self._queue_rpg_troopers_all_barracks).grid(
+            row=1, column=1, sticky="ew", padx=2, pady=2
         )
-        ttk.Checkbutton(controls, text="Polling", variable=self.poll_enabled).grid(row=5, column=0, sticky="w")
+        ttk.Button(units, text="Queue Quads", command=self._queue_quads_all_war_factories).grid(
+            row=1, column=2, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(units, text="Queue Scorpions", command=self._queue_scorpions_all_war_factories).grid(
+            row=1, column=3, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(units, text="Queue Radar Van", command=self._queue_radar_van).grid(
+            row=2, column=2, sticky="ew", padx=2, pady=2
+        )
+
+        actions = ttk.LabelFrame(controls, text="Actions", padding=6)
+        actions.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        for i in range(4):
+            actions.grid_columnconfigure(i, weight=1)
+        ttk.Label(actions, text="Target Player Idx").grid(row=0, column=0, sticky="e")
+        tk.Spinbox(actions, from_=0, to=11, textvariable=self.target_player_index_var, width=5).grid(row=0, column=1, sticky="w")
+        ttk.Button(actions, text="AttackMove -> Player", command=self._attackmove_all_combat_to_player).grid(
+            row=0, column=2, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(actions, text="Raid Smart", command=self._raid_smart).grid(
+            row=0, column=3, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(actions, text="Guard Idle", command=self._guard_idle_ground_combat).grid(
+            row=1, column=0, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(actions, text="Query Objects", command=lambda: self._query("game.objects_all", quiet=False)).grid(
+            row=1, column=1, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(actions, text="Query Enemies", command=lambda: self._query("game.visible_enemies", quiet=False)).grid(
+            row=1, column=2, sticky="ew", padx=2, pady=2
+        )
+        ttk.Checkbutton(actions, text="Polling", variable=self.poll_enabled).grid(row=2, column=0, sticky="w")
+        ttk.Label(actions, text="Interval ms").grid(row=2, column=1, sticky="e")
+        ttk.Entry(actions, textvariable=self.poll_interval_ms, width=8).grid(row=2, column=2, sticky="w")
+        ttk.Checkbutton(actions, text="Use Streaming", variable=self.stream_enabled, command=self._toggle_streaming).grid(
+            row=2, column=3, sticky="w"
+        )
         ttk.Checkbutton(
-            controls,
+            actions,
             text="Map Updates",
             variable=self.map_updates_enabled,
             command=self._on_map_updates_toggle,
-        ).grid(row=6, column=1, sticky="w")
-        ttk.Label(controls, text="Interval ms").grid(row=5, column=1, sticky="e")
-        ttk.Entry(controls, textvariable=self.poll_interval_ms, width=8).grid(row=5, column=2, sticky="w")
-        ttk.Checkbutton(controls, text="Use Streaming", variable=self.stream_enabled, command=self._toggle_streaming).grid(
-            row=5, column=3, sticky="w"
-        )
-        ttk.Checkbutton(controls, text="Debug Inbound", variable=self.debug_inbound).grid(row=6, column=0, sticky="w")
+        ).grid(row=3, column=0, sticky="w")
+        ttk.Checkbutton(actions, text="Debug Inbound", variable=self.debug_inbound).grid(row=3, column=1, sticky="w")
 
         cmd_row = ttk.LabelFrame(bottom, text="Command Input", padding=8)
         cmd_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
-        cmd_row.grid_columnconfigure(0, weight=1)
-        ttk.Entry(cmd_row, textvariable=self.command_input_var).grid(row=0, column=0, sticky="ew", padx=(0, 6))
-        ttk.Button(cmd_row, text="Send", command=self._send_command_input).grid(row=0, column=1)
+        cmd_row.grid_columnconfigure(1, weight=1)
+        ttk.Label(cmd_row, text="Query").grid(row=0, column=0, sticky="w")
+        ttk.Combobox(
+            cmd_row,
+            textvariable=self.query_preset_var,
+            values=(
+                "game.status",
+                "game.resources",
+                "game.players",
+                "game.objects",
+                "game.objects_all",
+                "game.visible_enemies",
+                "game.idle_workers",
+                "game.unit_composition",
+                "game.zone_counts",
+                "game.objects_cache_status",
+            ),
+            state="readonly",
+            width=24,
+        ).grid(row=0, column=1, sticky="w", padx=(0, 6))
+        ttk.Button(cmd_row, text="Run Query", command=self._run_query_preset).grid(row=0, column=2, padx=(0, 10))
+        ttk.Button(cmd_row, text="Camera Get", command=self._camera_get).grid(row=0, column=3, padx=2)
+        ttk.Button(cmd_row, text="Camera TopDown", command=self._camera_top_down).grid(row=0, column=4, padx=2)
+        ttk.Button(cmd_row, text="Camera Reset", command=self._camera_reset).grid(row=0, column=5, padx=2)
+        ttk.Button(cmd_row, text="Look At Player", command=self._camera_look_at_player).grid(row=0, column=6, padx=2)
+        ttk.Label(cmd_row, text="Angle Deg").grid(row=1, column=0, sticky="e", pady=(6, 0))
+        ttk.Entry(cmd_row, textvariable=self.camera_angle_deg_var, width=8).grid(row=1, column=1, sticky="w", pady=(6, 0))
+        ttk.Button(cmd_row, text="Set Angle", command=self._camera_set_angle).grid(row=1, column=2, padx=2, pady=(6, 0))
+        ttk.Label(cmd_row, text="Zoom").grid(row=1, column=3, sticky="e", pady=(6, 0))
+        ttk.Entry(cmd_row, textvariable=self.camera_zoom_var, width=8).grid(row=1, column=4, sticky="w", pady=(6, 0))
+        ttk.Button(cmd_row, text="Set Zoom", command=self._camera_set_zoom).grid(row=1, column=5, padx=2, pady=(6, 0))
+        ttk.Entry(cmd_row, textvariable=self.command_input_var).grid(row=2, column=0, columnspan=6, sticky="ew", padx=(0, 6), pady=(6, 0))
+        ttk.Button(cmd_row, text="Send", command=self._send_command_input).grid(row=2, column=6, pady=(6, 0))
 
         logs = ttk.LabelFrame(bottom, text="Logs", padding=4)
         logs.grid(row=2, column=0, sticky="nsew", pady=(6, 0))
@@ -347,16 +472,30 @@ class BotUIApp:
         self._send_session_command("Game.QueueScorpionsAllWarFactories", {"count": count})
 
     def _build_worker_command_center(self) -> None:
-        self._send_session_command("Game.BuildWorker", {"producer_kind": "command_center"})
+        count = self._get_queue_count()
+        self._send_session_command("Game.BuildWorker", {"producer_kind": "command_center", "count": count})
 
     def _build_worker_supply_stash(self) -> None:
-        self._send_session_command("Game.BuildWorker", {"producer_kind": "supply_stash"})
+        count = self._get_queue_count()
+        self._send_session_command("Game.BuildWorker", {"producer_kind": "supply_stash", "count": count})
+
+    def _build_stash(self) -> None:
+        self._send_session_command("Game.BuildSupplyStashSmart", {"count": self._get_queue_count()})
+
+    def _build_barracks(self) -> None:
+        self._send_session_command("Game.BuildBarracksSmart", {"count": self._get_queue_count()})
+
+    def _build_command_center(self) -> None:
+        self._send_session_command("Game.BuildCommandCenterSmart", {"count": self._get_queue_count()})
+
+    def _build_arms_dealer(self) -> None:
+        self._send_session_command("Game.BuildArmsDealerSmart", {"count": self._get_queue_count()})
 
     def _build_palace(self) -> None:
-        self._send_session_command("Game.BuildPalaceSmart", {})
+        self._send_session_command("Game.BuildPalaceSmart", {"count": self._get_queue_count()})
 
     def _build_black_market(self) -> None:
-        self._send_session_command("Game.BuildBlackMarketSmart", {})
+        self._send_session_command("Game.BuildBlackMarketSmart", {"count": self._get_queue_count()})
 
     def _attackmove_all_combat_to_player(self) -> None:
         try:
@@ -365,6 +504,110 @@ class BotUIApp:
             target = 0
         target = max(0, target)
         self._send_session_command("Game.AttackMoveAllCombatToPlayer", {"target_player_index": target})
+
+    def _queue_radar_van(self) -> None:
+        self._send_session_command("Game.QueueRadarVan", {})
+
+    def _find_supply_sources(self) -> None:
+        self._send_session_command("Game.FindSupplySources", {}, quiet=False)
+
+    def _dozer_construct_supply(self) -> None:
+        self._send_session_command("Game.DozerConstruct", {}, quiet=False)
+
+    def _raid_smart(self) -> None:
+        count = self._get_queue_count()
+        self._send_session_command("Game.AttackMove.RaidSmart", {"min_units": max(1, count), "group_size": max(1, count)})
+
+    def _guard_idle_ground_combat(self) -> None:
+        self._send_session_command("Game.GuardAllIdleGroundCombat", {})
+
+    def _build_mix_spinbox(self, parent: ttk.Frame, column: int, label: str, variable: tk.IntVar) -> None:
+        ttk.Label(parent, text=label).grid(row=0, column=column, sticky="s")
+        tk.Spinbox(parent, from_=0, to=9, textvariable=variable, width=5).grid(row=1, column=column, sticky="n")
+
+    def _build_mix(self) -> None:
+        buildings: list[dict[str, Any]] = []
+
+        def add(kind: str, value: tk.IntVar) -> None:
+            try:
+                count = int(value.get())
+            except Exception:  # noqa: BLE001
+                count = 0
+            count = max(0, min(9, count))
+            if count > 0:
+                buildings.append({"kind": kind, "count": count})
+
+        add("supply_stash", self.build_mix_stash_var)
+        add("barracks", self.build_mix_barracks_var)
+        add("command_center", self.build_mix_command_var)
+        add("arms_dealer", self.build_mix_arms_var)
+        add("palace", self.build_mix_palace_var)
+        add("black_market", self.build_mix_market_var)
+
+        if not buildings:
+            self._log("Build mix is empty.")
+            return
+
+        self._send_session_command("Game.BuildBuildingMix", {"buildings": buildings})
+
+    def _send_chat(self) -> None:
+        text = self.chat_text_var.get().strip()
+        if not text:
+            self._log("Chat text is empty.")
+            return
+        self._send_session_command("Chat.Send", {"text": text, "scope": self.chat_scope_var.get() or "everyone"})
+
+    def _list_controls(self) -> None:
+        self._send_session_command("Menu.ListControls", {"kind": "all", "include_hidden": False}, quiet=False)
+
+    def _run_query_preset(self) -> None:
+        path = self.query_preset_var.get().strip()
+        if not path:
+            return
+        self._query(path, quiet=False)
+
+    def _camera_get(self) -> None:
+        self._send_session_command("Game.Camera.Get", {}, quiet=False)
+
+    def _camera_top_down(self) -> None:
+        self._send_session_command("Game.Camera.Set", {"top_down": True, "angle": 0.0}, quiet=False)
+
+    def _camera_reset(self) -> None:
+        self._send_session_command("Game.Camera.Reset", {}, quiet=False)
+
+    def _camera_set_angle(self) -> None:
+        try:
+            angle_deg = float(self.camera_angle_deg_var.get())
+        except Exception:  # noqa: BLE001
+            self._log("Invalid camera angle.")
+            return
+        self._send_session_command("Game.Camera.Set", {"angle": angle_deg * (3.141592653589793 / 180.0)}, quiet=False)
+
+    def _camera_set_zoom(self) -> None:
+        try:
+            zoom = float(self.camera_zoom_var.get())
+        except Exception:  # noqa: BLE001
+            self._log("Invalid camera zoom.")
+            return
+        if zoom <= 0.0:
+            self._log("Camera zoom must be > 0.")
+            return
+        self._send_session_command("Game.Camera.Set", {"zoom": zoom}, quiet=False)
+
+    def _camera_look_at_player(self) -> None:
+        try:
+            target = int(self.target_player_index_var.get())
+        except Exception:  # noqa: BLE001
+            target = 0
+        meta = self.store.players.get(target)
+        if meta is None or meta.map_position is None:
+            self._log(f"No known map position for player {target}.")
+            return
+        self._send_session_command(
+            "Game.Camera.LookAt",
+            {"x": float(meta.map_position[0]), "y": float(meta.map_position[1])},
+            quiet=False,
+        )
 
     def _send_session_command(self, cmd: str, args: dict[str, Any], quiet: bool = False) -> None:
         if not self._hello_ok:
@@ -547,12 +790,41 @@ class BotUIApp:
             self._log(f"ack {cmd} ok={ok}{extra}")
             if pending.get("cmd") == "Game.Query":
                 self._apply_query_result(msg, str(pending.get("path", "")))
+            elif msg_type == "QueryResult":
+                self._handle_command_query_result(cmd, msg)
         else:
             if msg_type == "QueryResult":
                 # Late/unmatched query replies can still carry useful state updates.
                 self._apply_query_result(msg, "")
             elif msg_type == "ActionAck":
                 pass
+
+    def _handle_command_query_result(self, cmd: str, msg: dict[str, Any]) -> None:
+        payload = self._extract_payload(msg)
+        if cmd == "Menu.ListControls" and isinstance(payload, dict):
+            count = payload.get("count")
+            self._log(f"{cmd} count={count}")
+        elif cmd == "Game.FindSupplySources" and isinstance(payload, dict):
+            count = payload.get("count")
+            self._log(f"{cmd} count={count}")
+        elif cmd == "Game.Camera.Get" and isinstance(payload, dict):
+            x = payload.get("x")
+            y = payload.get("y")
+            zoom = payload.get("zoom")
+            pitch = payload.get("pitch")
+            angle = payload.get("angle")
+            if isinstance(angle, (int, float)):
+                self.camera_angle_deg_var.set(float(angle) * (180.0 / 3.141592653589793))
+            if isinstance(zoom, (int, float)):
+                self.camera_zoom_var.set(float(zoom))
+            self._log(f"{cmd} x={x} y={y} zoom={zoom} pitch={pitch}")
+        elif isinstance(payload, dict):
+            keys = ", ".join(sorted(payload.keys())[:8])
+            self._log(f"{cmd} keys={keys}")
+        elif isinstance(payload, list):
+            self._log(f"{cmd} rows={len(payload)}")
+        else:
+            self._log(f"{cmd} payload={payload}")
 
     def _apply_query_result(self, msg: dict[str, Any], pending_path: str = "") -> None:
         if msg.get("ok") is False:
