@@ -209,6 +209,9 @@
 						"game_black_market_build_smart",
 						"game_attackmove_all_combat_to_player",
 						"game_attackmove_raid_smart",
+						"game_guard_all_idle_ground_combat",
+						"adapter_log_configure",
+						"adapter_log_reset",
 						"game_camera_set",
 						"game_camera_set_zoom_limited",
 						"game_camera_lookat",
@@ -576,6 +579,72 @@
 				if (!executeGameAttackMoveRaidSmart(message, reason))
 				{
 					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.GuardAllIdleGroundCombat")
+			{
+				std::string reason;
+				if (!executeGameGuardAllIdleGroundCombat(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Adapter.Log.Configure")
+			{
+				const auto argsIt = message.find("args");
+				if (argsIt == message.end() || !argsIt->is_object())
+				{
+					sendActionAck(requestId, false, "bad_request", "missing_args");
+					return;
+				}
+
+				const auto pathIt = argsIt->find("path");
+				if (pathIt == argsIt->end() || !pathIt->is_string())
+				{
+					sendActionAck(requestId, false, "bad_request", "missing_log_path");
+					return;
+				}
+
+				bool truncateExisting = false;
+				const auto truncateIt = argsIt->find("truncate");
+				if (truncateIt != argsIt->end() && truncateIt->is_boolean())
+				{
+					truncateExisting = truncateIt->get<bool>();
+				}
+
+				if (!configureAdapterLogPath(pathIt->get<std::string>(), truncateExisting))
+				{
+					sendActionAck(requestId, false, "invalid_state", "log_configure_failed");
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Adapter.Log.Reset")
+			{
+				bool truncateExisting = false;
+				const auto argsIt = message.find("args");
+				if (argsIt != message.end() && argsIt->is_object())
+				{
+					const auto truncateIt = argsIt->find("truncate");
+					if (truncateIt != argsIt->end() && truncateIt->is_boolean())
+					{
+						truncateExisting = truncateIt->get<bool>();
+					}
+				}
+
+				if (!resetAdapterLogFile(truncateExisting))
+				{
+					sendActionAck(requestId, false, "invalid_state", "log_reset_failed");
 					return;
 				}
 				sendActionAck(requestId, true);

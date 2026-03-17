@@ -52,6 +52,7 @@ namespace
 			m_pipe(INVALID_HANDLE_VALUE),
 			m_hasClient(false),
 			m_adapterLog(nullptr),
+			m_adapterLogPath("D:\\logs\\adapter.log"),
 			m_ownedCacheValid(false),
 			m_ownedCachePlayerIndex(-1),
 			m_ownedCacheUnitsTotal(0),
@@ -110,6 +111,7 @@ namespace
 		HANDLE m_pipe;
 		bool m_hasClient;
 		FILE* m_adapterLog;
+		std::string m_adapterLogPath;
 		std::string m_lineBuffer;
 		std::string m_sessionId;
 		std::unordered_map<Int, Int> m_lastAutoSupplySourceByPlayer;

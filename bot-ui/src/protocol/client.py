@@ -24,12 +24,10 @@ class PipeClient:
         self.pipe_name = pipe_name
         self.timeout_ms = timeout_ms
         self._stream: Any | None = None
-        self._reader_thread: threading.Thread | None = None
-        self._writer_thread: threading.Thread | None = None
         self._running = False
         self.incoming: "queue.Queue[dict[str, Any]]" = queue.Queue()
         self.errors: "queue.Queue[str]" = queue.Queue()
-        self._outgoing: "queue.Queue[dict[str, Any] | None]" = queue.Queue()
+        self._io_lock = threading.Lock()
 
     @property
     def is_connected(self) -> bool:
@@ -40,14 +38,9 @@ class PipeClient:
             return
         self._stream = self._open_pipe(self.pipe_name, self.timeout_ms)
         self._running = True
-        self._writer_thread = threading.Thread(target=self._writer_loop, name="botui-pipe-writer", daemon=True)
-        self._writer_thread.start()
-        self._reader_thread = threading.Thread(target=self._reader_loop, name="botui-pipe-reader", daemon=True)
-        self._reader_thread.start()
 
     def disconnect(self) -> None:
         self._running = False
-        self._outgoing.put(None)
         stream = self._stream
         self._stream = None
         if stream is not None:
@@ -60,59 +53,23 @@ class PipeClient:
         if not self.is_connected:
             raise RuntimeError("Not connected to adapter.")
         request_id = str(payload.get("request_id", ""))
-        self._outgoing.put(payload)
-        return request_id
-
-    def _writer_loop(self) -> None:
-        while self._running:
-            item = self._outgoing.get()
-            if item is None:
-                return
-            stream = self._stream
-            if stream is None:
-                return
-            try:
-                data = (compact_json(item) + "\n").encode("utf-8")
+        stream = self._stream
+        if stream is None:
+            raise RuntimeError("Not connected to adapter.")
+        data = (compact_json(payload) + "\n").encode("utf-8")
+        try:
+            with self._io_lock:
                 stream.write(data)
                 stream.flush()
-            except OSError as exc:
-                self.errors.put(f"Pipe write error: {exc}")
-                self._running = False
-                return
-            except Exception as exc:  # noqa: BLE001
-                self.errors.put(f"Unexpected pipe writer error: {exc}")
-                self._running = False
-                return
-
-    def _reader_loop(self) -> None:
-        while self._running:
-            stream = self._stream
-            if stream is None:
-                return
-            try:
-                line = stream.readline()
-                if not line:
-                    self.errors.put("Adapter pipe closed.")
-                    self._running = False
-                    return
-                text = line.decode("utf-8", errors="replace").strip()
-                if not text:
-                    continue
-                try:
-                    message = json.loads(text)
-                except json.JSONDecodeError:
-                    self.errors.put(f"Invalid JSON from adapter: {text[:200]}")
-                    continue
-                if isinstance(message, dict):
-                    self.incoming.put(message)
-            except OSError as exc:
-                self.errors.put(f"Pipe read error: {exc}")
-                self._running = False
-                return
-            except Exception as exc:  # noqa: BLE001
-                self.errors.put(f"Unexpected pipe reader error: {exc}")
-                self._running = False
-                return
+        except OSError as exc:
+            self.errors.put(f"Pipe write error: {exc}")
+            self._running = False
+            raise
+        except Exception as exc:  # noqa: BLE001
+            self.errors.put(f"Unexpected pipe write error: {exc}")
+            self._running = False
+            raise
+        return request_id
 
     def _open_pipe(self, pipe_name: str, timeout_ms: int) -> Any:
         if os.name != "nt":
@@ -172,18 +129,35 @@ class PipeClient:
         if not request_id:
             raise RuntimeError("payload.request_id is required")
         timeout = timeout_ms if timeout_ms is not None else self.timeout_ms
-        stream = self._open_pipe(self.pipe_name, timeout)
-        try:
-            data = (compact_json(payload) + "\n").encode("utf-8")
-            stream.write(data)
-            stream.flush()
+        with self._io_lock:
+            if not self.is_connected:
+                self.connect()
+            stream = self._stream
+            if stream is None or not self._running:
+                raise RuntimeError("Not connected to adapter.")
+
+            try:
+                data = (compact_json(payload) + "\n").encode("utf-8")
+                stream.write(data)
+                stream.flush()
+            except OSError as exc:
+                self.errors.put(f"Pipe write error: {exc}")
+                self._running = False
+                raise RuntimeError(f"Pipe write error: {exc}") from exc
+            except Exception as exc:  # noqa: BLE001
+                self.errors.put(f"Unexpected pipe write error: {exc}")
+                self._running = False
+                raise RuntimeError(f"Unexpected pipe write error: {exc}") from exc
+
             deadline = time.monotonic() + (timeout / 1000.0)
             recv_buffer = b""
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    raise TimeoutError(f"Timed out waiting for reply request_id={request_id}")
-                # Use PeekNamedPipe polling to avoid blocking indefinitely on readline().
+                    raise TimeoutError(
+                        f"Timed out waiting for reply request_id={request_id} timeout_ms={timeout} "
+                        f"connected={self.is_connected}"
+                    )
                 chunk = self._read_available_with_timeout(stream, int(remaining * 1000))
                 if chunk:
                     recv_buffer += chunk
@@ -199,14 +173,13 @@ class PipeClient:
                     try:
                         obj = json.loads(line)
                     except json.JSONDecodeError:
+                        self.errors.put(f"Invalid JSON from adapter: {line[:200]}")
                         continue
-                    if isinstance(obj, dict) and str(obj.get("request_id", "")) == request_id:
+                    if not isinstance(obj, dict):
+                        continue
+                    if str(obj.get("request_id", "")) == request_id:
                         return obj
-        finally:
-            try:
-                stream.close()
-            except OSError:
-                pass
+                    self.incoming.put(obj)
 
     @staticmethod
     def _read_available_with_timeout(stream: Any, timeout_ms: int) -> bytes:
