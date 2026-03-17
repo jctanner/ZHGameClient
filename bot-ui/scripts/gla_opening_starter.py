@@ -124,6 +124,8 @@ DEFAULT_RAID_GROUP_SIZE = 20
 DEFAULT_RAID_EVERY_CYCLES = 4
 DEFAULT_RAID_DISTANCE = 3000.0
 DEFAULT_RAID_COOLDOWN_SEC = 20.0
+DEFAULT_GUARD_IDLE_EVERY_CYCLES = 3
+DEFAULT_GUARD_IDLE_COOLDOWN_SEC = 10.0
 WORKER_TRICKLE_PER_PRODUCER_PER_TICK = 1
 DEFAULT_WORKER_TOPUP_COOLDOWN_SEC = 8.0
 DEFAULT_WORKER_TOPUP_MIN_MONEY = 7000
@@ -347,7 +349,18 @@ def merge_compact_rows(
         if object_id is None:
             continue
         base = dict(by_id.get(object_id, {}))
-        for key in ("id", "object_id", "class", "x", "y", "z", "under_construction", "idle"):
+        for key in (
+            "id",
+            "object_id",
+            "class",
+            "x",
+            "y",
+            "z",
+            "under_construction",
+            "idle",
+            "template",
+            "template_name",
+        ):
             if key in compact:
                 base[key] = compact[key]
         if "template" not in base and "template_name" not in base:
@@ -1088,6 +1101,18 @@ def main() -> int:
         help="Cooldown between raid attack-move commands (default: 20).",
     )
     parser.add_argument(
+        "--guard-idle-every-cycles",
+        type=int,
+        default=DEFAULT_GUARD_IDLE_EVERY_CYCLES,
+        help="Issue a guard-current-position sweep for idle ground combat every N sustain cycles (default: 3).",
+    )
+    parser.add_argument(
+        "--guard-idle-cooldown-sec",
+        type=float,
+        default=DEFAULT_GUARD_IDLE_COOLDOWN_SEC,
+        help="Cooldown between idle-guard sweeps in sustain (default: 10).",
+    )
+    parser.add_argument(
         "--low-money-threshold",
         type=int,
         default=DEFAULT_LOW_MONEY_THRESHOLD,
@@ -1622,6 +1647,8 @@ def main() -> int:
             raid_group_size = max(1, int(args.raid_group_size))
             raid_distance = max(256.0, float(args.raid_distance))
             raid_key = "Game.AttackMove.RaidSmart"
+            guard_idle_every = max(1, int(args.guard_idle_every_cycles))
+            guard_idle_key = "Game.GuardAllIdleGroundCombat"
             low_money_threshold = max(0, int(args.low_money_threshold))
             low_money_skip_cycles = max(1, int(args.low_money_skip_cycles))
             if money < low_money_threshold:
@@ -1664,6 +1691,38 @@ def main() -> int:
                     raid_reason = f"cooldown_gate remaining_sec={remaining:.1f}"
                 print(f"[loop {cycle}] raid_skip {raid_reason}", flush=True)
 
+            guard_idle_cycle_gate = (cycle % guard_idle_every == 0)
+            guard_idle_cooldown_gate = not is_pending(pending_until_by_key, guard_idle_key, now)
+            if guard_idle_cycle_gate and guard_idle_cooldown_gate:
+                guard_idle_resp = try_send_session_command(
+                    client,
+                    guard_idle_key,
+                    {},
+                    args.timeout_ms,
+                )
+                if guard_idle_resp is not None:
+                    guard_idle_ok = bool(guard_idle_resp.get("ok", False))
+                    print(
+                        f"[loop {cycle}] guard_idle_ground ok={guard_idle_ok} "
+                        f"code={guard_idle_resp.get('code')} reason={guard_idle_resp.get('reason')}",
+                        flush=True,
+                    )
+                    if guard_idle_ok:
+                        mark_pending(
+                            pending_until_by_key,
+                            guard_idle_key,
+                            now,
+                            max(1.0, float(args.guard_idle_cooldown_sec)),
+                        )
+            else:
+                if not guard_idle_cycle_gate:
+                    guard_idle_reason = f"cycle_gate cycle={cycle} every={guard_idle_every}"
+                else:
+                    pending_until = pending_until_by_key.get(guard_idle_key, 0.0)
+                    remaining = max(0.0, pending_until - now)
+                    guard_idle_reason = f"cooldown_gate remaining_sec={remaining:.1f}"
+                print(f"[loop {cycle}] guard_idle_skip {guard_idle_reason}", flush=True)
+
             if in_low_money_hold:
                 print(
                     f"[loop {cycle}] sustain_hold low_money money={money} "
@@ -1676,9 +1735,12 @@ def main() -> int:
 
             black_markets = assets["black_markets"]
             palaces = assets["palaces"]
+            completed_palaces = count_complete_matching_templates(buildings, ("palace",))
             desired_markets_for_next_palace = max(4, (palaces + 1) * max(1, int(args.palace_market_ratio)))
 
             should_try_market = (
+                completed_palaces > 0
+                and
                 black_markets < desired_markets_for_next_palace
                 and (cycle % SUSTAIN_MARKET_ATTEMPT_EVERY == 0)
             )
@@ -1695,7 +1757,8 @@ def main() -> int:
                     )
                     print(
                         f"[loop {cycle}] phase=sustain econ=black_market "
-                        f"bm={black_markets} palaces={palaces} target_bm={desired_markets_for_next_palace} "
+                        f"bm={black_markets} palaces={palaces} completed_palaces={completed_palaces} "
+                        f"target_bm={desired_markets_for_next_palace} "
                         f"added={market_added} last_code={market_code} last_reason={market_reason}",
                         flush=True,
                     )
@@ -1706,6 +1769,12 @@ def main() -> int:
                             now,
                             float(args.pending_cooldown_sec),
                         )
+            elif (cycle % SUSTAIN_MARKET_ATTEMPT_EVERY == 0) and completed_palaces <= 0:
+                print(
+                    f"[loop {cycle}] phase=sustain econ=black_market skip=no_completed_palace "
+                    f"palaces={palaces} completed_palaces={completed_palaces}",
+                    flush=True,
+                )
 
             should_try_palace = (
                 money >= MIN_MONEY_FOR_PALACE_ATTEMPT

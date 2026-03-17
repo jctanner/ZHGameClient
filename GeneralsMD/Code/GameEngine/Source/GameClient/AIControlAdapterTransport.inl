@@ -14,21 +14,30 @@
 				return;
 			}
 
-			::CreateDirectoryA("D:\\logs", nullptr);
-			m_adapterLog = _fsopen("D:\\logs\\adapter.log", "a", _SH_DENYNO);
+			const std::size_t slash = m_adapterLogPath.find_last_of("\\/");
+			if (slash != std::string::npos)
+			{
+				const std::string dir = m_adapterLogPath.substr(0, slash);
+				if (!dir.empty())
+				{
+					::CreateDirectoryA(dir.c_str(), nullptr);
+				}
+			}
+			m_adapterLog = _fsopen(m_adapterLogPath.c_str(), "a", _SH_DENYNO);
 			if (m_adapterLog != nullptr)
 			{
 				SYSTEMTIME st;
 				::GetLocalTime(&st);
 				fprintf(
 					m_adapterLog,
-					"[%02u:%02u:%02u.%03u] adapter_log_opened pid=%lu session=%s\n",
+					"[%02u:%02u:%02u.%03u] adapter_log_opened pid=%lu session=%s path=%s\n",
 					static_cast<unsigned int>(st.wHour),
 					static_cast<unsigned int>(st.wMinute),
 					static_cast<unsigned int>(st.wSecond),
 					static_cast<unsigned int>(st.wMilliseconds),
 					static_cast<unsigned long>(::GetCurrentProcessId()),
-					m_sessionId.c_str());
+					m_sessionId.c_str(),
+					m_adapterLogPath.c_str());
 				fflush(m_adapterLog);
 			}
 		}
@@ -68,6 +77,46 @@
 			va_end(args);
 			fputc('\n', m_adapterLog);
 			fflush(m_adapterLog);
+		}
+
+		bool configureAdapterLogPath(const std::string& path, bool truncateExisting)
+		{
+			if (path.empty())
+			{
+				return false;
+			}
+
+			closeAdapterLog();
+			m_adapterLogPath = path;
+
+			const std::size_t slash = m_adapterLogPath.find_last_of("\\/");
+			if (slash != std::string::npos)
+			{
+				const std::string dir = m_adapterLogPath.substr(0, slash);
+				if (!dir.empty())
+				{
+					::CreateDirectoryA(dir.c_str(), nullptr);
+				}
+			}
+
+			if (truncateExisting)
+			{
+				FILE* truncateFile = _fsopen(m_adapterLogPath.c_str(), "w", _SH_DENYNO);
+				if (truncateFile == nullptr)
+				{
+					return false;
+				}
+				fclose(truncateFile);
+			}
+
+			ensureAdapterLogOpen();
+			return m_adapterLog != nullptr;
+		}
+
+		bool resetAdapterLogFile(bool truncateExisting)
+		{
+			const std::string currentPath = m_adapterLogPath;
+			return configureAdapterLogPath(currentPath, truncateExisting);
 		}
 
 		void ensurePipeCreated()

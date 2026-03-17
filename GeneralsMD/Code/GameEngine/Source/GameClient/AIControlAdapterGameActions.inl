@@ -3338,7 +3338,7 @@
 			}
 			if (buildingTemplateName.empty())
 			{
-				reason = "black_market_template_unknown";
+				reason = "black_market_prereq_missing";
 				return false;
 			}
 
@@ -3698,6 +3698,68 @@
 				ai->aiAttackMoveToPosition(&target, 0, CMD_FROM_AI);
 				++commanded;
 			}
+
+			if (commanded <= 0)
+			{
+				reason = "no_valid_objects";
+				return false;
+			}
+			return true;
+		}
+
+		bool executeGameGuardAllIdleGroundCombat(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheGameLogic == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			Int commanded = 0;
+			player->iterateObjects([](Object* obj, void* userData)
+			{
+				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+				{
+					return;
+				}
+				if (obj->isKindOf(KINDOF_STRUCTURE) || obj->isKindOf(KINDOF_DOZER) || obj->isKindOf(KINDOF_HARVESTER))
+				{
+					return;
+				}
+				if (!obj->isKindOf(KINDOF_INFANTRY) && !obj->isKindOf(KINDOF_VEHICLE))
+				{
+					return;
+				}
+				if (!obj->isAbleToAttack() || obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+				{
+					return;
+				}
+
+				AIUpdateInterface* ai = obj->getAI();
+				if (ai == nullptr)
+				{
+					return;
+				}
+				if (!ai->isIdle() || ai->isMoving())
+				{
+					return;
+				}
+
+				const Coord3D* pos = obj->getPosition();
+				if (pos == nullptr)
+				{
+					return;
+				}
+
+				ai->aiGuardPosition(pos, GUARDMODE_NORMAL, CMD_FROM_AI);
+				++(*static_cast<Int*>(userData));
+			}, &commanded);
 
 			if (commanded <= 0)
 			{
