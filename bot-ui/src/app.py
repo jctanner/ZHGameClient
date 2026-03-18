@@ -70,6 +70,8 @@ class BotUIApp:
         self.build_mix_market_var = tk.IntVar(value=0)
         self.camera_angle_deg_var = tk.DoubleVar(value=0.0)
         self.camera_zoom_var = tk.DoubleVar(value=1.0)
+        self.camera_height_var = tk.DoubleVar(value=0.0)
+        self.camera_zoom_limited_var = tk.BooleanVar(value=True)
 
         self._build_ui()
         self._start_request_worker()
@@ -366,13 +368,26 @@ class BotUIApp:
         ttk.Button(cmd_row, text="Camera Reset", command=self._camera_reset).grid(row=0, column=5, padx=2)
         ttk.Button(cmd_row, text="Look At Player", command=self._camera_look_at_player).grid(row=0, column=6, padx=2)
         ttk.Label(cmd_row, text="Angle Deg").grid(row=1, column=0, sticky="e", pady=(6, 0))
-        ttk.Entry(cmd_row, textvariable=self.camera_angle_deg_var, width=8).grid(row=1, column=1, sticky="w", pady=(6, 0))
+        tk.Spinbox(cmd_row, from_=-360.0, to=360.0, increment=5.0, textvariable=self.camera_angle_deg_var, width=8).grid(
+            row=1, column=1, sticky="w", pady=(6, 0)
+        )
         ttk.Button(cmd_row, text="Set Angle", command=self._camera_set_angle).grid(row=1, column=2, padx=2, pady=(6, 0))
         ttk.Label(cmd_row, text="Zoom").grid(row=1, column=3, sticky="e", pady=(6, 0))
         ttk.Entry(cmd_row, textvariable=self.camera_zoom_var, width=8).grid(row=1, column=4, sticky="w", pady=(6, 0))
         ttk.Button(cmd_row, text="Set Zoom", command=self._camera_set_zoom).grid(row=1, column=5, padx=2, pady=(6, 0))
-        ttk.Entry(cmd_row, textvariable=self.command_input_var).grid(row=2, column=0, columnspan=6, sticky="ew", padx=(0, 6), pady=(6, 0))
-        ttk.Button(cmd_row, text="Send", command=self._send_command_input).grid(row=2, column=6, pady=(6, 0))
+        ttk.Label(cmd_row, text="Height").grid(row=2, column=0, sticky="e", pady=(6, 0))
+        tk.Spinbox(cmd_row, from_=50.0, to=5000.0, increment=25.0, textvariable=self.camera_height_var, width=8).grid(
+            row=2, column=1, sticky="w", pady=(6, 0)
+        )
+        ttk.Button(cmd_row, text="Set Height", command=self._camera_set_height).grid(row=2, column=2, padx=2, pady=(6, 0))
+        ttk.Checkbutton(
+            cmd_row,
+            text="Zoom Limited",
+            variable=self.camera_zoom_limited_var,
+            command=self._camera_set_zoom_limited,
+        ).grid(row=2, column=3, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Entry(cmd_row, textvariable=self.command_input_var).grid(row=3, column=0, columnspan=6, sticky="ew", padx=(0, 6), pady=(6, 0))
+        ttk.Button(cmd_row, text="Send", command=self._send_command_input).grid(row=3, column=6, pady=(6, 0))
 
         logs = ttk.LabelFrame(bottom, text="Logs", padding=4)
         logs.grid(row=2, column=0, sticky="nsew", pady=(6, 0))
@@ -594,6 +609,24 @@ class BotUIApp:
             return
         self._send_session_command("Game.Camera.Set", {"zoom": zoom}, quiet=False)
 
+    def _camera_set_height(self) -> None:
+        try:
+            height = float(self.camera_height_var.get())
+        except Exception:  # noqa: BLE001
+            self._log("Invalid camera height.")
+            return
+        if height <= 0.0:
+            self._log("Camera height must be > 0.")
+            return
+        self._send_session_command("Game.Camera.Set", {"height": height}, quiet=False)
+
+    def _camera_set_zoom_limited(self) -> None:
+        self._send_session_command(
+            "Game.Camera.SetZoomLimited",
+            {"enabled": bool(self.camera_zoom_limited_var.get())},
+            quiet=False,
+        )
+
     def _camera_look_at_player(self) -> None:
         try:
             target = int(self.target_player_index_var.get())
@@ -813,11 +846,17 @@ class BotUIApp:
             zoom = payload.get("zoom")
             pitch = payload.get("pitch")
             angle = payload.get("angle")
+            height = payload.get("height_above_ground")
+            zoom_limited = payload.get("zoom_limited")
             if isinstance(angle, (int, float)):
                 self.camera_angle_deg_var.set(float(angle) * (180.0 / 3.141592653589793))
             if isinstance(zoom, (int, float)):
                 self.camera_zoom_var.set(float(zoom))
-            self._log(f"{cmd} x={x} y={y} zoom={zoom} pitch={pitch}")
+            if isinstance(height, (int, float)):
+                self.camera_height_var.set(float(height))
+            if isinstance(zoom_limited, bool):
+                self.camera_zoom_limited_var.set(zoom_limited)
+            self._log(f"{cmd} x={x} y={y} zoom={zoom} pitch={pitch} height={height} zoom_limited={zoom_limited}")
         elif isinstance(payload, dict):
             keys = ", ".join(sorted(payload.keys())[:8])
             self._log(f"{cmd} keys={keys}")
