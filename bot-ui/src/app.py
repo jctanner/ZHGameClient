@@ -54,7 +54,9 @@ class BotUIApp:
         self.poll_interval_ms = tk.IntVar(value=1000)
         self.stream_enabled = tk.BooleanVar(value=False)
         self.debug_inbound = tk.BooleanVar(value=True)
-        self.queue_count_var = tk.IntVar(value=1)
+        self.build_count_var = tk.IntVar(value=1)
+        self.unit_queue_count_var = tk.IntVar(value=1)
+        self.raid_count_var = tk.IntVar(value=1)
         self.target_player_index_var = tk.IntVar(value=0)
         self.chat_text_var = tk.StringVar(value="")
         self.chat_scope_var = tk.StringVar(value="everyone")
@@ -68,6 +70,8 @@ class BotUIApp:
         self.build_mix_arms_var = tk.IntVar(value=0)
         self.build_mix_palace_var = tk.IntVar(value=0)
         self.build_mix_market_var = tk.IntVar(value=0)
+        self.build_mix_tunnel_var = tk.IntVar(value=0)
+        self.build_mix_stinger_var = tk.IntVar(value=0)
         self.camera_angle_deg_var = tk.DoubleVar(value=0.0)
         self.camera_zoom_var = tk.DoubleVar(value=1.0)
         self.camera_height_var = tk.DoubleVar(value=0.0)
@@ -239,7 +243,7 @@ class BotUIApp:
         for i in range(4):
             buildings.grid_columnconfigure(i, weight=1)
         ttk.Label(buildings, text="Build Count (1-9)").grid(row=0, column=0, sticky="e")
-        tk.Spinbox(buildings, from_=1, to=9, textvariable=self.queue_count_var, width=5).grid(row=0, column=1, sticky="w")
+        tk.Spinbox(buildings, from_=1, to=9, textvariable=self.build_count_var, width=5).grid(row=0, column=1, sticky="w")
         ttk.Button(buildings, text="Build Stash", command=self._build_stash).grid(
             row=0, column=2, sticky="ew", padx=2, pady=2
         )
@@ -261,9 +265,15 @@ class BotUIApp:
         ttk.Button(buildings, text="Dozer Construct", command=self._dozer_construct_supply).grid(
             row=2, column=0, sticky="ew", padx=2, pady=2
         )
+        ttk.Button(buildings, text="Build Tunnel", command=self._build_tunnel_network).grid(
+            row=2, column=1, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(buildings, text="Build Stinger", command=self._build_stinger_site).grid(
+            row=2, column=2, sticky="ew", padx=2, pady=2
+        )
         mix = ttk.LabelFrame(buildings, text="Build Mix", padding=6)
         mix.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-        for i in range(6):
+        for i in range(8):
             mix.grid_columnconfigure(i, weight=1)
         self._build_mix_spinbox(mix, 0, "Stash", self.build_mix_stash_var)
         self._build_mix_spinbox(mix, 1, "Barracks", self.build_mix_barracks_var)
@@ -271,8 +281,10 @@ class BotUIApp:
         self._build_mix_spinbox(mix, 3, "Arms", self.build_mix_arms_var)
         self._build_mix_spinbox(mix, 4, "Palace", self.build_mix_palace_var)
         self._build_mix_spinbox(mix, 5, "Markets", self.build_mix_market_var)
+        self._build_mix_spinbox(mix, 6, "Tunnels", self.build_mix_tunnel_var)
+        self._build_mix_spinbox(mix, 7, "Stingers", self.build_mix_stinger_var)
         ttk.Button(mix, text="Send Build Mix", command=self._build_mix).grid(
-            row=2, column=0, columnspan=6, sticky="ew", padx=2, pady=(6, 0)
+            row=2, column=0, columnspan=8, sticky="ew", padx=2, pady=(6, 0)
         )
 
         units = ttk.LabelFrame(controls, text="Units", padding=6)
@@ -280,7 +292,7 @@ class BotUIApp:
         for i in range(4):
             units.grid_columnconfigure(i, weight=1)
         ttk.Label(units, text="Queue Count (1-9)").grid(row=0, column=0, sticky="e")
-        tk.Spinbox(units, from_=1, to=9, textvariable=self.queue_count_var, width=5).grid(row=0, column=1, sticky="w")
+        tk.Spinbox(units, from_=1, to=9, textvariable=self.unit_queue_count_var, width=5).grid(row=0, column=1, sticky="w")
         ttk.Button(units, text="Build Worker (CC)", command=self._build_worker_command_center).grid(
             row=0, column=2, sticky="ew", padx=2, pady=2
         )
@@ -312,31 +324,33 @@ class BotUIApp:
         ttk.Button(actions, text="AttackMove -> Player", command=self._attackmove_all_combat_to_player).grid(
             row=0, column=2, sticky="ew", padx=2, pady=2
         )
+        ttk.Label(actions, text="Raid Units").grid(row=1, column=0, sticky="e")
+        tk.Spinbox(actions, from_=1, to=99, textvariable=self.raid_count_var, width=5).grid(row=1, column=1, sticky="w")
         ttk.Button(actions, text="Raid Smart", command=self._raid_smart).grid(
-            row=0, column=3, sticky="ew", padx=2, pady=2
+            row=0, column=3, rowspan=2, sticky="nsew", padx=2, pady=2
         )
         ttk.Button(actions, text="Guard Idle", command=self._guard_idle_ground_combat).grid(
-            row=1, column=0, sticky="ew", padx=2, pady=2
+            row=2, column=0, sticky="ew", padx=2, pady=2
         )
         ttk.Button(actions, text="Query Objects", command=lambda: self._query("game.objects_all", quiet=False)).grid(
-            row=1, column=1, sticky="ew", padx=2, pady=2
+            row=2, column=1, sticky="ew", padx=2, pady=2
         )
         ttk.Button(actions, text="Query Enemies", command=lambda: self._query("game.visible_enemies", quiet=False)).grid(
-            row=1, column=2, sticky="ew", padx=2, pady=2
+            row=2, column=2, sticky="ew", padx=2, pady=2
         )
-        ttk.Checkbutton(actions, text="Polling", variable=self.poll_enabled).grid(row=2, column=0, sticky="w")
-        ttk.Label(actions, text="Interval ms").grid(row=2, column=1, sticky="e")
-        ttk.Entry(actions, textvariable=self.poll_interval_ms, width=8).grid(row=2, column=2, sticky="w")
+        ttk.Checkbutton(actions, text="Polling", variable=self.poll_enabled).grid(row=3, column=0, sticky="w")
+        ttk.Label(actions, text="Interval ms").grid(row=3, column=1, sticky="e")
+        ttk.Entry(actions, textvariable=self.poll_interval_ms, width=8).grid(row=3, column=2, sticky="w")
         ttk.Checkbutton(actions, text="Use Streaming", variable=self.stream_enabled, command=self._toggle_streaming).grid(
-            row=2, column=3, sticky="w"
+            row=3, column=3, sticky="w"
         )
         ttk.Checkbutton(
             actions,
             text="Map Updates",
             variable=self.map_updates_enabled,
             command=self._on_map_updates_toggle,
-        ).grid(row=3, column=0, sticky="w")
-        ttk.Checkbutton(actions, text="Debug Inbound", variable=self.debug_inbound).grid(row=3, column=1, sticky="w")
+        ).grid(row=4, column=0, sticky="w")
+        ttk.Checkbutton(actions, text="Debug Inbound", variable=self.debug_inbound).grid(row=4, column=1, sticky="w")
 
         cmd_row = ttk.LabelFrame(bottom, text="Command Input", padding=8)
         cmd_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -461,54 +475,75 @@ class BotUIApp:
         for control_id in SOLO_BACK_CONTROL_IDS:
             self._menu_click(control_id)
 
-    def _get_queue_count(self) -> int:
+    def _clamp_count_var(self, variable: tk.Variable, minimum: int = 1, maximum: int = 9) -> int:
         try:
-            count = int(self.queue_count_var.get())
+            count = int(variable.get())
         except Exception:  # noqa: BLE001
-            count = 1
-        return max(1, min(9, count))
+            count = minimum
+        return max(minimum, min(maximum, count))
+
+    def _get_build_count(self) -> int:
+        return self._clamp_count_var(self.build_count_var)
+
+    def _get_unit_queue_count(self) -> int:
+        return self._clamp_count_var(self.unit_queue_count_var)
+
+    def _get_raid_count(self) -> int:
+        return self._clamp_count_var(self.raid_count_var, minimum=1, maximum=99)
 
     def _queue_soldiers_all_barracks(self) -> None:
-        count = self._get_queue_count()
+        count = self._get_unit_queue_count()
         self._send_session_command("Game.QueueSoldiersAllBarracks", {"count": count})
 
     def _queue_quads_all_war_factories(self) -> None:
-        count = self._get_queue_count()
+        count = self._get_unit_queue_count()
         self._send_session_command("Game.QueueQuadsAllWarFactories", {"count": count})
 
     def _queue_rpg_troopers_all_barracks(self) -> None:
-        count = self._get_queue_count()
+        count = self._get_unit_queue_count()
         self._send_session_command("Game.QueueRpgTroopersAllBarracks", {"count": count})
 
     def _queue_scorpions_all_war_factories(self) -> None:
-        count = self._get_queue_count()
+        count = self._get_unit_queue_count()
         self._send_session_command("Game.QueueScorpionsAllWarFactories", {"count": count})
 
     def _build_worker_command_center(self) -> None:
-        count = self._get_queue_count()
+        count = self._get_unit_queue_count()
         self._send_session_command("Game.BuildWorker", {"producer_kind": "command_center", "count": count})
 
     def _build_worker_supply_stash(self) -> None:
-        count = self._get_queue_count()
+        count = self._get_unit_queue_count()
         self._send_session_command("Game.BuildWorker", {"producer_kind": "supply_stash", "count": count})
 
     def _build_stash(self) -> None:
-        self._send_session_command("Game.BuildSupplyStashSmart", {"count": self._get_queue_count()})
+        self._send_session_command("Game.BuildSupplyStashSmart", {"count": self._get_build_count()})
 
     def _build_barracks(self) -> None:
-        self._send_session_command("Game.BuildBarracksSmart", {"count": self._get_queue_count()})
+        self._send_session_command("Game.BuildBarracksSmart", {"count": self._get_build_count()})
 
     def _build_command_center(self) -> None:
-        self._send_session_command("Game.BuildCommandCenterSmart", {"count": self._get_queue_count()})
+        self._send_session_command("Game.BuildCommandCenterSmart", {"count": self._get_build_count()})
 
     def _build_arms_dealer(self) -> None:
-        self._send_session_command("Game.BuildArmsDealerSmart", {"count": self._get_queue_count()})
+        self._send_session_command("Game.BuildArmsDealerSmart", {"count": self._get_build_count()})
 
     def _build_palace(self) -> None:
-        self._send_session_command("Game.BuildPalaceSmart", {"count": self._get_queue_count()})
+        self._send_session_command("Game.BuildPalaceSmart", {"count": self._get_build_count()})
 
     def _build_black_market(self) -> None:
-        self._send_session_command("Game.BuildBlackMarketSmart", {"count": self._get_queue_count()})
+        self._send_session_command("Game.BuildBlackMarketSmart", {"count": self._get_build_count()})
+
+    def _build_tunnel_network(self) -> None:
+        self._send_session_command(
+            "Game.BuildBarracksSmart",
+            {"count": self._get_build_count(), "building_template": "GLATunnelNetwork"},
+        )
+
+    def _build_stinger_site(self) -> None:
+        self._send_session_command(
+            "Game.BuildBarracksSmart",
+            {"count": self._get_build_count(), "building_template": "GLAStingerSite"},
+        )
 
     def _attackmove_all_combat_to_player(self) -> None:
         try:
@@ -528,7 +563,7 @@ class BotUIApp:
         self._send_session_command("Game.DozerConstruct", {}, quiet=False)
 
     def _raid_smart(self) -> None:
-        count = self._get_queue_count()
+        count = self._get_raid_count()
         self._send_session_command("Game.AttackMove.RaidSmart", {"min_units": max(1, count), "group_size": max(1, count)})
 
     def _guard_idle_ground_combat(self) -> None:
@@ -550,12 +585,25 @@ class BotUIApp:
             if count > 0:
                 buildings.append({"kind": kind, "count": count})
 
+        def add_explicit(item: dict[str, Any], value: tk.IntVar) -> None:
+            try:
+                count = int(value.get())
+            except Exception:  # noqa: BLE001
+                count = 0
+            count = max(0, min(9, count))
+            if count > 0:
+                payload = dict(item)
+                payload["count"] = count
+                buildings.append(payload)
+
         add("supply_stash", self.build_mix_stash_var)
         add("barracks", self.build_mix_barracks_var)
         add("command_center", self.build_mix_command_var)
         add("arms_dealer", self.build_mix_arms_var)
         add("palace", self.build_mix_palace_var)
         add("black_market", self.build_mix_market_var)
+        add_explicit({"cmd": "Game.BuildBarracksSmart", "building_template": "GLATunnelNetwork"}, self.build_mix_tunnel_var)
+        add_explicit({"cmd": "Game.BuildBarracksSmart", "building_template": "GLAStingerSite"}, self.build_mix_stinger_var)
 
         if not buildings:
             self._log("Build mix is empty.")
