@@ -32,6 +32,7 @@ class MapRenderer:
         owned = list(store.owned_objects.values())
         enemies = list(store.visible_enemies.values())
         points = list(store.interesting_points)
+        supply_sources = list(store.supply_sources)
         player_positions = [(meta.player_index, meta.map_position) for meta in store.players.values() if meta.map_position is not None]
         active_map: dict[tuple[int | None, int], WorldObject] = {}
         for obj in all_objects:
@@ -41,13 +42,14 @@ class MapRenderer:
         for obj in enemies:
             active_map[(obj.owner_player_index, obj.object_id)] = obj
         active_objects = list(active_map.values())
-        bounds = self._resolve_bounds(store, active_objects, [], points, player_positions)
+        bounds = self._resolve_bounds(store, active_objects, [], points + supply_sources, player_positions)
         self._draw_map_bounds(width, height, bounds, store.map_width, store.map_height)
         self._draw_objects(active_objects, width, height, bounds, store, friendly=True)
+        self._draw_supply_sources(supply_sources, width, height, bounds)
         self._draw_interesting_points(points, width, height, bounds)
         self._draw_player_positions(player_positions, width, height, bounds, store)
         self._draw_counts(active_objects, width)
-        if not active_objects and not points and not player_positions:
+        if not active_objects and not points and not supply_sources and not player_positions:
             self.canvas.create_text(
                 width * 0.5,
                 height * 0.5,
@@ -165,6 +167,17 @@ class MapRenderer:
         for x, y in points:
             cx, cy = self._world_to_canvas(x, y, canvas_w, canvas_h, bounds)
             self.canvas.create_oval(cx - 7, cy - 7, cx + 7, cy + 7, outline="#ffe57a", width=2)
+
+    def _draw_supply_sources(
+        self,
+        points: Iterable[tuple[float, float]],
+        canvas_w: int,
+        canvas_h: int,
+        bounds: tuple[float, float, float, float],
+    ) -> None:
+        for x, y in points:
+            cx, cy = self._world_to_canvas(x, y, canvas_w, canvas_h, bounds)
+            self.canvas.create_oval(cx - 10, cy - 10, cx + 10, cy + 10, outline="#f4f7fb", width=2)
 
     def _draw_player_positions(
         self,

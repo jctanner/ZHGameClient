@@ -47,6 +47,15 @@
 
 namespace
 {
+	struct PendingBuildLocationReservation
+	{
+		Int playerIndex;
+		std::string templateName;
+		Coord3D location;
+		Real radiusSq;
+		DWORD untilTick;
+	};
+
 	class AIControlAdapterState
 	{
 	public:
@@ -79,6 +88,7 @@ namespace
 		{
 			m_lineBuffer.clear();
 			m_lastAutoSupplySourceByPlayer.clear();
+			m_reservedBuildLocations.clear();
 			m_ownedCacheValid = false;
 			m_ownedCachePlayerIndex = -1;
 			m_ownedCacheUnitsTotal = 0;
@@ -119,6 +129,7 @@ namespace
 		std::unordered_map<Int, Int> m_lastAutoSupplySourceByPlayer;
 		std::unordered_map<Int, ObjectID> m_lastSelectedWorkerByPlayer;
 		std::unordered_map<ObjectID, DWORD> m_reservedWorkersUntilTick;
+		std::vector<PendingBuildLocationReservation> m_reservedBuildLocations;
 		bool m_ownedCacheValid;
 		Int m_ownedCachePlayerIndex;
 		Int m_ownedCacheUnitsTotal;

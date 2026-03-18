@@ -217,6 +217,7 @@ class BotUIApp:
         toolbar = ttk.Frame(map_frame)
         toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
         ttk.Button(toolbar, text="Rotate/Flip Map", command=self._cycle_map_orientation).grid(row=0, column=0, sticky="w")
+        ttk.Button(toolbar, text="Find Supplies", command=self._find_supply_sources).grid(row=0, column=1, sticky="w", padx=(6, 0))
         canvas = tk.Canvas(map_frame, bg="#0c1318", highlightthickness=0)
         canvas.grid(row=1, column=0, sticky="nsew")
         self.map_renderer = MapRenderer(canvas)
@@ -257,11 +258,8 @@ class BotUIApp:
         ttk.Button(buildings, text="Build Black Market", command=self._build_black_market).grid(
             row=1, column=3, sticky="ew", padx=2, pady=2
         )
-        ttk.Button(buildings, text="Find Supplies", command=self._find_supply_sources).grid(
-            row=2, column=0, sticky="ew", padx=2, pady=2
-        )
         ttk.Button(buildings, text="Dozer Construct", command=self._dozer_construct_supply).grid(
-            row=2, column=1, sticky="ew", padx=2, pady=2
+            row=2, column=0, sticky="ew", padx=2, pady=2
         )
         mix = ttk.LabelFrame(buildings, text="Build Mix", padding=6)
         mix.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(6, 0))
@@ -839,6 +837,9 @@ class BotUIApp:
             self._log(f"{cmd} count={count}")
         elif cmd == "Game.FindSupplySources" and isinstance(payload, dict):
             count = payload.get("count")
+            self.store.update_supply_sources(payload)
+            self._dirty_view = True
+            self.redraw_map()
             self._log(f"{cmd} count={count}")
         elif cmd == "Game.Camera.Get" and isinstance(payload, dict):
             x = payload.get("x")
