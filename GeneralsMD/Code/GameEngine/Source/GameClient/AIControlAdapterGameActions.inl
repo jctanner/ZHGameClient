@@ -1785,6 +1785,90 @@
 			return value;
 		}
 
+		template <typename TInferTemplate>
+		bool queueAcrossProducersTotalCount(
+			const nlohmann::json& message,
+			const std::vector<Object*>& producers,
+			Int requestedCount,
+			const char* missingTemplateReason,
+			std::string& reason,
+			TInferTemplate&& inferTemplate)
+		{
+			if (producers.empty())
+			{
+				reason = "producer_not_found";
+				return false;
+			}
+
+			Int remaining = std::max<Int>(1, requestedCount);
+			Int queued = 0;
+			std::string lastReason = "queue_failed";
+			std::vector<bool> exhausted(producers.size(), false);
+
+			while (remaining > 0)
+			{
+				bool madeProgress = false;
+				bool anyCandidate = false;
+				for (std::size_t idx = 0; idx < producers.size() && remaining > 0; ++idx)
+				{
+					if (exhausted[idx])
+					{
+						continue;
+					}
+
+					Object* producer = producers[idx];
+					if (producer == nullptr)
+					{
+						exhausted[idx] = true;
+						continue;
+					}
+
+					const std::string unitTemplateName = inferTemplate(producer);
+					if (unitTemplateName.empty())
+					{
+						lastReason = missingTemplateReason;
+						exhausted[idx] = true;
+						continue;
+					}
+
+					anyCandidate = true;
+					std::string queueReason;
+					if (queueTemplateAtProducer(message, producer, unitTemplateName, queueReason))
+					{
+						++queued;
+						--remaining;
+						madeProgress = true;
+						continue;
+					}
+
+					if (!queueReason.empty())
+					{
+						lastReason = queueReason;
+					}
+					if (queueReason == "queue_full" || queueReason == "no_money")
+					{
+						exhausted[idx] = true;
+					}
+				}
+
+				if (!madeProgress)
+				{
+					if (!anyCandidate && lastReason == "queue_failed")
+					{
+						lastReason = missingTemplateReason;
+					}
+					break;
+				}
+			}
+
+			if (queued <= 0)
+			{
+				reason = lastReason;
+				return false;
+			}
+			return true;
+		}
+
 		bool executeGameQueueUnit(const nlohmann::json& message, std::string& reason)
 		{
 			if (TheThingFactory == nullptr)
@@ -2241,6 +2325,9 @@
 			queueArgs["producer_kind"] = "any";
 			queueArgs["producer_object_id"] = static_cast<Int>(producer->getID());
 			queueArgs["unit_template"] = unitTemplateName;
+			// Callers that fan out across multiple producers already loop per requested item.
+			// Force a single queue action here so count is not applied twice.
+			queueArgs["count"] = 1;
 			queuedMessage["args"] = queueArgs;
 
 			return executeGameQueueUnit(queuedMessage, reason);
@@ -4438,10 +4525,6 @@
 
 			TheTacticalView->setAngleAndPitchToDefault();
 			TheTacticalView->setZoomToDefault();
-			if (TheGlobalData != nullptr)
-			{
-				TheTacticalView->setHeightAboveGround(TheGlobalData->m_cameraHeight);
-			}
 			return true;
 		}
 
