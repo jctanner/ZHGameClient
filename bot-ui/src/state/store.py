@@ -130,6 +130,7 @@ class UIStore:
     visible_enemies: dict[int, WorldObject] = field(default_factory=dict)
     all_objects: dict[int, WorldObject] = field(default_factory=dict)
     interesting_points: list[tuple[float, float]] = field(default_factory=list)
+    supply_sources: list[tuple[float, float]] = field(default_factory=list)
     players: dict[int, PlayerMeta] = field(default_factory=dict)
     session_state: dict[str, Any] = field(default_factory=dict)
     map_width: float = 1024.0
@@ -379,6 +380,19 @@ class UIStore:
             self.map_width = float(width)
         if isinstance(height, (int, float)) and height > 0:
             self.map_height = float(height)
+
+    def update_supply_sources(self, payload: Any) -> None:
+        rows = self._extract_list(payload, "sources")
+        if rows is None:
+            rows = payload if isinstance(payload, list) else []
+
+        updated: list[tuple[float, float]] = []
+        for raw in rows:
+            if not isinstance(raw, dict):
+                continue
+            x, y = _extract_xy(raw)
+            updated.append((x, y))
+        self.supply_sources = updated
 
     def _recompute_player_aggregates(self) -> None:
         source_objects = self.all_objects if self.all_objects else self.owned_objects

@@ -362,6 +362,74 @@
 			return dx * dx + dy * dy;
 		}
 
+		void pruneExpiredBuildLocationReservations()
+		{
+			if (m_reservedBuildLocations.empty())
+			{
+				return;
+			}
+
+			const DWORD now = ::GetTickCount();
+			for (auto it = m_reservedBuildLocations.begin(); it != m_reservedBuildLocations.end(); )
+			{
+				if (static_cast<LONG>(it->untilTick - now) <= 0)
+				{
+					it = m_reservedBuildLocations.erase(it);
+				}
+				else
+				{
+					++it;
+				}
+			}
+		}
+
+		bool isBuildLocationTemporarilyReserved(Player* player, const Coord3D* candidate, const ThingTemplate* buildingTemplate)
+		{
+			if (player == nullptr || candidate == nullptr || buildingTemplate == nullptr)
+			{
+				return false;
+			}
+
+			pruneExpiredBuildLocationReservations();
+			const Int playerIndex = player->getPlayerIndex();
+			const std::string templateName = buildingTemplate->getName().str();
+			const Real candidateRadius = std::max<Real>(48.0f, buildingTemplate->getTemplateGeometryInfo().getBoundingCircleRadius() + 18.0f);
+			for (const PendingBuildLocationReservation& reserved : m_reservedBuildLocations)
+			{
+				if (reserved.playerIndex != playerIndex)
+				{
+					continue;
+				}
+
+				const Real dx = reserved.location.x - candidate->x;
+				const Real dy = reserved.location.y - candidate->y;
+				const Real combinedRadius = std::sqrt(std::max<Real>(0.0f, reserved.radiusSq)) + candidateRadius;
+				if ((dx * dx) + (dy * dy) < (combinedRadius * combinedRadius))
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+
+		void reserveBuildLocation(Player* player, const Coord3D& location, const ThingTemplate* buildingTemplate, DWORD durationMs = 15000u)
+		{
+			if (player == nullptr || buildingTemplate == nullptr)
+			{
+				return;
+			}
+
+			pruneExpiredBuildLocationReservations();
+			const Real radius = std::max<Real>(48.0f, buildingTemplate->getTemplateGeometryInfo().getBoundingCircleRadius() + 18.0f);
+			m_reservedBuildLocations.push_back(PendingBuildLocationReservation{
+				player->getPlayerIndex(),
+				buildingTemplate->getName().str(),
+				location,
+				radius * radius,
+				::GetTickCount() + durationMs
+			});
+		}
+
 		static bool isSupplyDropoffTemplateName(const std::string& templateName)
 		{
 			if (!containsIgnoreCase(templateName, "supply"))
@@ -649,6 +717,10 @@
 					candidate.z = 0.0f;
 
 					if (TheBuildAssistant->isLocationLegalToBuild(&candidate, buildingTemplate, placeAngle, legalOpts, worker, nullptr) != LBC_OK)
+					{
+						continue;
+					}
+					if (isBuildLocationTemporarilyReserved(player, &candidate, buildingTemplate))
 					{
 						continue;
 					}
@@ -1457,6 +1529,10 @@
 					{
 						continue;
 					}
+					if (isBuildLocationTemporarilyReserved(player, &candidate, buildingTemplate))
+					{
+						continue;
+					}
 					if (spacingBarracks && hasNearbyOwnedBarracks(player, &candidate, barracksSpacingRadius))
 					{
 						continue;
@@ -1545,6 +1621,10 @@
 						candidate.z = 0.0f;
 
 						if (TheBuildAssistant->isLocationLegalToBuild(&candidate, buildingTemplate, placeAngle, legalOpts, worker, nullptr) != LBC_OK)
+						{
+							continue;
+						}
+						if (isBuildLocationTemporarilyReserved(player, &candidate, buildingTemplate))
 						{
 							continue;
 						}
@@ -1661,6 +1741,7 @@
 			// This avoids repeatedly interrupting the same builder if AI idle/busy flags
 			// lag for a few frames or temporarily report idle.
 			reserveWorkerForBuild(worker, 45000u);
+			reserveBuildLocation(player, location, buildingTemplate);
 			return true;
 		}
 
