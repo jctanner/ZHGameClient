@@ -875,6 +875,12 @@ class BotUIApp:
             self._connecting = False
             self.connection_state_var.set("Connected" if ok else "Hello failed")
             self._log(f"HelloAck ok={ok} session_id={msg.get('session_id', '?')}")
+            if ok:
+                # Prime the player table and top-level metadata immediately instead of
+                # waiting for the background poll rotation to reach these paths.
+                self._query("game.players", quiet=True)
+                self._query("game.resources", quiet=True)
+                self._query("game.status", quiet=True)
             return
         if msg_type == "SessionState":
             state = msg.get("state")
@@ -1167,6 +1173,8 @@ class BotUIApp:
     def _next_poll_path(self) -> str:
         if not self._poll_paths:
             return ""
+        if not self.store.players:
+            return "game.players"
         map_paths = {"game.objects_map", "game.objects_all_map"}
         for _ in range(len(self._poll_paths)):
             path = self._poll_paths[self._poll_path_index % len(self._poll_paths)]
