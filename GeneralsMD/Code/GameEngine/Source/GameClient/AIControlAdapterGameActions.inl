@@ -1236,6 +1236,70 @@
 			return std::string();
 		}
 
+		std::string inferScudStormTemplateForPlayer(const Player* player, Object* worker = nullptr) const
+		{
+			if (player == nullptr || TheThingFactory == nullptr)
+			{
+				return std::string();
+			}
+
+			auto canBuildTemplate = [&](const std::string& templateName) -> bool
+			{
+				if (templateName.empty())
+				{
+					return false;
+				}
+				if (worker == nullptr || TheBuildAssistant == nullptr)
+				{
+					return true;
+				}
+				const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(templateName.c_str()), false);
+				if (tt == nullptr)
+				{
+					return false;
+				}
+				return TheBuildAssistant->isPossibleToMakeUnit(worker, tt) == TRUE;
+			};
+
+			const std::string side = player->getSide().str();
+			const std::string baseSide = player->getBaseSide().str();
+			if (containsIgnoreCase(side, "gla") || containsIgnoreCase(baseSide, "gla"))
+			{
+				const char* glaCandidates[] = {
+					"GLAScudStorm",
+					"Boss_GLAScudStorm",
+					"Chem_GLAScudStorm",
+					"Demo_GLAScudStorm",
+					"Slth_GLAScudStorm"
+				};
+				for (const char* candidate : glaCandidates)
+				{
+					if (canBuildTemplate(candidate))
+					{
+						return candidate;
+					}
+				}
+			}
+
+			if (worker != nullptr && TheBuildAssistant != nullptr)
+			{
+				for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
+				{
+					const std::string name = tt->getName().str();
+					if (!containsIgnoreCase(name, "scud") || !containsIgnoreCase(name, "storm"))
+					{
+						continue;
+					}
+					if (TheBuildAssistant->isPossibleToMakeUnit(worker, tt) != TRUE)
+					{
+						continue;
+					}
+					return name;
+				}
+			}
+			return std::string();
+		}
+
 		struct CommandCenterSearchContext
 		{
 			Object* firstCommandCenter;
@@ -4023,6 +4087,103 @@
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
 		}
 
+		bool executeGameBuildScudStormSmartSingle(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheThingFactory == nullptr || TheGameLogic == nullptr || TheBuildAssistant == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			Object* worker = resolveWorkerFromArgs(player, message, true, reason);
+			if (worker == nullptr)
+			{
+				return false;
+			}
+
+			std::string buildingTemplateName;
+			Int requestedAnchorId = -1;
+			ZonePlacementArgs zoneArgs = {};
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				zoneArgs = parseZonePlacementArgs(&(*argsIt));
+				buildingTemplateName = getJsonString(*argsIt, "building_template");
+				const auto anchorIdIt = argsIt->find("anchor_object_id");
+				if (anchorIdIt != argsIt->end() && anchorIdIt->is_number_integer())
+				{
+					requestedAnchorId = anchorIdIt->get<Int>();
+				}
+			}
+			if (buildingTemplateName.empty())
+			{
+				buildingTemplateName = inferScudStormTemplateForPlayer(player, worker);
+			}
+			if (buildingTemplateName.empty())
+			{
+				reason = "scud_storm_prereq_missing";
+				return false;
+			}
+
+			const ThingTemplate* buildingTemplate = TheThingFactory->findTemplate(AsciiString(buildingTemplateName.c_str()), false);
+			if (buildingTemplate == nullptr)
+			{
+				reason = "building_template_not_found";
+				return false;
+			}
+
+			Object* anchor = nullptr;
+			if (requestedAnchorId > 0)
+			{
+				anchor = TheGameLogic->findObjectByID(static_cast<ObjectID>(requestedAnchorId));
+				if (anchor == nullptr)
+				{
+					reason = "anchor_not_found";
+					return false;
+				}
+				if (anchor->getControllingPlayer() != player)
+				{
+					reason = "anchor_not_owned";
+					return false;
+				}
+			}
+			if (anchor == nullptr)
+			{
+				anchor = findPrimaryCommandCenter(player);
+			}
+
+			Coord3D location;
+			Real angle = 0.0f;
+			bool foundLocation = false;
+			if (zoneArgs.hasZoneCenter)
+			{
+				foundLocation = findBuildLocationInZone(player, worker, buildingTemplate, zoneArgs.zoneCenter, zoneArgs.zoneRadius, location, angle);
+				if (!foundLocation && zoneArgs.strictZone)
+				{
+					return moveWorkerToPosition(worker, &zoneArgs.zoneCenter, reason);
+				}
+			}
+			if (!foundLocation)
+			{
+				foundLocation = findBuildLocationAroundAnchor(player, worker, anchor, buildingTemplate, location, angle);
+			}
+			if (!foundLocation)
+			{
+				const Coord3D* moveTarget = zoneArgs.hasZoneCenter
+					? &zoneArgs.zoneCenter
+					: (anchor != nullptr ? anchor->getPosition() : worker->getPosition());
+				return moveWorkerToPosition(worker, moveTarget, reason);
+			}
+
+			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
+		}
+
 		bool executeGameBuildSupplyStashSmart(const nlohmann::json& message, std::string& reason)
 		{
 			return executeRepeatedBuildAttempts(message, reason, [&](const nlohmann::json& singleMessage, std::string& singleReason) -> bool
@@ -4071,6 +4232,14 @@
 			});
 		}
 
+		bool executeGameBuildScudStormSmart(const nlohmann::json& message, std::string& reason)
+		{
+			return executeRepeatedBuildAttempts(message, reason, [&](const nlohmann::json& singleMessage, std::string& singleReason) -> bool
+			{
+				return executeGameBuildScudStormSmartSingle(singleMessage, singleReason);
+			});
+		}
+
 		bool executeGameBuildBuildingMix(const nlohmann::json& message, std::string& reason)
 		{
 			const auto argsIt = message.find("args");
@@ -4115,6 +4284,10 @@
 				if (buildCmd == "Game.BuildBlackMarketSmart")
 				{
 					return executeGameBuildBlackMarketSmart(request, outReason);
+				}
+				if (buildCmd == "Game.BuildScudStormSmart")
+				{
+					return executeGameBuildScudStormSmart(request, outReason);
 				}
 
 				outReason = "unsupported_building_mix_command";
@@ -4162,6 +4335,10 @@
 					{
 						buildCmd = "Game.BuildBlackMarketSmart";
 					}
+					else if (kind == "scud_storm" || kind == "scudstorm" || kind == "scud")
+					{
+						buildCmd = "Game.BuildScudStormSmart";
+					}
 				}
 
 				if (buildCmd.empty())
@@ -4197,6 +4374,221 @@
 				return false;
 			}
 			return true;
+		}
+
+		Object* resolveScudStormSourceFromArgs(Player* player, const nlohmann::json& message, const SpecialPowerTemplate*& outTemplate, std::string& reason)
+		{
+			outTemplate = nullptr;
+			if (player == nullptr || TheGameLogic == nullptr)
+			{
+				reason = "logic_not_ready";
+				return nullptr;
+			}
+
+			Object* source = nullptr;
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				const auto sourceIdIt = argsIt->find("source_object_id");
+				if (sourceIdIt != argsIt->end() && sourceIdIt->is_number_integer())
+				{
+					const Int sourceId = sourceIdIt->get<Int>();
+					if (sourceId <= 0)
+					{
+						reason = "invalid_source_object_id";
+						return nullptr;
+					}
+					source = TheGameLogic->findObjectByID(static_cast<ObjectID>(sourceId));
+					if (source == nullptr)
+					{
+						reason = "source_object_not_found";
+						return nullptr;
+					}
+					if (source->getControllingPlayer() != player)
+					{
+						reason = "source_object_not_owned";
+						return nullptr;
+					}
+				}
+			}
+
+			if (source == nullptr)
+			{
+				source = player->findMostReadyShortcutSpecialPowerOfType(SPECIAL_SCUD_STORM);
+				if (source == nullptr)
+				{
+					reason = "scud_storm_source_not_found";
+					return nullptr;
+				}
+			}
+
+			if (source->isEffectivelyDead())
+			{
+				reason = "source_object_dead";
+				return nullptr;
+			}
+
+			SpecialPowerModuleInterface* mod = source->findSpecialPowerModuleInterface(SPECIAL_SCUD_STORM);
+			if (mod == nullptr)
+			{
+				reason = "source_object_not_scud_storm";
+				return nullptr;
+			}
+
+			outTemplate = mod->getSpecialPowerTemplate();
+			if (outTemplate == nullptr)
+			{
+				reason = "special_power_template_missing";
+				return nullptr;
+			}
+			if (!mod->isReady())
+			{
+				reason = "scud_storm_not_ready";
+				return nullptr;
+			}
+
+			return source;
+		}
+
+		bool resolveScudStormTargetPlayerPosition(Player* targetPlayer, Coord3D& target, std::string& reason) const
+		{
+			target.x = 0.0f;
+			target.y = 0.0f;
+			target.z = 0.0f;
+			if (targetPlayer == nullptr)
+			{
+				reason = "target_player_not_found";
+				return false;
+			}
+
+			Object* cc = findPrimaryCommandCenter(targetPlayer);
+			if (cc != nullptr && cc->getPosition() != nullptr)
+			{
+				target = *cc->getPosition();
+				target.z = 0.0f;
+				return true;
+			}
+
+			nlohmann::json targetPos = buildPlayerMapPositionSummary(targetPlayer);
+			const auto xIt = targetPos.find("x");
+			const auto yIt = targetPos.find("y");
+			if (xIt == targetPos.end() || yIt == targetPos.end() || !xIt->is_number() || !yIt->is_number())
+			{
+				reason = "target_position_unknown";
+				return false;
+			}
+
+			target.x = xIt->get<Real>();
+			target.y = yIt->get<Real>();
+			target.z = 0.0f;
+			return true;
+		}
+
+		bool executeGameScudStormAtPosition(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheGameLogic == nullptr || TheActionManager == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+			if (!canIssuePlayerScopedMessage(player, reason))
+			{
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			const auto xIt = argsIt->find("x");
+			const auto yIt = argsIt->find("y");
+			if (xIt == argsIt->end() || yIt == argsIt->end() || !xIt->is_number() || !yIt->is_number())
+			{
+				reason = "missing_target_position";
+				return false;
+			}
+
+			Coord3D target;
+			target.x = xIt->get<Real>();
+			target.y = yIt->get<Real>();
+			target.z = 0.0f;
+
+			const SpecialPowerTemplate* powerTemplate = nullptr;
+			Object* source = resolveScudStormSourceFromArgs(player, message, powerTemplate, reason);
+			if (source == nullptr || powerTemplate == nullptr)
+			{
+				return false;
+			}
+
+			if (!TheActionManager->canDoSpecialPowerAtLocation(source, &target, CMD_FROM_PLAYER, powerTemplate, nullptr, 0u))
+			{
+				reason = "target_not_valid_for_scud_storm";
+				return false;
+			}
+
+			GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_SPECIAL_POWER_AT_LOCATION);
+			if (msg == nullptr)
+			{
+				reason = "message_stream_not_ready";
+				return false;
+			}
+			msg->appendIntegerArgument(static_cast<Int>(powerTemplate->getID()));
+			msg->appendLocationArgument(target);
+			msg->appendRealArgument(INVALID_ANGLE);
+			msg->appendObjectIDArgument(INVALID_ID);
+			msg->appendIntegerArgument(0);
+			msg->appendObjectIDArgument(source->getID());
+			return true;
+		}
+
+		bool executeGameScudStormAtPlayer(const nlohmann::json& message, std::string& reason)
+		{
+			if (ThePlayerList == nullptr)
+			{
+				reason = "player_state_not_ready";
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			const auto targetIt = argsIt->find("target_player_index");
+			if (targetIt == argsIt->end() || !targetIt->is_number_integer())
+			{
+				reason = "missing_target_player_index";
+				return false;
+			}
+
+			Player* targetPlayer = getPlayerByIndex(targetIt->get<Int>());
+			if (targetPlayer == nullptr)
+			{
+				reason = "target_player_not_found";
+				return false;
+			}
+
+			Coord3D target;
+			if (!resolveScudStormTargetPlayerPosition(targetPlayer, target, reason))
+			{
+				return false;
+			}
+
+			nlohmann::json forwarded = message;
+			forwarded["args"]["x"] = target.x;
+			forwarded["args"]["y"] = target.y;
+			return executeGameScudStormAtPosition(forwarded, reason);
 		}
 
 		bool executeGameAttackMove(const nlohmann::json& message, std::string& reason)

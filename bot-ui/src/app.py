@@ -60,6 +60,8 @@ class BotUIApp:
         self.target_player_index_var = tk.IntVar(value=0)
         self.money_player_index_var = tk.IntVar(value=0)
         self.money_value_var = tk.StringVar(value="20000")
+        self.scud_x_var = tk.StringVar(value="0")
+        self.scud_y_var = tk.StringVar(value="0")
         self.chat_text_var = tk.StringVar(value="")
         self.chat_scope_var = tk.StringVar(value="everyone")
         self.query_preset_var = tk.StringVar(value="game.objects")
@@ -72,6 +74,7 @@ class BotUIApp:
         self.build_mix_arms_var = tk.IntVar(value=0)
         self.build_mix_palace_var = tk.IntVar(value=0)
         self.build_mix_market_var = tk.IntVar(value=0)
+        self.build_mix_scud_var = tk.IntVar(value=0)
         self.build_mix_tunnel_var = tk.IntVar(value=0)
         self.build_mix_stinger_var = tk.IntVar(value=0)
         self.camera_angle_deg_var = tk.DoubleVar(value=0.0)
@@ -273,9 +276,12 @@ class BotUIApp:
         ttk.Button(buildings, text="Build Stinger", command=self._build_stinger_site).grid(
             row=2, column=2, sticky="ew", padx=2, pady=2
         )
+        ttk.Button(buildings, text="Build Scud Storm", command=self._build_scud_storm).grid(
+            row=2, column=3, sticky="ew", padx=2, pady=2
+        )
         mix = ttk.LabelFrame(buildings, text="Build Mix", padding=6)
         mix.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(6, 0))
-        for i in range(8):
+        for i in range(9):
             mix.grid_columnconfigure(i, weight=1)
         self._build_mix_spinbox(mix, 0, "Stash", self.build_mix_stash_var)
         self._build_mix_spinbox(mix, 1, "Barracks", self.build_mix_barracks_var)
@@ -283,10 +289,11 @@ class BotUIApp:
         self._build_mix_spinbox(mix, 3, "Arms", self.build_mix_arms_var)
         self._build_mix_spinbox(mix, 4, "Palace", self.build_mix_palace_var)
         self._build_mix_spinbox(mix, 5, "Markets", self.build_mix_market_var)
-        self._build_mix_spinbox(mix, 6, "Tunnels", self.build_mix_tunnel_var)
-        self._build_mix_spinbox(mix, 7, "Stingers", self.build_mix_stinger_var)
+        self._build_mix_spinbox(mix, 6, "Scud", self.build_mix_scud_var)
+        self._build_mix_spinbox(mix, 7, "Tunnels", self.build_mix_tunnel_var)
+        self._build_mix_spinbox(mix, 8, "Stingers", self.build_mix_stinger_var)
         ttk.Button(mix, text="Send Build Mix", command=self._build_mix).grid(
-            row=2, column=0, columnspan=8, sticky="ew", padx=2, pady=(6, 0)
+            row=2, column=0, columnspan=9, sticky="ew", padx=2, pady=(6, 0)
         )
 
         units = ttk.LabelFrame(controls, text="Units", padding=6)
@@ -326,22 +333,32 @@ class BotUIApp:
         ttk.Button(actions, text="AttackMove -> Player", command=self._attackmove_all_combat_to_player).grid(
             row=0, column=2, sticky="ew", padx=2, pady=2
         )
+        ttk.Button(actions, text="Scud -> Player", command=self._scud_storm_player).grid(
+            row=0, column=3, sticky="ew", padx=2, pady=2
+        )
         ttk.Label(actions, text="Raid Units").grid(row=1, column=0, sticky="e")
         tk.Spinbox(actions, from_=1, to=99, textvariable=self.raid_count_var, width=5).grid(row=1, column=1, sticky="w")
+        ttk.Label(actions, text="Scud X").grid(row=1, column=2, sticky="e")
+        ttk.Entry(actions, textvariable=self.scud_x_var, width=10).grid(row=1, column=3, sticky="ew", padx=2)
+        ttk.Label(actions, text="Scud Y").grid(row=2, column=0, sticky="e")
+        ttk.Entry(actions, textvariable=self.scud_y_var, width=10).grid(row=2, column=1, sticky="ew", padx=2)
         ttk.Button(actions, text="Raid Smart", command=self._raid_smart).grid(
-            row=0, column=3, rowspan=2, sticky="nsew", padx=2, pady=2
-        )
-        ttk.Button(actions, text="Guard Idle", command=self._guard_idle_ground_combat).grid(
-            row=2, column=0, sticky="ew", padx=2, pady=2
-        )
-        ttk.Button(actions, text="Query Objects", command=lambda: self._query("game.objects_all", quiet=False)).grid(
-            row=2, column=1, sticky="ew", padx=2, pady=2
-        )
-        ttk.Button(actions, text="Query Enemies", command=lambda: self._query("game.visible_enemies", quiet=False)).grid(
             row=2, column=2, sticky="ew", padx=2, pady=2
         )
+        ttk.Button(actions, text="Scud -> Position", command=self._scud_storm_position).grid(
+            row=2, column=3, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(actions, text="Guard Idle", command=self._guard_idle_ground_combat).grid(
+            row=3, column=0, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(actions, text="Query Objects", command=lambda: self._query("game.objects_all", quiet=False)).grid(
+            row=3, column=1, sticky="ew", padx=2, pady=2
+        )
+        ttk.Button(actions, text="Query Enemies", command=lambda: self._query("game.visible_enemies", quiet=False)).grid(
+            row=3, column=2, sticky="ew", padx=2, pady=2
+        )
         debug_money = ttk.LabelFrame(actions, text="Debug Money", padding=6)
-        debug_money.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        debug_money.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(6, 0))
         for i in range(6):
             debug_money.grid_columnconfigure(i, weight=1)
         ttk.Label(debug_money, text="Player Idx").grid(row=0, column=0, sticky="e")
@@ -351,19 +368,19 @@ class BotUIApp:
         ttk.Button(debug_money, text="Set Money", command=self._set_money).grid(row=0, column=4, sticky="ew", padx=2)
         ttk.Label(debug_money, text="SP/Skirmish only").grid(row=0, column=5, sticky="w")
 
-        ttk.Checkbutton(actions, text="Polling", variable=self.poll_enabled).grid(row=4, column=0, sticky="w")
-        ttk.Label(actions, text="Interval ms").grid(row=4, column=1, sticky="e")
-        ttk.Entry(actions, textvariable=self.poll_interval_ms, width=8).grid(row=4, column=2, sticky="w")
+        ttk.Checkbutton(actions, text="Polling", variable=self.poll_enabled).grid(row=5, column=0, sticky="w")
+        ttk.Label(actions, text="Interval ms").grid(row=5, column=1, sticky="e")
+        ttk.Entry(actions, textvariable=self.poll_interval_ms, width=8).grid(row=5, column=2, sticky="w")
         ttk.Checkbutton(actions, text="Use Streaming", variable=self.stream_enabled, command=self._toggle_streaming).grid(
-            row=4, column=3, sticky="w"
+            row=5, column=3, sticky="w"
         )
         ttk.Checkbutton(
             actions,
             text="Map Updates",
             variable=self.map_updates_enabled,
             command=self._on_map_updates_toggle,
-        ).grid(row=5, column=0, sticky="w")
-        ttk.Checkbutton(actions, text="Debug Inbound", variable=self.debug_inbound).grid(row=5, column=1, sticky="w")
+        ).grid(row=6, column=0, sticky="w")
+        ttk.Checkbutton(actions, text="Debug Inbound", variable=self.debug_inbound).grid(row=6, column=1, sticky="w")
 
         cmd_row = ttk.LabelFrame(bottom, text="Command Input", padding=8)
         cmd_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -546,6 +563,9 @@ class BotUIApp:
     def _build_black_market(self) -> None:
         self._send_session_command("Game.BuildBlackMarketSmart", {"count": self._get_build_count()})
 
+    def _build_scud_storm(self) -> None:
+        self._send_session_command("Game.BuildScudStormSmart", {"count": self._get_build_count()})
+
     def _build_tunnel_network(self) -> None:
         self._send_session_command(
             "Game.BuildBarracksSmart",
@@ -599,6 +619,23 @@ class BotUIApp:
 
         self._send_session_command("Game.SetMoney", {"player_index": player_index, "money": money}, quiet=False)
 
+    def _scud_storm_player(self) -> None:
+        try:
+            target = int(self.target_player_index_var.get())
+        except Exception:  # noqa: BLE001
+            target = 0
+        target = max(0, target)
+        self._send_session_command("Game.ScudStormAtPlayer", {"target_player_index": target}, quiet=False)
+
+    def _scud_storm_position(self) -> None:
+        try:
+            x = float(self.scud_x_var.get().strip())
+            y = float(self.scud_y_var.get().strip())
+        except Exception:  # noqa: BLE001
+            self._log("Scud target position must be numeric.")
+            return
+        self._send_session_command("Game.ScudStormAtPosition", {"x": x, "y": y}, quiet=False)
+
     def _find_supply_sources(self) -> None:
         self._send_session_command("Game.FindSupplySources", {}, quiet=False)
 
@@ -645,6 +682,7 @@ class BotUIApp:
         add("arms_dealer", self.build_mix_arms_var)
         add("palace", self.build_mix_palace_var)
         add("black_market", self.build_mix_market_var)
+        add("scud_storm", self.build_mix_scud_var)
         add_explicit({"cmd": "Game.BuildBarracksSmart", "building_template": "GLATunnelNetwork"}, self.build_mix_tunnel_var)
         add_explicit({"cmd": "Game.BuildBarracksSmart", "building_template": "GLAStingerSite"}, self.build_mix_stinger_var)
 

@@ -114,12 +114,19 @@ Supported `cmd` values (v1):
 28. `Game.BuildSupplyStashSmart`
 29. `Game.BuildBarracksSmart`
 30. `Game.BuildCommandCenterSmart`
-31. `Game.AttackMove`
-32. `Game.AttackMove.RaidSmart`
-33. `Game.Camera.Set`
-34. `Game.Camera.LookAt`
-35. `Game.Camera.SetZoomLimited`
-36. `Game.Camera.Get`
+31. `Game.BuildArmsDealerSmart`
+32. `Game.BuildPalaceSmart`
+33. `Game.BuildBlackMarketSmart`
+34. `Game.BuildScudStormSmart`
+35. `Game.BuildBuildingMix`
+36. `Game.ScudStormAtPosition`
+37. `Game.ScudStormAtPlayer`
+38. `Game.AttackMove`
+39. `Game.AttackMove.RaidSmart`
+40. `Game.Camera.Set`
+41. `Game.Camera.LookAt`
+42. `Game.Camera.SetZoomLimited`
+43. `Game.Camera.Get`
 
 `Lobby.Join` args:
 
@@ -236,6 +243,48 @@ Supported `cmd` values (v1):
 5. `zone_center` (optional object `{x,y}`; preferred zone center for placement)
 6. `zone_radius` (optional number; search radius around `zone_center`, default adapter-defined)
 7. `strict_zone` (optional bool; if `true`, do not fallback to anchor-based placement when zone has no legal spot)
+
+`Game.BuildScudStormSmart` args:
+
+1. `player_index` (optional int, default local player)
+2. `worker_object_id` (optional int, default first idle dozer/worker)
+3. `building_template` (optional override; otherwise inferred by faction/buildability)
+4. `anchor_object_id` (optional int; owned object used as placement anchor)
+5. `zone_center` (optional object `{x,y}`; preferred zone center for placement)
+6. `zone_radius` (optional number; search radius around `zone_center`, default adapter-defined)
+7. `strict_zone` (optional bool; if `true`, do not fallback to anchor-based placement when zone has no legal spot)
+
+`Game.BuildScudStormSmart` behavior:
+
+1. Resolve an idle worker/dozer.
+2. Infer a buildable Scud Storm template for the player's GLA variant if not explicitly provided.
+3. Place near anchor object (default: player command center).
+4. If no legal location currently exists, issue a move order toward the preferred area and return success.
+
+`Game.ScudStormAtPosition` args:
+
+1. `player_index` (optional int, default local player)
+2. `source_object_id` (optional int; explicit Scud Storm structure to fire from)
+3. `x` (required number)
+4. `y` (required number)
+
+`Game.ScudStormAtPosition` behavior:
+
+1. Resolve a ready Scud Storm owned by the requested player.
+2. Validate the target through the engine's normal special-power checks.
+3. Issue the native `MSG_DO_SPECIAL_POWER_AT_LOCATION` command using that structure as the specific source.
+
+`Game.ScudStormAtPlayer` args:
+
+1. `player_index` (optional int, default local player)
+2. `source_object_id` (optional int; explicit Scud Storm structure to fire from)
+3. `target_player_index` (required int)
+
+`Game.ScudStormAtPlayer` behavior:
+
+1. Resolve the target player's primary command center position when possible.
+2. Fallback to the target player's inferred map position if no command center is available.
+3. Launch the Scud Storm via the same engine path as `Game.ScudStormAtPosition`.
 
 `Game.BuildCommandCenterSmart` behavior:
 

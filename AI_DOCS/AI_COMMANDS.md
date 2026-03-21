@@ -22,6 +22,13 @@ Catalog candidate adapter commands based on existing in-engine command surfaces 
 14. `Menu.SetText`
 15. `Menu.ListControls`
 16. `Game.SetMoney` (single-player/skirmish debug only)
+17. `Game.BuildArmsDealerSmart`
+18. `Game.BuildPalaceSmart`
+19. `Game.BuildBlackMarketSmart`
+20. `Game.BuildScudStormSmart`
+21. `Game.BuildBuildingMix`
+22. `Game.ScudStormAtPosition`
+23. `Game.ScudStormAtPlayer`
 
 ## Implemented Query Primitives (Orchestration-Critical)
 

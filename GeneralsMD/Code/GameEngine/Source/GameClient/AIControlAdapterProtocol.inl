@@ -208,7 +208,10 @@
 						"game_arms_dealer_build_smart",
 						"game_palace_build_smart",
 						"game_black_market_build_smart",
+						"game_scud_storm_build_smart",
 						"game_building_mix",
+						"game_scud_storm_at_position",
+						"game_scud_storm_at_player",
 						"game_attackmove_all_combat_to_player",
 						"game_attackmove_raid_smart",
 						"game_guard_all_idle_ground_combat",
@@ -566,10 +569,46 @@
 				return;
 			}
 
+			if (cmd == "Game.BuildScudStormSmart")
+			{
+				std::string reason;
+				if (!executeGameBuildScudStormSmart(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
 			if (cmd == "Game.BuildBuildingMix")
 			{
 				std::string reason;
 				if (!executeGameBuildBuildingMix(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.ScudStormAtPosition")
+			{
+				std::string reason;
+				if (!executeGameScudStormAtPosition(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.ScudStormAtPlayer")
+			{
+				std::string reason;
+				if (!executeGameScudStormAtPlayer(message, reason))
 				{
 					sendActionAck(requestId, false, "invalid_state", reason.c_str());
 					return;
