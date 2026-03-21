@@ -99,34 +99,36 @@ Supported `cmd` values (v1):
 13. `Chat.Send`
 14. `Game.Query`
 15. `Game.QueueUnit`
-16. `Game.BuildWorker`
-17. `Game.SetMoney`
-18. `Game.QueueSoldiersAllBarracks`
-19. `Game.QueueRpgTroopersAllBarracks`
-20. `Game.QueueQuadsAllWarFactories`
-21. `Game.QueueScorpionsAllWarFactories`
-22. `Game.QueueRadarVansAllWarFactories`
-23. `Game.QueueRadarVan`
-24. `Game.FindSupplySources`
-25. `Game.FindBuildLocationNearSupply`
-26. `Game.DozerConstruct`
-27. `Game.BuildSupplyStashAuto`
-28. `Game.BuildSupplyStashSmart`
-29. `Game.BuildBarracksSmart`
-30. `Game.BuildCommandCenterSmart`
-31. `Game.BuildArmsDealerSmart`
-32. `Game.BuildPalaceSmart`
-33. `Game.BuildBlackMarketSmart`
-34. `Game.BuildScudStormSmart`
-35. `Game.BuildBuildingMix`
-36. `Game.ScudStormAtPosition`
-37. `Game.ScudStormAtPlayer`
-38. `Game.AttackMove`
-39. `Game.AttackMove.RaidSmart`
-40. `Game.Camera.Set`
-41. `Game.Camera.LookAt`
-42. `Game.Camera.SetZoomLimited`
-43. `Game.Camera.Get`
+16. `Game.QueueUpgrade`
+17. `Game.PurchaseScience`
+18. `Game.BuildWorker`
+19. `Game.SetMoney`
+20. `Game.QueueSoldiersAllBarracks`
+21. `Game.QueueRpgTroopersAllBarracks`
+22. `Game.QueueQuadsAllWarFactories`
+23. `Game.QueueScorpionsAllWarFactories`
+24. `Game.QueueRadarVansAllWarFactories`
+25. `Game.QueueRadarVan`
+26. `Game.FindSupplySources`
+27. `Game.FindBuildLocationNearSupply`
+28. `Game.DozerConstruct`
+29. `Game.BuildSupplyStashAuto`
+30. `Game.BuildSupplyStashSmart`
+31. `Game.BuildBarracksSmart`
+32. `Game.BuildCommandCenterSmart`
+33. `Game.BuildArmsDealerSmart`
+34. `Game.BuildPalaceSmart`
+35. `Game.BuildBlackMarketSmart`
+36. `Game.BuildScudStormSmart`
+37. `Game.BuildBuildingMix`
+38. `Game.ScudStormAtPosition`
+39. `Game.ScudStormAtPlayer`
+40. `Game.AttackMove`
+41. `Game.AttackMove.RaidSmart`
+42. `Game.Camera.Set`
+43. `Game.Camera.LookAt`
+44. `Game.Camera.SetZoomLimited`
+45. `Game.Camera.Get`
 
 `Lobby.Join` args:
 
@@ -304,6 +306,31 @@ Supported `cmd` values (v1):
 
 1. Same args as `Game.QueueUnit`
 2. If `unit_template` is omitted, adapter infers faction worker/dozer template.
+
+`Game.QueueUpgrade` args:
+
+1. `player_index` (optional int, default local player)
+2. `producer_object_id` (optional int; explicit producer building)
+3. `producer_kind` (optional string; adapter currently recognizes `palace`, `black_market`, `blackmarket`, `market`, or `any`)
+4. `upgrade_name` (required string; internal upgrade identifier)
+
+`Game.QueueUpgrade` behavior:
+
+1. Resolve an owned producer building with a production queue.
+2. Resolve the upgrade by its internal name via `TheUpgradeCenter`.
+3. Validate ownership, affordability, duplicate/in-progress state, and producer compatibility.
+4. Issue the native `MSG_QUEUE_UPGRADE` command against that producer.
+
+`Game.PurchaseScience` args:
+
+1. `player_index` (optional int, default local player)
+2. `science_name` (required string; internal science/promotion identifier)
+
+`Game.PurchaseScience` behavior:
+
+1. Resolve the science by internal name via `TheScienceStore`.
+2. Validate that the player can currently purchase it.
+3. Issue the native `MSG_PURCHASE_SCIENCE` command for that player.
 
 `Game.SetMoney` args:
 

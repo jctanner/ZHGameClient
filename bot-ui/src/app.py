@@ -22,6 +22,35 @@ from render.map_canvas import MapRenderer
 from state.store import UIStore
 from uilog.ui_log import UILog
 
+GLA_SCIENCE_SUGGESTIONS = (
+    "SCIENCE_GLAAnthraxBeta",
+    "SCIENCE_GLAAnthraxGamma",
+    "SCIENCE_GLACashBounty1",
+    "SCIENCE_GLACashBounty2",
+    "SCIENCE_GLACashBounty3",
+    "SCIENCE_GLADemoTrap",
+    "SCIENCE_GLARebelAmbush1",
+    "SCIENCE_GLARebelAmbush2",
+    "SCIENCE_GLARebelAmbush3",
+    "SCIENCE_GLAScudStorm",
+    "SCIENCE_GLASneakAttack",
+)
+
+GLA_PALACE_UPGRADE_SUGGESTIONS = (
+    "Upgrade_GLAAnthraxBeta",
+    "Upgrade_GLAAnthraxGamma",
+    "Upgrade_GLAAPBullets",
+    "Upgrade_GLABuggyAmmo",
+)
+
+GLA_BLACK_MARKET_UPGRADE_SUGGESTIONS = (
+    "Upgrade_GLAFortifiedStructure",
+    "Upgrade_GLAJunkRepair",
+    "Upgrade_GLAScorpionRocket",
+    "Upgrade_GLAToxinShells",
+    "Upgrade_GLAWorkerShoes",
+)
+
 
 class BotUIApp:
     def __init__(self, root: tk.Tk) -> None:
@@ -60,6 +89,9 @@ class BotUIApp:
         self.target_player_index_var = tk.IntVar(value=0)
         self.money_player_index_var = tk.IntVar(value=0)
         self.money_value_var = tk.StringVar(value="20000")
+        self.promotion_science_var = tk.StringVar(value=GLA_SCIENCE_SUGGESTIONS[0])
+        self.palace_upgrade_var = tk.StringVar(value=GLA_PALACE_UPGRADE_SUGGESTIONS[0])
+        self.black_market_upgrade_var = tk.StringVar(value=GLA_BLACK_MARKET_UPGRADE_SUGGESTIONS[0])
         self.scud_x_var = tk.StringVar(value="0")
         self.scud_y_var = tk.StringVar(value="0")
         self.chat_text_var = tk.StringVar(value="")
@@ -368,19 +400,44 @@ class BotUIApp:
         ttk.Button(debug_money, text="Set Money", command=self._set_money).grid(row=0, column=4, sticky="ew", padx=2)
         ttk.Label(debug_money, text="SP/Skirmish only").grid(row=0, column=5, sticky="w")
 
-        ttk.Checkbutton(actions, text="Polling", variable=self.poll_enabled).grid(row=5, column=0, sticky="w")
-        ttk.Label(actions, text="Interval ms").grid(row=5, column=1, sticky="e")
-        ttk.Entry(actions, textvariable=self.poll_interval_ms, width=8).grid(row=5, column=2, sticky="w")
+        upgrades = ttk.LabelFrame(actions, text="GLA Upgrades / Promotions", padding=6)
+        upgrades.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        upgrades.grid_columnconfigure(1, weight=1)
+        upgrades.grid_columnconfigure(3, weight=1)
+        ttk.Label(upgrades, text="Promotion").grid(row=0, column=0, sticky="e")
+        ttk.Combobox(upgrades, textvariable=self.promotion_science_var, values=GLA_SCIENCE_SUGGESTIONS).grid(
+            row=0, column=1, sticky="ew", padx=(4, 6)
+        )
+        ttk.Button(upgrades, text="Buy Promotion", command=self._purchase_science).grid(row=0, column=2, sticky="ew", padx=2)
+        ttk.Label(upgrades, text="Uses promotion points").grid(row=0, column=3, sticky="w")
+        ttk.Label(upgrades, text="Palace").grid(row=1, column=0, sticky="e", pady=(6, 0))
+        ttk.Combobox(upgrades, textvariable=self.palace_upgrade_var, values=GLA_PALACE_UPGRADE_SUGGESTIONS).grid(
+            row=1, column=1, sticky="ew", padx=(4, 6), pady=(6, 0)
+        )
+        ttk.Button(upgrades, text="Queue Palace Upgrade", command=self._queue_palace_upgrade).grid(
+            row=1, column=2, sticky="ew", padx=2, pady=(6, 0)
+        )
+        ttk.Label(upgrades, text="Black Market").grid(row=2, column=0, sticky="e", pady=(6, 0))
+        ttk.Combobox(upgrades, textvariable=self.black_market_upgrade_var, values=GLA_BLACK_MARKET_UPGRADE_SUGGESTIONS).grid(
+            row=2, column=1, sticky="ew", padx=(4, 6), pady=(6, 0)
+        )
+        ttk.Button(upgrades, text="Queue Market Upgrade", command=self._queue_black_market_upgrade).grid(
+            row=2, column=2, sticky="ew", padx=2, pady=(6, 0)
+        )
+
+        ttk.Checkbutton(actions, text="Polling", variable=self.poll_enabled).grid(row=6, column=0, sticky="w")
+        ttk.Label(actions, text="Interval ms").grid(row=6, column=1, sticky="e")
+        ttk.Entry(actions, textvariable=self.poll_interval_ms, width=8).grid(row=6, column=2, sticky="w")
         ttk.Checkbutton(actions, text="Use Streaming", variable=self.stream_enabled, command=self._toggle_streaming).grid(
-            row=5, column=3, sticky="w"
+            row=6, column=3, sticky="w"
         )
         ttk.Checkbutton(
             actions,
             text="Map Updates",
             variable=self.map_updates_enabled,
             command=self._on_map_updates_toggle,
-        ).grid(row=6, column=0, sticky="w")
-        ttk.Checkbutton(actions, text="Debug Inbound", variable=self.debug_inbound).grid(row=6, column=1, sticky="w")
+        ).grid(row=7, column=0, sticky="w")
+        ttk.Checkbutton(actions, text="Debug Inbound", variable=self.debug_inbound).grid(row=7, column=1, sticky="w")
 
         cmd_row = ttk.LabelFrame(bottom, text="Command Input", padding=8)
         cmd_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -618,6 +675,30 @@ class BotUIApp:
             money = max_money
 
         self._send_session_command("Game.SetMoney", {"player_index": player_index, "money": money}, quiet=False)
+
+    def _purchase_science(self) -> None:
+        science_name = self.promotion_science_var.get().strip()
+        if not science_name:
+            self._log("Science name is empty.")
+            return
+        self._send_session_command("Game.PurchaseScience", {"science_name": science_name}, quiet=False)
+
+    def _queue_upgrade(self, producer_kind: str, upgrade_name: str) -> None:
+        upgrade_name = upgrade_name.strip()
+        if not upgrade_name:
+            self._log("Upgrade name is empty.")
+            return
+        self._send_session_command(
+            "Game.QueueUpgrade",
+            {"producer_kind": producer_kind, "upgrade_name": upgrade_name},
+            quiet=False,
+        )
+
+    def _queue_palace_upgrade(self) -> None:
+        self._queue_upgrade("palace", self.palace_upgrade_var.get())
+
+    def _queue_black_market_upgrade(self) -> None:
+        self._queue_upgrade("black_market", self.black_market_upgrade_var.get())
 
     def _scud_storm_player(self) -> None:
         try:

@@ -8,27 +8,29 @@ Catalog candidate adapter commands based on existing in-engine command surfaces 
 
 1. `Game.Query`
 2. `Game.QueueUnit`
-3. `Game.BuildWorker`
-4. `Game.FindSupplySources`
-5. `Game.FindBuildLocationNearSupply`
-6. `Game.DozerConstruct`
-7. `Game.BuildSupplyStashAuto`
-8. `Game.BuildSupplyStashSmart`
-9. `Game.BuildBarracksSmart`
-10. `Game.BuildCommandCenterSmart`
-11. `Game.AttackMove`
-12. `Chat.Send`
-13. `Menu.Click`
-14. `Menu.SetText`
-15. `Menu.ListControls`
-16. `Game.SetMoney` (single-player/skirmish debug only)
-17. `Game.BuildArmsDealerSmart`
-18. `Game.BuildPalaceSmart`
-19. `Game.BuildBlackMarketSmart`
-20. `Game.BuildScudStormSmart`
-21. `Game.BuildBuildingMix`
-22. `Game.ScudStormAtPosition`
-23. `Game.ScudStormAtPlayer`
+3. `Game.QueueUpgrade`
+4. `Game.PurchaseScience`
+5. `Game.BuildWorker`
+6. `Game.FindSupplySources`
+7. `Game.FindBuildLocationNearSupply`
+8. `Game.DozerConstruct`
+9. `Game.BuildSupplyStashAuto`
+10. `Game.BuildSupplyStashSmart`
+11. `Game.BuildBarracksSmart`
+12. `Game.BuildCommandCenterSmart`
+13. `Game.AttackMove`
+14. `Chat.Send`
+15. `Menu.Click`
+16. `Menu.SetText`
+17. `Menu.ListControls`
+18. `Game.SetMoney` (single-player/skirmish debug only)
+19. `Game.BuildArmsDealerSmart`
+20. `Game.BuildPalaceSmart`
+21. `Game.BuildBlackMarketSmart`
+22. `Game.BuildScudStormSmart`
+23. `Game.BuildBuildingMix`
+24. `Game.ScudStormAtPosition`
+25. `Game.ScudStormAtPlayer`
 
 ## Implemented Query Primitives (Orchestration-Critical)
 
