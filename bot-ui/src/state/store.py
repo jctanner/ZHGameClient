@@ -125,6 +125,23 @@ class PlayerMeta:
 
 
 @dataclass
+class GridCellSummary:
+    cell: str
+    col: int
+    row: int
+    dominant_player_index: int | None = None
+    units: int = 0
+    buildings: int = 0
+    objects_total: int = 0
+    min_x: float = 0.0
+    min_y: float = 0.0
+    max_x: float = 0.0
+    max_y: float = 0.0
+    center_x: float = 0.0
+    center_y: float = 0.0
+
+
+@dataclass
 class UIStore:
     owned_objects: dict[int, WorldObject] = field(default_factory=dict)
     visible_enemies: dict[int, WorldObject] = field(default_factory=dict)
@@ -135,6 +152,119 @@ class UIStore:
     session_state: dict[str, Any] = field(default_factory=dict)
     map_width: float = 1024.0
     map_height: float = 1024.0
+    map_min_x: float = 0.0
+    map_min_y: float = 0.0
+    grid_cols: int = 0
+    grid_rows: int = 0
+    grid_cells: dict[str, GridCellSummary] = field(default_factory=dict)
+    grid_objects: dict[int, WorldObject] = field(default_factory=dict)
+    selected_grid_cell: str = ""
+    grid_objects_total: int = 0
+
+    def update_grid_summary(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        rows = payload.get("cells")
+        if not isinstance(rows, list):
+            return
+
+        grid_cols = payload.get("grid_cols")
+        grid_rows = payload.get("grid_rows")
+        if isinstance(grid_cols, int) and grid_cols > 0:
+            self.grid_cols = grid_cols
+        if isinstance(grid_rows, int) and grid_rows > 0:
+            self.grid_rows = grid_rows
+
+        map_node = payload.get("map")
+        if isinstance(map_node, dict):
+            width = map_node.get("width")
+            height = map_node.get("height")
+            min_x = map_node.get("min_x")
+            min_y = map_node.get("min_y")
+            if isinstance(width, (int, float)) and width > 0:
+                self.map_width = float(width)
+            if isinstance(height, (int, float)) and height > 0:
+                self.map_height = float(height)
+            if isinstance(min_x, (int, float)):
+                self.map_min_x = float(min_x)
+            if isinstance(min_y, (int, float)):
+                self.map_min_y = float(min_y)
+
+        updated: dict[str, GridCellSummary] = {}
+        for raw in rows:
+            if not isinstance(raw, dict):
+                continue
+            cell_name = str(raw.get("cell", "")).strip()
+            if not cell_name:
+                continue
+            bounds = raw.get("bounds") if isinstance(raw.get("bounds"), dict) else {}
+            dominant = raw.get("dominant_player_index")
+            updated[cell_name] = GridCellSummary(
+                cell=cell_name,
+                col=int(raw.get("col", 0)) if isinstance(raw.get("col"), int) else 0,
+                row=int(raw.get("row", 0)) if isinstance(raw.get("row"), int) else 0,
+                dominant_player_index=int(dominant) if isinstance(dominant, int) and dominant >= 0 else None,
+                units=int(raw.get("units", 0)) if isinstance(raw.get("units"), int) else 0,
+                buildings=int(raw.get("buildings", 0)) if isinstance(raw.get("buildings"), int) else 0,
+                objects_total=int(raw.get("objects_total", 0)) if isinstance(raw.get("objects_total"), int) else 0,
+                min_x=_as_float(bounds.get("min_x")),
+                min_y=_as_float(bounds.get("min_y")),
+                max_x=_as_float(bounds.get("max_x")),
+                max_y=_as_float(bounds.get("max_y")),
+                center_x=_as_float(bounds.get("center_x")),
+                center_y=_as_float(bounds.get("center_y")),
+            )
+        self.grid_cells = updated
+
+    def update_grid_objects(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        rows = payload.get("cells")
+        if not isinstance(rows, list):
+            return
+
+        updated: dict[int, WorldObject] = {}
+        selected_cell = ""
+        total_objects = 0
+        for cell_row in rows:
+            if not isinstance(cell_row, dict):
+                continue
+            cell_name = str(cell_row.get("cell", "")).strip()
+            if cell_name and not selected_cell:
+                selected_cell = cell_name
+            if isinstance(cell_row.get("objects_total"), int):
+                total_objects += int(cell_row["objects_total"])
+            objects = cell_row.get("objects")
+            if not isinstance(objects, list):
+                continue
+            for raw in objects:
+                if not isinstance(raw, dict):
+                    continue
+                object_id = _extract_id(raw)
+                if object_id < 0:
+                    continue
+                x, y = _extract_xy(raw)
+                obj_class = str(raw.get("class", ""))
+                template = str(raw.get("template", raw.get("template_name", "")))
+                lower_class = obj_class.lower()
+                kind = "building" if ("structure" in lower_class or "building" in lower_class or bool(raw.get("under_construction", False))) else "unit"
+                owner_idx = int(raw["player_index"]) if isinstance(raw.get("player_index"), int) else None
+                key = self._reserve_object_key(updated, owner_idx or 0, object_id)
+                updated[key] = WorldObject(
+                    object_id=object_id,
+                    template=template,
+                    obj_class=obj_class,
+                    owner_player_index=owner_idx,
+                    x=x,
+                    y=y,
+                    hp_cur=float(raw["hp_cur"]) if isinstance(raw.get("hp_cur"), (int, float)) else None,
+                    hp_max=float(raw["hp_max"]) if isinstance(raw.get("hp_max"), (int, float)) else None,
+                    kind=kind,
+                )
+        self.grid_objects = updated
+        self.grid_objects_total = total_objects
+        if selected_cell:
+            self.selected_grid_cell = selected_cell
 
     def update_owned_objects(self, payload: Any) -> None:
         objects: list[Any] = []
@@ -376,10 +506,16 @@ class UIStore:
         candidate = map_node if isinstance(map_node, dict) else payload
         width = candidate.get("width")
         height = candidate.get("height")
+        min_x = candidate.get("min_x")
+        min_y = candidate.get("min_y")
         if isinstance(width, (int, float)) and width > 0:
             self.map_width = float(width)
         if isinstance(height, (int, float)) and height > 0:
             self.map_height = float(height)
+        if isinstance(min_x, (int, float)):
+            self.map_min_x = float(min_x)
+        if isinstance(min_y, (int, float)):
+            self.map_min_y = float(min_y)
 
     def update_supply_sources(self, payload: Any) -> None:
         rows = self._extract_list(payload, "sources")

@@ -36,6 +36,8 @@ Catalog candidate adapter commands based on existing in-engine command surfaces 
 
 1. `Game.Query path=game.objects` -> owned unit/building inventory with object IDs, template names, class, coordinates, construction state, and idle flag
 2. `Game.Query path=game.visible_enemies` -> visible enemy objects with IDs, template names, class, coordinates, and owner player index
+3. `Game.Query path=game.grid` -> occupied grid-cell aggregates with dominant player, unit/building totals, and world-space bounds
+4. `Game.Query path=game.grid_objects` -> bounded object detail for specific grid cells such as `C30`
 
 ## Minimum Primitive Set For A Basic RTS Loop
 

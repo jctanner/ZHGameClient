@@ -458,6 +458,8 @@ Common `path` values:
 16. `game.objects_cache_refresh`
 17. `game.zone_counts`
 18. `game.visible_enemies`
+19. `game.grid`
+20. `game.grid_objects`
 
 `game.objects_units_map`, `game.objects_buildings_map`, and `game.idle_workers` are served from a short-lived adapter cache (owned objects for the selected player). Responses include:
 
@@ -469,6 +471,23 @@ Common `path` values:
 1. `player_index` (optional int, default local player)
 2. `zone_center` (optional object `{x,y}`; omitted means whole owned map state)
 3. `zone_radius` (optional number; default adapter-defined)
+
+`game.grid` args:
+
+1. `grid_cols` (optional int, default `32`, clamped to adapter limits)
+2. `grid_rows` (optional int, default `32`, clamped to adapter limits)
+
+Returns occupied cell aggregates for the map. Each cell row includes a cell label such as `C30`, unit/building totals, dominant player index, per-player counts, and world-space bounds.
+
+`game.grid_objects` args:
+
+1. `cell` (optional string grid label such as `C30`)
+2. `cells` (optional array of string grid labels)
+3. `grid_cols` (optional int, must match the caller's grid interpretation)
+4. `grid_rows` (optional int, must match the caller's grid interpretation)
+5. `max_objects_per_cell` (optional int, default `120`, capped by adapter)
+
+Returns bounded object detail for one or more specific grid cells. Responses include per-cell bounds, total object counts, a `truncated` flag when the per-cell object cap is hit, and the serialized objects for the requested cells.
 
 ## Acknowledgements
 
