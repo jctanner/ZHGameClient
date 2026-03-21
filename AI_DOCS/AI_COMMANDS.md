@@ -21,6 +21,7 @@ Catalog candidate adapter commands based on existing in-engine command surfaces 
 13. `Menu.Click`
 14. `Menu.SetText`
 15. `Menu.ListControls`
+16. `Game.SetMoney` (single-player/skirmish debug only)
 
 ## Implemented Query Primitives (Orchestration-Critical)
 
@@ -111,7 +112,7 @@ Notes:
 ## Command Design Rules
 
 1. Always route through legal command/action surfaces.
-2. Never mutate deep sim state directly in adapter command handlers.
+2. Never mutate deep sim state directly in adapter command handlers, except explicitly labeled single-player/skirmish debug commands such as `Game.SetMoney`.
 3. Keep deterministic behavior for multiplayer safety.
 4. Return explicit rejection reasons (`invalid_state`, `unsupported_cmd`, `no_prereq`, `no_money`, etc.).
 5. Include object ownership and readiness validation in every command path.
@@ -121,3 +122,8 @@ Notes:
 1. Commands that mirror existing player/network command paths are generally safer for multiplayer.
 2. Direct local state mutation commands (for example direct money mutation) should remain single-player only unless backed by synchronized networked command handling.
 3. See `AI_DOCS/SIMULATION.md` for desync and lockstep details.
+
+## Debug-Only Commands
+
+1. `Game.SetMoney { player_index?, money }`
+2. This command intentionally mutates `Player::Money` directly and must remain disabled for real multiplayer sessions.

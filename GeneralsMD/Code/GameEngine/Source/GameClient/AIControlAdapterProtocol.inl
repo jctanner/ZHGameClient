@@ -212,6 +212,7 @@
 						"game_attackmove_all_combat_to_player",
 						"game_attackmove_raid_smart",
 						"game_guard_all_idle_ground_combat",
+						"game_set_money_debug",
 						"adapter_log_configure",
 						"adapter_log_reset",
 						"game_camera_set",
@@ -330,6 +331,19 @@
 			{
 				std::string reason;
 				if (!executeGameQueueUnit(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.SetMoney")
+			{
+				std::string reason;
+				if (!executeGameSetMoney(message, reason))
 				{
 					sendActionAck(requestId, false, "invalid_state", reason.c_str());
 					return;

@@ -58,6 +58,8 @@ class BotUIApp:
         self.unit_queue_count_var = tk.IntVar(value=1)
         self.raid_count_var = tk.IntVar(value=1)
         self.target_player_index_var = tk.IntVar(value=0)
+        self.money_player_index_var = tk.IntVar(value=0)
+        self.money_value_var = tk.StringVar(value="20000")
         self.chat_text_var = tk.StringVar(value="")
         self.chat_scope_var = tk.StringVar(value="everyone")
         self.query_preset_var = tk.StringVar(value="game.objects")
@@ -338,19 +340,30 @@ class BotUIApp:
         ttk.Button(actions, text="Query Enemies", command=lambda: self._query("game.visible_enemies", quiet=False)).grid(
             row=2, column=2, sticky="ew", padx=2, pady=2
         )
-        ttk.Checkbutton(actions, text="Polling", variable=self.poll_enabled).grid(row=3, column=0, sticky="w")
-        ttk.Label(actions, text="Interval ms").grid(row=3, column=1, sticky="e")
-        ttk.Entry(actions, textvariable=self.poll_interval_ms, width=8).grid(row=3, column=2, sticky="w")
+        debug_money = ttk.LabelFrame(actions, text="Debug Money", padding=6)
+        debug_money.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        for i in range(6):
+            debug_money.grid_columnconfigure(i, weight=1)
+        ttk.Label(debug_money, text="Player Idx").grid(row=0, column=0, sticky="e")
+        tk.Spinbox(debug_money, from_=0, to=11, textvariable=self.money_player_index_var, width=5).grid(row=0, column=1, sticky="w")
+        ttk.Label(debug_money, text="Money").grid(row=0, column=2, sticky="e")
+        ttk.Entry(debug_money, textvariable=self.money_value_var, width=16).grid(row=0, column=3, sticky="ew", padx=(0, 6))
+        ttk.Button(debug_money, text="Set Money", command=self._set_money).grid(row=0, column=4, sticky="ew", padx=2)
+        ttk.Label(debug_money, text="SP/Skirmish only").grid(row=0, column=5, sticky="w")
+
+        ttk.Checkbutton(actions, text="Polling", variable=self.poll_enabled).grid(row=4, column=0, sticky="w")
+        ttk.Label(actions, text="Interval ms").grid(row=4, column=1, sticky="e")
+        ttk.Entry(actions, textvariable=self.poll_interval_ms, width=8).grid(row=4, column=2, sticky="w")
         ttk.Checkbutton(actions, text="Use Streaming", variable=self.stream_enabled, command=self._toggle_streaming).grid(
-            row=3, column=3, sticky="w"
+            row=4, column=3, sticky="w"
         )
         ttk.Checkbutton(
             actions,
             text="Map Updates",
             variable=self.map_updates_enabled,
             command=self._on_map_updates_toggle,
-        ).grid(row=4, column=0, sticky="w")
-        ttk.Checkbutton(actions, text="Debug Inbound", variable=self.debug_inbound).grid(row=4, column=1, sticky="w")
+        ).grid(row=5, column=0, sticky="w")
+        ttk.Checkbutton(actions, text="Debug Inbound", variable=self.debug_inbound).grid(row=5, column=1, sticky="w")
 
         cmd_row = ttk.LabelFrame(bottom, text="Command Input", padding=8)
         cmd_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -555,6 +568,36 @@ class BotUIApp:
 
     def _queue_radar_van(self) -> None:
         self._send_session_command("Game.QueueRadarVan", {})
+
+    def _set_money(self) -> None:
+        try:
+            player_index = int(self.money_player_index_var.get())
+        except Exception:  # noqa: BLE001
+            self._log("Invalid money player index.")
+            return
+        if player_index < 0:
+            self._log("Money player index must be >= 0.")
+            return
+
+        raw_value = self.money_value_var.get().strip()
+        if not raw_value:
+            self._log("Money value is empty.")
+            return
+        try:
+            money = int(raw_value, 10)
+        except Exception:  # noqa: BLE001
+            self._log("Money value must be an integer.")
+            return
+        if money < 0:
+            self._log("Money value must be >= 0.")
+            return
+
+        max_money = 0xFFFFFFFF
+        if money > max_money:
+            self._log(f"Money value exceeds engine max; clamping to {max_money}.")
+            money = max_money
+
+        self._send_session_command("Game.SetMoney", {"player_index": player_index, "money": money}, quiet=False)
 
     def _find_supply_sources(self) -> None:
         self._send_session_command("Game.FindSupplySources", {}, quiet=False)
