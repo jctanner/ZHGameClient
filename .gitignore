@@ -69,6 +69,7 @@ __pycache__/
 
 ## Local/generated patch artifacts
 /logs/
+/bot-ui/scripts/logs/
 /Patch/private/genonlineserver/crcfiles/GeneralsOnlineZH.exe
 /Patch/public_html/updater/*.gopatch
 /Patch/public_html/v*.zip
