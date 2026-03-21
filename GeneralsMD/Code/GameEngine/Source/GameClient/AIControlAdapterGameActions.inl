@@ -628,6 +628,44 @@
 			return ctx.tooClose;
 		}
 
+		std::string makeBuildExpansionKey(Player* player, const ThingTemplate* buildingTemplate) const
+		{
+			if (player == nullptr || buildingTemplate == nullptr)
+			{
+				return std::string();
+			}
+
+			char playerKey[24];
+			sprintf_s(playerKey, "%d:", player->getPlayerIndex());
+			return std::string(playerKey) + buildingTemplate->getName().str();
+		}
+
+		Real getPreferredBuildExpansionRadius(Player* player, const ThingTemplate* buildingTemplate, Real fallbackRadius) const
+		{
+			const std::string key = makeBuildExpansionKey(player, buildingTemplate);
+			if (key.empty())
+			{
+				return fallbackRadius;
+			}
+
+			const auto it = m_buildExpansionRadiusByKey.find(key);
+			if (it == m_buildExpansionRadiusByKey.end())
+			{
+				return fallbackRadius;
+			}
+			return std::max(fallbackRadius, it->second);
+		}
+
+		void noteBuildExpansionRadius(Player* player, const ThingTemplate* buildingTemplate, Real radius)
+		{
+			const std::string key = makeBuildExpansionKey(player, buildingTemplate);
+			if (key.empty())
+			{
+				return;
+			}
+			m_buildExpansionRadiusByKey[key] = std::max<Real>(0.0f, radius);
+		}
+
 		Object* chooseClosestSupplySource(
 			const std::vector<SupplySourceInfo>& sources,
 			const Coord3D* origin,
@@ -1605,46 +1643,66 @@
 			best.z = 0.0f;
 			const bool spacingBarracks = containsIgnoreCase(buildingTemplate->getName().str(), "barracks");
 			const Real barracksSpacingRadius = 280.0f;
-			const Real structurePadding = 36.0f;
+			const Real preferredRadius = getPreferredBuildExpansionRadius(player, buildingTemplate, baseRadius + 240.0f);
+			const Real ringStep = 24.0f;
+			const Real windowSpan = 720.0f;
+			const Real maxExtraRadius = 12000.0f;
+			Real usedRadius = preferredRadius;
 
-			for (Int pass = 0; pass < 2 && !found; ++pass)
+			for (Int pass = 0; pass < 3 && !found; ++pass)
 			{
 				const bool enforceSpacing = spacingBarracks && pass == 0;
-				for (Real ring = baseRadius; ring <= baseRadius + 600.0f; ring += 24.0f)
+				const Real structurePadding = pass == 0 ? 36.0f : (pass == 1 ? 12.0f : 0.0f);
+				Real searchStart = std::max(baseRadius, preferredRadius - 240.0f);
+				Real searchEnd = std::min(baseRadius + maxExtraRadius, searchStart + windowSpan);
+
+				while (!found && searchStart <= baseRadius + maxExtraRadius)
 				{
-					for (Int i = 0; i < 48; ++i)
+					for (Real ring = searchStart; ring <= searchEnd; ring += ringStep)
 					{
-						const Real theta = static_cast<Real>(i) * (6.28318530717958647692f / 48.0f);
-						Coord3D candidate = *anchorPos;
-						candidate.x += std::cos(theta) * ring;
-						candidate.y += std::sin(theta) * ring;
-						candidate.z = 0.0f;
+						for (Int i = 0; i < 48; ++i)
+						{
+							const Real theta = static_cast<Real>(i) * (6.28318530717958647692f / 48.0f);
+							Coord3D candidate = *anchorPos;
+							candidate.x += std::cos(theta) * ring;
+							candidate.y += std::sin(theta) * ring;
+							candidate.z = 0.0f;
 
-						if (TheBuildAssistant->isLocationLegalToBuild(&candidate, buildingTemplate, placeAngle, legalOpts, worker, nullptr) != LBC_OK)
-						{
-							continue;
-						}
-						if (isBuildLocationTemporarilyReserved(player, &candidate, buildingTemplate))
-						{
-							continue;
-						}
-						if (enforceSpacing && hasNearbyOwnedBarracks(player, &candidate, barracksSpacingRadius))
-						{
-							continue;
-						}
-						if (hasOwnedStructureTooClose(player, &candidate, buildingTemplate, structurePadding))
-						{
-							continue;
-						}
+							if (TheBuildAssistant->isLocationLegalToBuild(&candidate, buildingTemplate, placeAngle, legalOpts, worker, nullptr) != LBC_OK)
+							{
+								continue;
+							}
+							if (isBuildLocationTemporarilyReserved(player, &candidate, buildingTemplate))
+							{
+								continue;
+							}
+							if (enforceSpacing && hasNearbyOwnedBarracks(player, &candidate, barracksSpacingRadius))
+							{
+								continue;
+							}
+							if (hasOwnedStructureTooClose(player, &candidate, buildingTemplate, structurePadding))
+							{
+								continue;
+							}
 
-						const Real distSq = workerPos != nullptr ? distanceSq2D(&candidate, workerPos) : 0.0f;
-						if (!found || distSq < bestDistSq)
-						{
-							found = true;
-							bestDistSq = distSq;
-							best = candidate;
+							const Real distSq = workerPos != nullptr ? distanceSq2D(&candidate, workerPos) : 0.0f;
+							if (!found || distSq < bestDistSq)
+							{
+								found = true;
+								bestDistSq = distSq;
+								best = candidate;
+								usedRadius = ring;
+							}
 						}
 					}
+
+					if (found)
+					{
+						break;
+					}
+
+					searchStart = searchEnd + ringStep;
+					searchEnd = std::min(baseRadius + maxExtraRadius, searchStart + windowSpan);
 				}
 			}
 
@@ -1655,9 +1713,11 @@
 
 			if (!found)
 			{
+				noteBuildExpansionRadius(player, buildingTemplate, std::max(preferredRadius + windowSpan, baseRadius + 720.0f));
 				return false;
 			}
 
+			noteBuildExpansionRadius(player, buildingTemplate, std::max(baseRadius, usedRadius - 96.0f));
 			outLocation = best;
 			outAngle = placeAngle;
 			return true;
