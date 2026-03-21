@@ -274,6 +274,146 @@
 			return ctx.found;
 		}
 
+		static bool matchesUpgradeProducerKind(const ThingTemplate* tt, const std::string& producerKind)
+		{
+			if (tt == nullptr)
+			{
+				return false;
+			}
+			if (producerKind.empty() || producerKind == "any")
+			{
+				return true;
+			}
+
+			const std::string name = tt->getName().str();
+			if (producerKind == "palace")
+			{
+				return containsIgnoreCase(name, "palace");
+			}
+			if (producerKind == "black_market" || producerKind == "blackmarket" || producerKind == "market")
+			{
+				return containsIgnoreCase(name, "black") && containsIgnoreCase(name, "market");
+			}
+			return false;
+		}
+
+		struct UpgradeProducerSearchContext
+		{
+			Object* found;
+			std::string producerKind;
+		};
+
+		static void findUpgradeProducerCallback(Object* obj, void* userData)
+		{
+			if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+			{
+				return;
+			}
+			if (!obj->isKindOf(KINDOF_STRUCTURE))
+			{
+				return;
+			}
+			if (obj->getProductionUpdateInterface() == nullptr)
+			{
+				return;
+			}
+
+			UpgradeProducerSearchContext* ctx = static_cast<UpgradeProducerSearchContext*>(userData);
+			if (ctx->found != nullptr)
+			{
+				return;
+			}
+
+			const ThingTemplate* tt = obj->getTemplate();
+			if (!matchesUpgradeProducerKind(tt, ctx->producerKind))
+			{
+				return;
+			}
+
+			ctx->found = obj;
+		}
+
+		Object* resolveUpgradeProducerFromArgs(Player* player, const nlohmann::json& message, std::string& reason)
+		{
+			if (player == nullptr)
+			{
+				reason = "player_not_found";
+				return nullptr;
+			}
+			if (TheGameLogic == nullptr)
+			{
+				reason = "logic_not_ready";
+				return nullptr;
+			}
+
+			const auto argsIt = message.find("args");
+			std::string producerKind;
+			if (argsIt != message.end() && argsIt->is_object())
+			{
+				producerKind = getJsonString(*argsIt, "producer_kind");
+				const auto producerIdIt = argsIt->find("producer_object_id");
+				if (producerIdIt != argsIt->end() && producerIdIt->is_number_integer())
+				{
+					const Int producerId = producerIdIt->get<Int>();
+					if (producerId <= 0)
+					{
+						reason = "invalid_producer_object_id";
+						return nullptr;
+					}
+
+					Object* producer = TheGameLogic->findObjectByID(static_cast<ObjectID>(producerId));
+					if (producer == nullptr)
+					{
+						reason = "producer_not_found";
+						return nullptr;
+					}
+					if (producer->getControllingPlayer() != player)
+					{
+						reason = "producer_not_owned";
+						return nullptr;
+					}
+					if (producer->getProductionUpdateInterface() == nullptr)
+					{
+						reason = "producer_not_factory";
+						return nullptr;
+					}
+					if (!matchesUpgradeProducerKind(producer->getTemplate(), producerKind))
+					{
+						reason = "producer_kind_mismatch";
+						return nullptr;
+					}
+					return producer;
+				}
+			}
+
+			if (producerKind.empty() || producerKind == "any")
+			{
+				return resolveProducerFromArgs(player, message, false, reason);
+			}
+
+			UpgradeProducerSearchContext ctx = {};
+			ctx.found = nullptr;
+			ctx.producerKind = producerKind;
+			player->iterateObjects(findUpgradeProducerCallback, &ctx);
+			if (ctx.found == nullptr)
+			{
+				if (producerKind == "palace")
+				{
+					reason = "palace_not_found";
+				}
+				else if (producerKind == "black_market" || producerKind == "blackmarket" || producerKind == "market")
+				{
+					reason = "black_market_not_found";
+				}
+				else
+				{
+					reason = "producer_not_found";
+				}
+				return nullptr;
+			}
+			return ctx.found;
+		}
+
 		struct SupplyProducerCollectContext
 		{
 			std::vector<Object*> producers;
@@ -2325,6 +2465,186 @@
 				}
 				return false;
 			}
+			return true;
+		}
+
+		bool executeGameQueueUpgrade(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheUpgradeCenter == nullptr)
+			{
+				reason = "upgrade_center_not_ready";
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			const std::string upgradeName = getJsonString(*argsIt, "upgrade_name");
+			if (upgradeName.empty())
+			{
+				reason = "missing_upgrade_name";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			Object* producer = resolveUpgradeProducerFromArgs(player, message, reason);
+			if (producer == nullptr)
+			{
+				return false;
+			}
+
+			const UpgradeTemplate* upgradeT = TheUpgradeCenter->findUpgrade(upgradeName.c_str());
+			if (upgradeT == nullptr)
+			{
+				reason = "upgrade_not_found";
+				return false;
+			}
+
+			ProductionUpdateInterface* production = producer->getProductionUpdateInterface();
+			if (production == nullptr)
+			{
+				reason = "producer_not_factory";
+				return false;
+			}
+
+			if (!producer->canProduceUpgrade(upgradeT))
+			{
+				reason = "producer_cannot_make_upgrade";
+				return false;
+			}
+
+			const CanMakeType canQueue = production->canQueueUpgrade(upgradeT);
+			if (canQueue != CANMAKE_OK)
+			{
+				switch (canQueue)
+				{
+				case CANMAKE_QUEUE_FULL:
+					reason = "queue_full";
+					break;
+				default:
+					reason = "cannot_queue_upgrade";
+					break;
+				}
+				return false;
+			}
+
+			if (upgradeT->getUpgradeType() == UPGRADE_TYPE_PLAYER)
+			{
+				if (player->hasUpgradeComplete(upgradeT))
+				{
+					reason = "upgrade_already_complete";
+					return false;
+				}
+				if (player->hasUpgradeInProduction(upgradeT))
+				{
+					reason = "upgrade_already_in_production";
+					return false;
+				}
+				if (TheUpgradeCenter->canAffordUpgrade(player, upgradeT, FALSE) == FALSE)
+				{
+					reason = "no_money";
+					return false;
+				}
+			}
+			else
+			{
+				if (producer->hasUpgrade(upgradeT))
+				{
+					reason = "upgrade_already_complete";
+					return false;
+				}
+				if (production->isUpgradeInQueue(upgradeT))
+				{
+					reason = "upgrade_already_in_queue";
+					return false;
+				}
+				if (!producer->affectedByUpgrade(upgradeT))
+				{
+					reason = "producer_cannot_receive_upgrade";
+					return false;
+				}
+				if (TheUpgradeCenter->canAffordUpgrade(player, upgradeT, FALSE) == FALSE)
+				{
+					reason = "no_money";
+					return false;
+				}
+			}
+
+			const ObjectID producerId = producer->getID();
+			return executeScopedSelectionCommand(player, std::vector<ObjectID>(1, producerId), reason, [&]() -> bool
+			{
+				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_QUEUE_UPGRADE);
+				if (msg == nullptr)
+				{
+					reason = "message_stream_not_ready";
+					return false;
+				}
+				msg->appendObjectIDArgument(producerId);
+				msg->appendIntegerArgument(static_cast<Int>(upgradeT->getUpgradeNameKey()));
+				return true;
+			});
+		}
+
+		bool executeGamePurchaseScience(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheScienceStore == nullptr)
+			{
+				reason = "science_store_not_ready";
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			const std::string scienceName = getJsonString(*argsIt, "science_name");
+			if (scienceName.empty())
+			{
+				reason = "missing_science_name";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+			if (!canIssuePlayerScopedMessage(player, reason))
+			{
+				return false;
+			}
+
+			const ScienceType science = TheScienceStore->getScienceFromInternalName(AsciiString(scienceName.c_str()));
+			if (science == SCIENCE_INVALID)
+			{
+				reason = "science_not_found";
+				return false;
+			}
+			if (!player->isCapableOfPurchasingScience(science))
+			{
+				reason = "science_not_purchasable";
+				return false;
+			}
+
+			GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_PURCHASE_SCIENCE);
+			if (msg == nullptr)
+			{
+				reason = "message_stream_not_ready";
+				return false;
+			}
+			msg->appendIntegerArgument(static_cast<Int>(science));
 			return true;
 		}
 

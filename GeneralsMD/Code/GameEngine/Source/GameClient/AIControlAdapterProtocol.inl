@@ -195,6 +195,8 @@
 						"chat_send",
 						"game_query",
 						"game_queue_unit",
+						"game_queue_upgrade",
+						"game_purchase_science",
 						"game_queue_soldiers_all_barracks",
 						"game_queue_rpg_all_barracks",
 						"game_queue_quads_all_war_factories",
@@ -334,6 +336,32 @@
 			{
 				std::string reason;
 				if (!executeGameQueueUnit(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.QueueUpgrade")
+			{
+				std::string reason;
+				if (!executeGameQueueUpgrade(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.PurchaseScience")
+			{
+				std::string reason;
+				if (!executeGamePurchaseScience(message, reason))
 				{
 					sendActionAck(requestId, false, "invalid_state", reason.c_str());
 					return;
