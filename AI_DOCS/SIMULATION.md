@@ -53,7 +53,13 @@ For AI control adapter commands that modify cash:
 Safe to add:
 
 1. `Game.GiveMoney` (single-player only)
-2. `Game.SetMoney` (single-player only)
+2. `Game.SetMoney` (single-player/skirmish debug only)
+
+Recommended debug behavior for `Game.SetMoney`:
+
+1. Allow in single-player and skirmish debug workflows.
+2. Reject network multiplayer with `cash_mutation_not_allowed_in_multiplayer`.
+3. Implement by directly replacing the player's current `Money` total inside the local simulation.
 
 Not safe without additional networked design:
 

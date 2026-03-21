@@ -1789,6 +1789,105 @@
 			return value;
 		}
 
+		static bool parseUnsignedMoneyArg(const nlohmann::json& message, UnsignedInt& outMoney, std::string& reason)
+		{
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			const auto moneyIt = argsIt->find("money");
+			if (moneyIt == argsIt->end())
+			{
+				reason = "missing_money";
+				return false;
+			}
+
+			unsigned long long rawMoney = 0ull;
+			if (moneyIt->is_number_unsigned())
+			{
+				rawMoney = moneyIt->get<unsigned long long>();
+			}
+			else if (moneyIt->is_number_integer())
+			{
+				const long long signedMoney = moneyIt->get<long long>();
+				if (signedMoney < 0ll)
+				{
+					reason = "invalid_money";
+					return false;
+				}
+				rawMoney = static_cast<unsigned long long>(signedMoney);
+			}
+			else
+			{
+				reason = "invalid_money";
+				return false;
+			}
+
+			const unsigned long long kMaxMoney = 0xFFFFFFFFull;
+			if (rawMoney > kMaxMoney)
+			{
+				outMoney = static_cast<UnsignedInt>(kMaxMoney);
+				return true;
+			}
+
+			outMoney = static_cast<UnsignedInt>(rawMoney);
+			return true;
+		}
+
+		bool executeGameSetMoney(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheGameLogic == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+
+			if (TheGameLogic->isInReplayGame())
+			{
+				reason = "replay_not_supported";
+				return false;
+			}
+
+			if (TheGameLogic->isInMultiplayerGame() && !TheGameLogic->isInSkirmishGame())
+			{
+				reason = "cash_mutation_not_allowed_in_multiplayer";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			Money* wallet = player->getMoney();
+			if (wallet == nullptr)
+			{
+				reason = "money_not_available";
+				return false;
+			}
+
+			UnsignedInt targetMoney = 0u;
+			if (!parseUnsignedMoneyArg(message, targetMoney, reason))
+			{
+				return false;
+			}
+
+			const UnsignedInt currentMoney = wallet->countMoney();
+			if (currentMoney > 0u)
+			{
+				wallet->withdraw(currentMoney, FALSE);
+			}
+			if (targetMoney > 0u)
+			{
+				wallet->deposit(targetMoney, FALSE, FALSE);
+			}
+			return true;
+		}
+
 		template <typename TSingleAttempt>
 		bool executeRepeatedBuildAttempts(const nlohmann::json& message, std::string& reason, TSingleAttempt&& singleAttempt)
 		{

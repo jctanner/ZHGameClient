@@ -100,25 +100,26 @@ Supported `cmd` values (v1):
 14. `Game.Query`
 15. `Game.QueueUnit`
 16. `Game.BuildWorker`
-17. `Game.QueueSoldiersAllBarracks`
-18. `Game.QueueRpgTroopersAllBarracks`
-19. `Game.QueueQuadsAllWarFactories`
-20. `Game.QueueScorpionsAllWarFactories`
-21. `Game.QueueRadarVansAllWarFactories`
-22. `Game.QueueRadarVan`
-23. `Game.FindSupplySources`
-24. `Game.FindBuildLocationNearSupply`
-25. `Game.DozerConstruct`
-26. `Game.BuildSupplyStashAuto`
-27. `Game.BuildSupplyStashSmart`
-28. `Game.BuildBarracksSmart`
-29. `Game.BuildCommandCenterSmart`
-30. `Game.AttackMove`
-31. `Game.AttackMove.RaidSmart`
-32. `Game.Camera.Set`
-33. `Game.Camera.LookAt`
-34. `Game.Camera.SetZoomLimited`
-35. `Game.Camera.Get`
+17. `Game.SetMoney`
+18. `Game.QueueSoldiersAllBarracks`
+19. `Game.QueueRpgTroopersAllBarracks`
+20. `Game.QueueQuadsAllWarFactories`
+21. `Game.QueueScorpionsAllWarFactories`
+22. `Game.QueueRadarVansAllWarFactories`
+23. `Game.QueueRadarVan`
+24. `Game.FindSupplySources`
+25. `Game.FindBuildLocationNearSupply`
+26. `Game.DozerConstruct`
+27. `Game.BuildSupplyStashAuto`
+28. `Game.BuildSupplyStashSmart`
+29. `Game.BuildBarracksSmart`
+30. `Game.BuildCommandCenterSmart`
+31. `Game.AttackMove`
+32. `Game.AttackMove.RaidSmart`
+33. `Game.Camera.Set`
+34. `Game.Camera.LookAt`
+35. `Game.Camera.SetZoomLimited`
+36. `Game.Camera.Get`
 
 `Lobby.Join` args:
 
@@ -254,6 +255,18 @@ Supported `cmd` values (v1):
 
 1. Same args as `Game.QueueUnit`
 2. If `unit_template` is omitted, adapter infers faction worker/dozer template.
+
+`Game.SetMoney` args:
+
+1. `player_index` (optional int, default local player)
+2. `money` (required integer, clamped to the engine `UnsignedInt` max)
+
+`Game.SetMoney` behavior:
+
+1. Directly mutates the selected player's current `Money` total.
+2. Intended for debugging only.
+3. Rejects multiplayer sessions with `invalid_state` + `cash_mutation_not_allowed_in_multiplayer`.
+4. Safe target modes are single-player and skirmish.
 
 `Game.QueueSoldiersAllBarracks` args:
 
