@@ -12,6 +12,83 @@
 			return h.find(n) != std::string::npos;
 		}
 
+		static std::string trimAscii(const std::string& value)
+		{
+			std::string::size_type start = 0;
+			while (start < value.size() && std::isspace(static_cast<unsigned char>(value[start])))
+			{
+				++start;
+			}
+			std::string::size_type end = value.size();
+			while (end > start && std::isspace(static_cast<unsigned char>(value[end - 1])))
+			{
+				--end;
+			}
+			return value.substr(start, end - start);
+		}
+
+		static std::string canonicalizeUpgradeName(const std::string& rawName)
+		{
+			const std::string trimmed = trimAscii(rawName);
+			if (trimmed.empty())
+			{
+				return trimmed;
+			}
+
+			std::string key = trimmed;
+			std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+			static const std::unordered_map<std::string, std::string> aliases = {
+				{"upgrade_glaanthraxgamma", "Chem_Upgrade_GLAAnthraxGamma"},
+				{"upgrade_glaquadcannonsnipe", "GC_Slth_Upgrade_GLAQuadCannonSnipe"},
+				{"upgrade_glaquadcannonsnipegun", "GC_Slth_Upgrade_GLAQuadCannonSnipe"},
+				{"upgrade_glademotraphighexplosivebomb", "Demo_Upgrade_GLADemoTrapHighExplosiveBomb"},
+				{"upgrade_glademotraphigh explosivebomb", "Demo_Upgrade_GLADemoTrapHighExplosiveBomb"}
+			};
+
+			const std::unordered_map<std::string, std::string>::const_iterator it = aliases.find(key);
+			if (it != aliases.end())
+			{
+				return it->second;
+			}
+			return trimmed;
+		}
+
+		static std::string canonicalizeScienceName(const std::string& rawName)
+		{
+			const std::string trimmed = trimAscii(rawName);
+			if (trimmed.empty())
+			{
+				return trimmed;
+			}
+
+			std::string key = trimmed;
+			std::transform(key.begin(), key.end(), key.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+			static const std::unordered_map<std::string, std::string> aliases = {
+				{"science_glacashbounty1", "SCIENCE_CashBounty1"},
+				{"science_glacashbounty2", "SCIENCE_CashBounty2"},
+				{"science_glacashbounty3", "SCIENCE_CashBounty3"},
+				{"science_glarebelambush1", "SCIENCE_RebelAmbush1"},
+				{"science_glarebelambush2", "SCIENCE_RebelAmbush2"},
+				{"science_glarebelambush3", "SCIENCE_RebelAmbush3"},
+				{"science_glasneakattack", "SCIENCE_SneakAttack"},
+				{"science_glascudlauncher", "SCIENCE_ScudLauncher"},
+				{"science_glamaraudertank", "SCIENCE_MarauderTank"},
+				{"science_glatechnicaltraining", "SCIENCE_TechnicalTraining"},
+				{"science_glahijacker", "SCIENCE_Hijacker"},
+				{"science_glaanthraxbomb", "SCIENCE_AnthraxBomb"},
+				{"science_glagpsscrambler", "SCIENCE_GPSScrambler"}
+			};
+
+			const std::unordered_map<std::string, std::string>::const_iterator it = aliases.find(key);
+			if (it != aliases.end())
+			{
+				return it->second;
+			}
+			return trimmed;
+		}
+
 		static std::string inferWorkerTemplateForPlayer(const Player* player)
 		{
 			if (player == nullptr)
@@ -331,6 +408,73 @@
 			}
 
 			ctx->found = obj;
+		}
+
+		struct UpgradeCapableProducerSearchContext
+		{
+			Object* found;
+			std::string producerKind;
+			const UpgradeTemplate* upgrade;
+		};
+
+		static void findUpgradeCapableProducerCallback(Object* obj, void* userData)
+		{
+			if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+			{
+				return;
+			}
+			if (!obj->isKindOf(KINDOF_STRUCTURE))
+			{
+				return;
+			}
+
+			UpgradeCapableProducerSearchContext* ctx = static_cast<UpgradeCapableProducerSearchContext*>(userData);
+			if (ctx->found != nullptr)
+			{
+				return;
+			}
+			if (!matchesUpgradeProducerKind(obj->getTemplate(), ctx->producerKind))
+			{
+				return;
+			}
+
+			ProductionUpdateInterface* production = obj->getProductionUpdateInterface();
+			if (production == nullptr)
+			{
+				return;
+			}
+			if (ctx->upgrade == nullptr || !obj->canProduceUpgrade(ctx->upgrade))
+			{
+				return;
+			}
+
+			ctx->found = obj;
+		}
+
+		static bool messageHasExplicitProducerObjectId(const nlohmann::json& message)
+		{
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				return false;
+			}
+			const auto producerIdIt = argsIt->find("producer_object_id");
+			return producerIdIt != argsIt->end() && producerIdIt->is_number_integer() && producerIdIt->get<Int>() > 0;
+		}
+
+		Object* resolveUpgradeCapableProducer(Player* player, const std::string& producerKind, const UpgradeTemplate* upgradeT)
+		{
+			if (player == nullptr || upgradeT == nullptr)
+			{
+				return nullptr;
+			}
+
+			UpgradeCapableProducerSearchContext ctx = {};
+			ctx.found = nullptr;
+			ctx.producerKind = producerKind;
+			ctx.upgrade = upgradeT;
+			player->iterateObjects(findUpgradeCapableProducerCallback, &ctx);
+			return ctx.found;
 		}
 
 		Object* resolveUpgradeProducerFromArgs(Player* player, const nlohmann::json& message, std::string& reason)
@@ -2483,7 +2627,7 @@
 				return false;
 			}
 
-			const std::string upgradeName = getJsonString(*argsIt, "upgrade_name");
+			const std::string upgradeName = canonicalizeUpgradeName(getJsonString(*argsIt, "upgrade_name"));
 			if (upgradeName.empty())
 			{
 				reason = "missing_upgrade_name";
@@ -2496,17 +2640,31 @@
 				return false;
 			}
 
+			const UpgradeTemplate* upgradeT = TheUpgradeCenter->findUpgrade(upgradeName.c_str());
+			if (upgradeT == nullptr)
+			{
+				reason = "upgrade_not_found";
+				return false;
+			}
+
 			Object* producer = resolveUpgradeProducerFromArgs(player, message, reason);
 			if (producer == nullptr)
 			{
 				return false;
 			}
 
-			const UpgradeTemplate* upgradeT = TheUpgradeCenter->findUpgrade(upgradeName.c_str());
-			if (upgradeT == nullptr)
+			std::string producerKind = "any";
+			if (argsIt->is_object())
 			{
-				reason = "upgrade_not_found";
-				return false;
+				producerKind = getJsonString(*argsIt, "producer_kind");
+			}
+			if (!messageHasExplicitProducerObjectId(message) && !producer->canProduceUpgrade(upgradeT))
+			{
+				Object* capableProducer = resolveUpgradeCapableProducer(player, producerKind, upgradeT);
+				if (capableProducer != nullptr)
+				{
+					producer = capableProducer;
+				}
 			}
 
 			ProductionUpdateInterface* production = producer->getProductionUpdateInterface();
@@ -2609,7 +2767,7 @@
 				return false;
 			}
 
-			const std::string scienceName = getJsonString(*argsIt, "science_name");
+			const std::string scienceName = canonicalizeScienceName(getJsonString(*argsIt, "science_name"));
 			if (scienceName.empty())
 			{
 				reason = "missing_science_name";
