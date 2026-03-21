@@ -23,32 +23,46 @@ from state.store import UIStore
 from uilog.ui_log import UILog
 
 GLA_SCIENCE_SUGGESTIONS = (
-    "SCIENCE_GLAAnthraxBeta",
-    "SCIENCE_GLAAnthraxGamma",
-    "SCIENCE_GLACashBounty1",
-    "SCIENCE_GLACashBounty2",
-    "SCIENCE_GLACashBounty3",
-    "SCIENCE_GLADemoTrap",
-    "SCIENCE_GLARebelAmbush1",
-    "SCIENCE_GLARebelAmbush2",
-    "SCIENCE_GLARebelAmbush3",
-    "SCIENCE_GLAScudStorm",
-    "SCIENCE_GLASneakAttack",
+    "SCIENCE_ScudLauncher",
+    "SCIENCE_MarauderTank",
+    "SCIENCE_TechnicalTraining",
+    "SCIENCE_Hijacker",
+    "SCIENCE_RebelAmbush1",
+    "SCIENCE_RebelAmbush2",
+    "SCIENCE_RebelAmbush3",
+    "SCIENCE_CashBounty1",
+    "SCIENCE_CashBounty2",
+    "SCIENCE_CashBounty3",
+    "SCIENCE_EmergencyRepair1",
+    "SCIENCE_EmergencyRepair2",
+    "SCIENCE_EmergencyRepair3",
+    "SCIENCE_AnthraxBomb",
+    "SCIENCE_SneakAttack",
+    "SCIENCE_GPSScrambler",
+    "Slth_SCIENCE_GPSScrambler",
+    "Early_SCIENCE_EmergencyRepair1",
+    "Early_SCIENCE_EmergencyRepair2",
+    "Early_SCIENCE_EmergencyRepair3",
 )
 
 GLA_PALACE_UPGRADE_SUGGESTIONS = (
+    "Upgrade_GLAFortifiedStructure",
+    "Upgrade_GLAArmTheMob",
     "Upgrade_GLAAnthraxBeta",
-    "Upgrade_GLAAnthraxGamma",
-    "Upgrade_GLAAPBullets",
-    "Upgrade_GLABuggyAmmo",
+    "Upgrade_GLAToxinShells",
+    "Chem_Upgrade_GLAAnthraxGamma",
+    "GC_Slth_Upgrade_GLAQuadCannonSnipe",
+    "Demo_Upgrade_GLADemoTrapHighExplosiveBomb",
 )
 
 GLA_BLACK_MARKET_UPGRADE_SUGGESTIONS = (
-    "Upgrade_GLAFortifiedStructure",
+    "Upgrade_GLAAPBullets",
+    "Upgrade_GLAAPRockets",
+    "Upgrade_GLABuggyAmmo",
     "Upgrade_GLAJunkRepair",
-    "Upgrade_GLAScorpionRocket",
-    "Upgrade_GLAToxinShells",
+    "Upgrade_GLARadarVanScan",
     "Upgrade_GLAWorkerShoes",
+    "Upgrade_GLACamoNetting",
 )
 
 
