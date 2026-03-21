@@ -41,15 +41,18 @@ class MapRenderer:
             active_map[(obj.owner_player_index, obj.object_id)] = obj
         for obj in enemies:
             active_map[(obj.owner_player_index, obj.object_id)] = obj
+        for obj in store.grid_objects.values():
+            active_map[(obj.owner_player_index, obj.object_id)] = obj
         active_objects = list(active_map.values())
         bounds = self._resolve_bounds(store, active_objects, [], points + supply_sources, player_positions)
         self._draw_map_bounds(width, height, bounds, store.map_width, store.map_height)
+        self._draw_grid_overlay(store, width, height, bounds)
         self._draw_objects(active_objects, width, height, bounds, store, friendly=True)
         self._draw_supply_sources(supply_sources, width, height, bounds)
         self._draw_interesting_points(points, width, height, bounds)
         self._draw_player_positions(player_positions, width, height, bounds, store)
         self._draw_counts(active_objects, width)
-        if not active_objects and not points and not supply_sources and not player_positions:
+        if not active_objects and not points and not supply_sources and not player_positions and not store.grid_cells:
             self.canvas.create_text(
                 width * 0.5,
                 height * 0.5,
@@ -57,6 +60,50 @@ class MapRenderer:
                 fill="#7f96a1",
                 font=("Segoe UI", 11),
             )
+
+    def _draw_grid_overlay(
+        self,
+        store: UIStore,
+        canvas_w: int,
+        canvas_h: int,
+        bounds: tuple[float, float, float, float],
+    ) -> None:
+        if store.grid_cols <= 0 or store.grid_rows <= 0:
+            return
+
+        for cell in store.grid_cells.values():
+            x0, y0 = self._world_to_canvas(cell.min_x, cell.min_y, canvas_w, canvas_h, bounds)
+            x1, y1 = self._world_to_canvas(cell.max_x, cell.max_y, canvas_w, canvas_h, bounds)
+            left = min(x0, x1)
+            right = max(x0, x1)
+            top = min(y0, y1)
+            bottom = max(y0, y1)
+
+            outline = "#324752"
+            fill = ""
+            if cell.dominant_player_index is not None:
+                player = store.players.get(cell.dominant_player_index)
+                base = self._name_to_hex(player.color) if player is not None else None
+                if base is not None:
+                    outline = base
+                    fill = self._darken_hex(base, 0.18)
+
+            width = 1
+            if store.selected_grid_cell and cell.cell == store.selected_grid_cell:
+                outline = "#ffe57a"
+                fill = self._darken_hex("#ffe57a", 0.35)
+                width = 2
+
+            self.canvas.create_rectangle(left, top, right, bottom, outline=outline, fill=fill, width=width)
+            if cell.objects_total > 0 and (right - left) >= 18 and (bottom - top) >= 12:
+                self.canvas.create_text(
+                    left + 3,
+                    top + 2,
+                    text=cell.cell,
+                    anchor="nw",
+                    fill="#9db1bb",
+                    font=("Segoe UI", 7),
+                )
 
     def _draw_map_bounds(
         self,
@@ -247,7 +294,12 @@ class MapRenderer:
         points: list[tuple[float, float]],
         player_positions: list[tuple[int, tuple[float, float] | None]],
     ) -> tuple[float, float, float, float]:
-        world_bounds = (0.0, 0.0, max(store.map_width, 1.0), max(store.map_height, 1.0))
+        world_bounds = (
+            store.map_min_x,
+            store.map_min_y,
+            store.map_min_x + max(store.map_width, 1.0),
+            store.map_min_y + max(store.map_height, 1.0),
+        )
         samples: list[tuple[float, float]] = []
         for obj in owned:
             samples.append((obj.x, obj.y))

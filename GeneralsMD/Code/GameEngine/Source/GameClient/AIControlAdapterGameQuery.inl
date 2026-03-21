@@ -767,6 +767,462 @@
 			};
 		}
 
+		struct GridConfig
+		{
+			Int cols;
+			Int rows;
+			Real minX;
+			Real minY;
+			Real maxX;
+			Real maxY;
+			Real cellWidth;
+			Real cellHeight;
+		};
+
+		static Int clampGridDimension(Int value)
+		{
+			if (value < 1)
+			{
+				return 1;
+			}
+			if (value > 128)
+			{
+				return 128;
+			}
+			return value;
+		}
+
+		static std::string makeGridColumnLabel(Int colIndex)
+		{
+			if (colIndex < 0)
+			{
+				return std::string();
+			}
+
+			std::string out;
+			Int n = colIndex;
+			do
+			{
+				const Int rem = n % 26;
+				out.insert(out.begin(), static_cast<char>('A' + rem));
+				n = (n / 26) - 1;
+			} while (n >= 0);
+			return out;
+		}
+
+		static std::string makeGridCellLabel(Int colIndex, Int rowIndex)
+		{
+			if (colIndex < 0 || rowIndex < 0)
+			{
+				return std::string();
+			}
+			char buffer[32];
+			sprintf_s(buffer, "%s%d", makeGridColumnLabel(colIndex).c_str(), rowIndex + 1);
+			return std::string(buffer);
+		}
+
+		static bool parseGridCellLabel(const std::string& rawLabel, Int& outColIndex, Int& outRowIndex)
+		{
+			outColIndex = -1;
+			outRowIndex = -1;
+
+			std::string label;
+			label.reserve(rawLabel.size());
+			for (std::size_t i = 0; i < rawLabel.size(); ++i)
+			{
+				const char ch = rawLabel[i];
+				if (!std::isspace(static_cast<unsigned char>(ch)))
+				{
+					label.push_back(static_cast<char>(std::toupper(static_cast<unsigned char>(ch))));
+				}
+			}
+			if (label.empty())
+			{
+				return false;
+			}
+
+			std::size_t split = 0;
+			while (split < label.size() && std::isalpha(static_cast<unsigned char>(label[split])))
+			{
+				++split;
+			}
+			if (split == 0 || split >= label.size())
+			{
+				return false;
+			}
+
+			Int colIndex = 0;
+			for (std::size_t i = 0; i < split; ++i)
+			{
+				colIndex = (colIndex * 26) + (label[i] - 'A' + 1);
+			}
+			colIndex -= 1;
+
+			Int rowNumber = 0;
+			for (std::size_t i = split; i < label.size(); ++i)
+			{
+				if (!std::isdigit(static_cast<unsigned char>(label[i])))
+				{
+					return false;
+				}
+				rowNumber = (rowNumber * 10) + (label[i] - '0');
+			}
+			if (rowNumber <= 0)
+			{
+				return false;
+			}
+
+			outColIndex = colIndex;
+			outRowIndex = rowNumber - 1;
+			return true;
+		}
+
+		GridConfig resolveGridConfig(const nlohmann::json* args) const
+		{
+			GridConfig cfg = {};
+			cfg.cols = 32;
+			cfg.rows = 32;
+			cfg.minX = 0.0f;
+			cfg.minY = 0.0f;
+			cfg.maxX = 1024.0f;
+			cfg.maxY = 1024.0f;
+
+			if (args != nullptr && args->is_object())
+			{
+				const auto colsIt = args->find("grid_cols");
+				if (colsIt != args->end() && colsIt->is_number_integer())
+				{
+					cfg.cols = clampGridDimension(colsIt->get<Int>());
+				}
+				const auto rowsIt = args->find("grid_rows");
+				if (rowsIt != args->end() && rowsIt->is_number_integer())
+				{
+					cfg.rows = clampGridDimension(rowsIt->get<Int>());
+				}
+			}
+
+			if (TheTerrainLogic != nullptr)
+			{
+				Region3D extent = {};
+				TheTerrainLogic->getExtent(&extent);
+				cfg.minX = extent.lo.x;
+				cfg.minY = extent.lo.y;
+				cfg.maxX = extent.hi.x;
+				cfg.maxY = extent.hi.y;
+			}
+
+			if (!(cfg.maxX > cfg.minX))
+			{
+				cfg.maxX = cfg.minX + 1.0f;
+			}
+			if (!(cfg.maxY > cfg.minY))
+			{
+				cfg.maxY = cfg.minY + 1.0f;
+			}
+
+			cfg.cellWidth = (cfg.maxX - cfg.minX) / static_cast<Real>(cfg.cols);
+			cfg.cellHeight = (cfg.maxY - cfg.minY) / static_cast<Real>(cfg.rows);
+			if (!(cfg.cellWidth > 0.0f))
+			{
+				cfg.cellWidth = 1.0f;
+			}
+			if (!(cfg.cellHeight > 0.0f))
+			{
+				cfg.cellHeight = 1.0f;
+			}
+			return cfg;
+		}
+
+		bool tryGetGridCellForPosition(const GridConfig& cfg, const Coord3D* pos, Int& outCol, Int& outRow) const
+		{
+			outCol = -1;
+			outRow = -1;
+			if (pos == nullptr)
+			{
+				return false;
+			}
+
+			const Real clampedX = std::max(cfg.minX, std::min(pos->x, cfg.maxX - 0.001f));
+			const Real clampedY = std::max(cfg.minY, std::min(pos->y, cfg.maxY - 0.001f));
+			const Real normX = (clampedX - cfg.minX) / std::max(cfg.maxX - cfg.minX, 1.0f);
+			const Real normY = (clampedY - cfg.minY) / std::max(cfg.maxY - cfg.minY, 1.0f);
+			outCol = std::min<Int>(cfg.cols - 1, std::max<Int>(0, static_cast<Int>(normX * cfg.cols)));
+			outRow = std::min<Int>(cfg.rows - 1, std::max<Int>(0, static_cast<Int>(normY * cfg.rows)));
+			return true;
+		}
+
+		nlohmann::json buildGridCellBoundsJson(const GridConfig& cfg, Int col, Int row) const
+		{
+			const Real minX = cfg.minX + (cfg.cellWidth * static_cast<Real>(col));
+			const Real minY = cfg.minY + (cfg.cellHeight * static_cast<Real>(row));
+			const Real maxX = minX + cfg.cellWidth;
+			const Real maxY = minY + cfg.cellHeight;
+			return nlohmann::json::object({
+				{"min_x", minX},
+				{"min_y", minY},
+				{"max_x", maxX},
+				{"max_y", maxY},
+				{"center_x", minX + (cfg.cellWidth * 0.5f)},
+				{"center_y", minY + (cfg.cellHeight * 0.5f)}
+			});
+		}
+
+		struct GridCellAggregate
+		{
+			Int col;
+			Int row;
+			Int units;
+			Int buildings;
+			std::map<Int, Int> totalsByPlayer;
+			std::map<Int, Int> unitsByPlayer;
+			std::map<Int, Int> buildingsByPlayer;
+			GridCellAggregate() : col(0), row(0), units(0), buildings(0) {}
+		};
+
+		struct GridSummaryCollectContext
+		{
+			const AIControlAdapterState* self;
+			const GridConfig* cfg;
+			Int playerIndex;
+			std::map<std::pair<Int, Int>, GridCellAggregate>* cells;
+		};
+
+		static void collectGridSummaryObjectCallback(Object* obj, void* userData)
+		{
+			if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+			{
+				return;
+			}
+
+			GridSummaryCollectContext* ctx = static_cast<GridSummaryCollectContext*>(userData);
+			Int col = -1;
+			Int row = -1;
+			if (!ctx->self->tryGetGridCellForPosition(*ctx->cfg, obj->getPosition(), col, row))
+			{
+				return;
+			}
+
+			const std::pair<Int, Int> key(col, row);
+			GridCellAggregate& cell = (*ctx->cells)[key];
+			cell.col = col;
+			cell.row = row;
+			cell.totalsByPlayer[ctx->playerIndex] += 1;
+			if (obj->isKindOf(KINDOF_STRUCTURE))
+			{
+				cell.buildings += 1;
+				cell.buildingsByPlayer[ctx->playerIndex] += 1;
+			}
+			else
+			{
+				cell.units += 1;
+				cell.unitsByPlayer[ctx->playerIndex] += 1;
+			}
+		}
+
+		struct GridObjectsCollectContext
+		{
+			const AIControlAdapterState* self;
+			const GridConfig* cfg;
+			Int playerIndex;
+			Int targetCol;
+			Int targetRow;
+			std::size_t maxObjects;
+			nlohmann::json* objects;
+			Int* totalObjects;
+			Int* units;
+			Int* buildings;
+		};
+
+		static void collectGridObjectsCallback(Object* obj, void* userData)
+		{
+			if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+			{
+				return;
+			}
+
+			GridObjectsCollectContext* ctx = static_cast<GridObjectsCollectContext*>(userData);
+			Int col = -1;
+			Int row = -1;
+			if (!ctx->self->tryGetGridCellForPosition(*ctx->cfg, obj->getPosition(), col, row))
+			{
+				return;
+			}
+			if (col != ctx->targetCol || row != ctx->targetRow)
+			{
+				return;
+			}
+
+			++(*ctx->totalObjects);
+			if (obj->isKindOf(KINDOF_STRUCTURE))
+			{
+				++(*ctx->buildings);
+			}
+			else
+			{
+				++(*ctx->units);
+			}
+
+			if (ctx->objects->size() >= ctx->maxObjects)
+			{
+				return;
+			}
+
+			nlohmann::json rowJson = ctx->self->buildObjectSummaryRow(obj, true);
+			rowJson["player_index"] = ctx->playerIndex;
+			rowJson["cell"] = makeGridCellLabel(ctx->targetCol, ctx->targetRow);
+			ctx->objects->push_back(rowJson);
+		}
+
+		nlohmann::json buildGridSummary(const GridConfig& cfg) const
+		{
+			std::map<std::pair<Int, Int>, GridCellAggregate> cells;
+			if (ThePlayerList != nullptr)
+			{
+				const Player* neutralPlayer = ThePlayerList->getNeutralPlayer();
+				const Int count = ThePlayerList->getPlayerCount();
+				for (Int i = 0; i < count; ++i)
+				{
+					Player* player = ThePlayerList->getNthPlayer(i);
+					if (player == nullptr || player == neutralPlayer || isCivilianLikePlayer(player))
+					{
+						continue;
+					}
+
+					GridSummaryCollectContext ctx = { this, &cfg, player->getPlayerIndex(), &cells };
+					player->iterateObjects(collectGridSummaryObjectCallback, &ctx);
+				}
+			}
+
+			nlohmann::json rows = nlohmann::json::array();
+			for (std::map<std::pair<Int, Int>, GridCellAggregate>::const_iterator it = cells.begin(); it != cells.end(); ++it)
+			{
+				const GridCellAggregate& cell = it->second;
+				Int dominantPlayerIndex = -1;
+				Int dominantCount = 0;
+				nlohmann::json playerCounts = nlohmann::json::object();
+				for (std::map<Int, Int>::const_iterator pit = cell.totalsByPlayer.begin(); pit != cell.totalsByPlayer.end(); ++pit)
+				{
+					const Int playerIndex = pit->first;
+					const Int total = pit->second;
+					if (total > dominantCount)
+					{
+						dominantCount = total;
+						dominantPlayerIndex = playerIndex;
+					}
+
+					nlohmann::json p = nlohmann::json::object();
+					p["total"] = total;
+					p["units"] = 0;
+					p["buildings"] = 0;
+					const std::map<Int, Int>::const_iterator unitIt = cell.unitsByPlayer.find(playerIndex);
+					if (unitIt != cell.unitsByPlayer.end())
+					{
+						p["units"] = unitIt->second;
+					}
+					const std::map<Int, Int>::const_iterator buildingIt = cell.buildingsByPlayer.find(playerIndex);
+					if (buildingIt != cell.buildingsByPlayer.end())
+					{
+						p["buildings"] = buildingIt->second;
+					}
+					playerCounts[std::to_string(playerIndex)] = p;
+				}
+
+				nlohmann::json row = nlohmann::json::object({
+					{"cell", makeGridCellLabel(cell.col, cell.row)},
+					{"col", cell.col},
+					{"row", cell.row},
+					{"units", cell.units},
+					{"buildings", cell.buildings},
+					{"objects_total", cell.units + cell.buildings},
+					{"dominant_player_index", dominantPlayerIndex},
+					{"player_counts", playerCounts}
+				});
+				row["bounds"] = buildGridCellBoundsJson(cfg, cell.col, cell.row);
+				rows.push_back(row);
+			}
+
+			return nlohmann::json::object({
+				{"path", "game.grid"},
+				{"grid_cols", cfg.cols},
+				{"grid_rows", cfg.rows},
+				{"map", nlohmann::json::object({
+					{"width", cfg.maxX - cfg.minX},
+					{"height", cfg.maxY - cfg.minY},
+					{"min_x", cfg.minX},
+					{"min_y", cfg.minY},
+					{"max_x", cfg.maxX},
+					{"max_y", cfg.maxY}
+				})},
+				{"cells", rows},
+				{"occupied_cell_count", rows.size()}
+			});
+		}
+
+		nlohmann::json buildGridObjectsSummary(const GridConfig& cfg, const std::vector<std::pair<Int, Int>>& requestedCells, std::size_t maxObjectsPerCell) const
+		{
+			nlohmann::json cells = nlohmann::json::array();
+			std::set<std::pair<Int, Int>> requestedSet(requestedCells.begin(), requestedCells.end());
+
+			for (std::vector<std::pair<Int, Int>>::const_iterator reqIt = requestedCells.begin(); reqIt != requestedCells.end(); ++reqIt)
+			{
+				const Int col = reqIt->first;
+				const Int row = reqIt->second;
+				nlohmann::json objects = nlohmann::json::array();
+				Int totalObjects = 0;
+				Int units = 0;
+				Int buildings = 0;
+
+				if (ThePlayerList != nullptr)
+				{
+					const Player* neutralPlayer = ThePlayerList->getNeutralPlayer();
+					const Int count = ThePlayerList->getPlayerCount();
+					for (Int i = 0; i < count; ++i)
+					{
+						Player* player = ThePlayerList->getNthPlayer(i);
+						if (player == nullptr || player == neutralPlayer || isCivilianLikePlayer(player))
+						{
+							continue;
+						}
+
+						GridObjectsCollectContext ctx = {
+							this,
+							&cfg,
+							player->getPlayerIndex(),
+							col,
+							row,
+							maxObjectsPerCell,
+							&objects,
+							&totalObjects,
+							&units,
+							&buildings
+						};
+						player->iterateObjects(collectGridObjectsCallback, &ctx);
+					}
+				}
+
+				nlohmann::json cellJson = nlohmann::json::object({
+					{"cell", makeGridCellLabel(col, row)},
+					{"col", col},
+					{"row", row},
+					{"units_total", units},
+					{"buildings_total", buildings},
+					{"objects_total", totalObjects},
+					{"truncated", objects.size() < static_cast<std::size_t>(totalObjects)},
+					{"objects", objects}
+				});
+				cellJson["bounds"] = buildGridCellBoundsJson(cfg, col, row);
+				cells.push_back(cellJson);
+			}
+
+			return nlohmann::json::object({
+				{"path", "game.grid_objects"},
+				{"grid_cols", cfg.cols},
+				{"grid_rows", cfg.rows},
+				{"cells", cells},
+				{"count", cells.size()}
+			});
+		}
+
 		bool executeGameQuery(const nlohmann::json& message, nlohmann::json& result, std::string& reason)
 		{
 			if (ThePlayerList == nullptr)
@@ -978,6 +1434,90 @@
 			{
 				// Visibility is always from local player's perspective.
 				result = buildVisibleEnemiesSummary(localPlayer);
+				return true;
+			}
+
+			if (path == "game.grid")
+			{
+				const GridConfig cfg = resolveGridConfig(argsIt != message.end() && argsIt->is_object() ? &(*argsIt) : nullptr);
+				result = buildGridSummary(cfg);
+				return true;
+			}
+
+			if (path == "game.grid_objects")
+			{
+				const nlohmann::json* argsObj = (argsIt != message.end() && argsIt->is_object()) ? &(*argsIt) : nullptr;
+				const GridConfig cfg = resolveGridConfig(argsObj);
+				std::vector<std::pair<Int, Int>> requestedCells;
+
+				if (argsObj != nullptr)
+				{
+					const auto cellIt = argsObj->find("cell");
+					if (cellIt != argsObj->end() && cellIt->is_string())
+					{
+						Int col = -1;
+						Int row = -1;
+						if (!parseGridCellLabel(cellIt->get<std::string>(), col, row))
+						{
+							reason = "invalid_grid_cell";
+							return false;
+						}
+						if (col < 0 || row < 0 || col >= cfg.cols || row >= cfg.rows)
+						{
+							reason = "grid_cell_out_of_bounds";
+							return false;
+						}
+						requestedCells.push_back(std::make_pair(col, row));
+					}
+
+					const auto cellsIt = argsObj->find("cells");
+					if (cellsIt != argsObj->end() && cellsIt->is_array())
+					{
+						for (nlohmann::json::const_iterator it = cellsIt->begin(); it != cellsIt->end(); ++it)
+						{
+							if (!it->is_string())
+							{
+								continue;
+							}
+							Int col = -1;
+							Int row = -1;
+							if (!parseGridCellLabel(it->get<std::string>(), col, row))
+							{
+								continue;
+							}
+							if (col < 0 || row < 0 || col >= cfg.cols || row >= cfg.rows)
+							{
+								continue;
+							}
+							requestedCells.push_back(std::make_pair(col, row));
+						}
+					}
+				}
+
+				if (requestedCells.empty())
+				{
+					reason = "missing_grid_cell";
+					return false;
+				}
+
+				std::sort(requestedCells.begin(), requestedCells.end());
+				requestedCells.erase(std::unique(requestedCells.begin(), requestedCells.end()), requestedCells.end());
+
+				std::size_t maxObjectsPerCell = 120u;
+				if (argsObj != nullptr)
+				{
+					const auto maxIt = argsObj->find("max_objects_per_cell");
+					if (maxIt != argsObj->end() && maxIt->is_number_integer())
+					{
+						const Int parsed = maxIt->get<Int>();
+						if (parsed > 0)
+						{
+							maxObjectsPerCell = static_cast<std::size_t>(std::min<Int>(parsed, 500));
+						}
+					}
+				}
+
+				result = buildGridObjectsSummary(cfg, requestedCells, maxObjectsPerCell);
 				return true;
 			}
 

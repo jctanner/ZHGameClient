@@ -73,7 +73,7 @@ class BotUIApp:
         self._request_queue: "queue.PriorityQueue[tuple[int, int, dict[str, Any], int | None]]" = queue.PriorityQueue()
         self._request_seq = 0
         self._request_worker_started = False
-        self._poll_paths = ["game.objects_map", "game.objects_all_map", "game.players", "game.status", "game.resources"]
+        self._poll_paths = ["game.grid", "game.players", "game.status", "game.resources", "game.grid_objects"]
         self._poll_path_index = 0
         self._map_orientations = ["flip_y", "normal", "flip_x", "flip_xy"]
         self._map_orientation_index = 0
@@ -94,6 +94,7 @@ class BotUIApp:
         self.black_market_upgrade_var = tk.StringVar(value=GLA_BLACK_MARKET_UPGRADE_SUGGESTIONS[0])
         self.scud_x_var = tk.StringVar(value="0")
         self.scud_y_var = tk.StringVar(value="0")
+        self.grid_cell_var = tk.StringVar(value="C16")
         self.chat_text_var = tk.StringVar(value="")
         self.chat_scope_var = tk.StringVar(value="everyone")
         self.query_preset_var = tk.StringVar(value="game.objects")
@@ -259,6 +260,9 @@ class BotUIApp:
         toolbar.grid(row=0, column=0, sticky="ew", pady=(0, 4))
         ttk.Button(toolbar, text="Rotate/Flip Map", command=self._cycle_map_orientation).grid(row=0, column=0, sticky="w")
         ttk.Button(toolbar, text="Find Supplies", command=self._find_supply_sources).grid(row=0, column=1, sticky="w", padx=(6, 0))
+        ttk.Label(toolbar, text="Cell").grid(row=0, column=2, sticky="e", padx=(10, 2))
+        ttk.Entry(toolbar, textvariable=self.grid_cell_var, width=8).grid(row=0, column=3, sticky="w")
+        ttk.Button(toolbar, text="Query Cell", command=self._query_selected_grid_cell).grid(row=0, column=4, sticky="w", padx=(6, 0))
         canvas = tk.Canvas(map_frame, bg="#0c1318", highlightthickness=0)
         canvas.grid(row=1, column=0, sticky="nsew")
         self.map_renderer = MapRenderer(canvas)
@@ -450,6 +454,8 @@ class BotUIApp:
                 "game.status",
                 "game.resources",
                 "game.players",
+                "game.grid",
+                "game.grid_objects",
                 "game.objects",
                 "game.objects_all",
                 "game.visible_enemies",
@@ -870,7 +876,10 @@ class BotUIApp:
             if cmd == "Game.Query":
                 # Keep map polling responsive when a query path stalls on the adapter side.
                 path = str(args.get("path", ""))
-                timeout_ms = 4000 if path == "game.objects_all_map" else 2500
+                if path in ("game.grid", "game.grid_objects"):
+                    timeout_ms = 1500
+                else:
+                    timeout_ms = 4000 if path == "game.objects_all_map" else 2500
             self._request_async(msg, priority=priority, timeout_ms=timeout_ms)
             if not quiet:
                 self._log(f"sent {cmd} request_id={req_id}")
@@ -897,8 +906,20 @@ class BotUIApp:
             args = decoded
         self._send_session_command(cmd, args)
 
-    def _query(self, path: str, quiet: bool = True) -> None:
-        self._send_session_command("Game.Query", {"path": path}, quiet=quiet)
+    def _query(self, path: str, args: dict[str, Any] | None = None, quiet: bool = True) -> None:
+        payload: dict[str, Any] = {"path": path}
+        if args:
+            payload.update(args)
+        self._send_session_command("Game.Query", payload, quiet=quiet)
+
+    def _query_selected_grid_cell(self) -> None:
+        cell = self.grid_cell_var.get().strip().upper()
+        if not cell:
+            self._log("Grid cell is empty.")
+            return
+        self.store.selected_grid_cell = cell
+        self._dirty_view = True
+        self._query("game.grid_objects", {"cell": cell}, quiet=False)
 
     def _poll_loop(self) -> None:
         interval = 500
@@ -914,11 +935,18 @@ class BotUIApp:
                     path = self._next_poll_path()
                     if not path:
                         return
-                    if path in ("game.players", "game.resources", "game.status", "game.objects_all_map") and now < self._next_meta_poll_monotonic:
+                    if path in ("game.players", "game.resources", "game.status", "game.grid_objects") and now < self._next_meta_poll_monotonic:
                         pass
                     else:
-                        self._query(path, quiet=True)
-                        if path in ("game.players", "game.resources", "game.status", "game.objects_all_map"):
+                        query_args: dict[str, Any] | None = None
+                        if path == "game.grid_objects":
+                            cell = self.grid_cell_var.get().strip().upper()
+                            if not cell:
+                                return
+                            query_args = {"cell": cell}
+                            self.store.selected_grid_cell = cell
+                        self._query(path, args=query_args, quiet=True)
+                        if path in ("game.players", "game.resources", "game.status", "game.grid_objects"):
                             self._next_meta_poll_monotonic = now + 1.5
         except Exception as exc:  # noqa: BLE001
             self._log(f"poll_loop error: {exc}")
@@ -1000,6 +1028,11 @@ class BotUIApp:
                 self._query("game.players", quiet=True)
                 self._query("game.resources", quiet=True)
                 self._query("game.status", quiet=True)
+                self._query("game.grid", quiet=True)
+                cell = self.grid_cell_var.get().strip().upper()
+                if cell:
+                    self.store.selected_grid_cell = cell
+                    self._query("game.grid_objects", {"cell": cell}, quiet=True)
             return
         if msg_type == "SessionState":
             state = msg.get("state")
@@ -1141,6 +1174,11 @@ class BotUIApp:
             self.store.update_resources(payload)
         elif path == "game.status":
             self.store.update_map_metadata(payload)
+        elif path == "game.grid":
+            self.store.update_grid_summary(payload)
+            self.store.update_map_metadata(payload)
+        elif path == "game.grid_objects":
+            self.store.update_grid_objects(payload)
         else:
             if isinstance(payload, dict):
                 # Opportunistic parsing for mixed aggregate payloads.
@@ -1150,6 +1188,8 @@ class BotUIApp:
                 self.store.update_players(payload)
                 self.store.update_resources(payload)
                 self.store.update_map_metadata(payload)
+                self.store.update_grid_summary(payload)
+                self.store.update_grid_objects(payload)
         self._dirty_view = True
 
     def _extract_path_hint(self, msg: dict[str, Any], payload: Any) -> str:
@@ -1177,10 +1217,16 @@ class BotUIApp:
                 return "game.objects_map"
             if payload.get("path") == "game.objects_all_map":
                 return "game.objects_all_map"
+            if payload.get("path") == "game.grid":
+                return "game.grid"
+            if payload.get("path") == "game.grid_objects":
+                return "game.grid_objects"
             if "enemies" in payload:
                 return "game.visible_enemies"
             if "visible_enemies" in payload:
                 return "game.visible_enemies"
+            if "occupied_cell_count" in payload and "cells" in payload:
+                return "game.grid"
             if "players" in payload:
                 return "game.players"
             if "resources" in payload:
@@ -1294,11 +1340,13 @@ class BotUIApp:
             return ""
         if not self.store.players:
             return "game.players"
-        map_paths = {"game.objects_map", "game.objects_all_map"}
+        map_paths = {"game.grid", "game.grid_objects", "game.objects_map", "game.objects_all_map"}
         for _ in range(len(self._poll_paths)):
             path = self._poll_paths[self._poll_path_index % len(self._poll_paths)]
             self._poll_path_index += 1
             if not self.map_updates_enabled.get() and path in map_paths:
+                continue
+            if path == "game.grid_objects" and not self.grid_cell_var.get().strip():
                 continue
             return path
         return ""
