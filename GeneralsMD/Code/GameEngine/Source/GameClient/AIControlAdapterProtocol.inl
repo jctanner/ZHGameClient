@@ -384,6 +384,19 @@
 				return;
 			}
 
+			if (cmd == "Game.DebugDeshroud")
+			{
+				std::string reason;
+				if (!executeGameDebugDeshroud(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendActionAck(requestId, true);
+				return;
+			}
+
 			if (cmd == "Game.QueueSoldiersAllBarracks")
 			{
 				std::string reason;

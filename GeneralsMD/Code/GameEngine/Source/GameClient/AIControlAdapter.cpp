@@ -27,6 +27,7 @@
 #include "GameClient/View.h"
 #include "GameLogic/AI.h"
 #include "GameLogic/GameLogic.h"
+#include "GameLogic/PartitionManager.h"
 #include "GameLogic/TerrainLogic.h"
 #include "GameLogic/Module/AIUpdate.h"
 #include "GameLogic/Module/ProductionUpdate.h"
