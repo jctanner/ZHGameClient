@@ -273,6 +273,41 @@ def reset_adapter_log(client: PipeClient, timeout_ms: int) -> bool:
     return ok
 
 
+def configure_worker_rule(
+    client: PipeClient,
+    timeout_ms: int,
+    *,
+    min_idle_workers: int,
+    queue_count: int,
+    producer_kind: str | None = None,
+    player_index: int | None = None,
+    cooldown_ms: int = 3000,
+) -> bool:
+    args: dict[str, Any] = {
+        "min_idle_workers": int(min_idle_workers),
+        "queue_count": int(queue_count),
+        "cooldown_ms": int(cooldown_ms),
+    }
+    if producer_kind:
+        args["producer_kind"] = producer_kind
+    if player_index is not None:
+        args["player_index"] = int(player_index)
+    resp = try_send_session_command(client, "Automation.ConfigureWorkerRule", args, timeout_ms)
+    if resp is None:
+        return False
+    ok = bool(resp.get("ok", False))
+    code = resp.get("code")
+    reason = resp.get("reason")
+    print(
+        "[worker_rule] "
+        f"min_idle_workers={int(min_idle_workers)} queue_count={int(queue_count)} "
+        f"producer_kind={producer_kind or 'default'} cooldown_ms={int(cooldown_ms)} "
+        f"ok={ok} code={code} reason={reason}{request_id_suffix(resp)}",
+        flush=True,
+    )
+    return ok
+
+
 def query_game_status(
     client: PipeClient,
     timeout_ms: int,
@@ -2047,6 +2082,13 @@ def main() -> int:
 
     print("Connected to adapter. Starting starter macro loop.", flush=True)
     reset_adapter_log(client, args.timeout_ms)
+    configure_worker_rule(
+        client,
+        args.timeout_ms,
+        min_idle_workers=10,
+        queue_count=9,
+        cooldown_ms=3000,
+    )
     print(
         f"Plan phases: opening={len(PHASE_OPENING.steps)} expansion={len(PHASE_EXPANSION.steps)} "
         f"warmonger={len(PHASE_WARMONGER.steps)} | cc_worker_target={COMMAND_CENTER_WORKER_TARGET} "
@@ -2543,52 +2585,6 @@ def main() -> int:
                     )
                     if stash_added > 0:
                         worker_topup_done = True
-                trickle_phase_active = current_phase.name in (PHASE_OPENING_NAME, PHASE_EXPANSION_NAME)
-                trickle_budget_ready = (
-                    money >= DEFAULT_WORKER_TRICKLE_MIN_MONEY
-                    or effective_net_income_per_sec >= DEFAULT_WORKER_TRICKLE_MIN_INCOME_PER_SEC
-                )
-                if (
-                    trickle_phase_active
-                    and trickle_budget_ready
-                    and not worker_topup_done
-                    and (now - last_worker_trickle_at) >= DEFAULT_WORKER_TRICKLE_CADENCE_SEC
-                ):
-                    trickle_added = 0
-                    prefer_stash_trickle = allow_stash_topup and len(stash_worker_issued) > 0
-                    if prefer_stash_trickle:
-                        trickle_added = top_up_workers_for_producers(
-                            client=client,
-                            timeout_ms=args.timeout_ms,
-                            cycle=cycle,
-                            producer_label="stash",
-                            producer_target=STASH_WORKER_TARGET,
-                            producer_worker_issued=stash_worker_issued,
-                            max_total_to_add=1,
-                            pending_until_by_key=pending_until_by_key,
-                            now=now,
-                            pending_cooldown_sec=worker_pending_cooldown,
-                        )
-                    if trickle_added <= 0 and allow_cc_topup:
-                        trickle_added = top_up_workers_for_producers(
-                            client=client,
-                            timeout_ms=args.timeout_ms,
-                            cycle=cycle,
-                            producer_label="command_center",
-                            producer_target=COMMAND_CENTER_WORKER_TARGET,
-                            producer_worker_issued=command_center_worker_issued,
-                            max_total_to_add=1,
-                            pending_until_by_key=pending_until_by_key,
-                            now=now,
-                            pending_cooldown_sec=worker_pending_cooldown,
-                        )
-                    if trickle_added > 0:
-                        last_worker_trickle_at = now
-                        print(
-                            f"[loop {cycle}] worker_trickle added={trickle_added} "
-                            f"money={money} net_income_per_sec={effective_net_income_per_sec:.2f}",
-                            flush=True,
-                        )
                 if worker_topup_done:
                     last_worker_topup_at = now
 

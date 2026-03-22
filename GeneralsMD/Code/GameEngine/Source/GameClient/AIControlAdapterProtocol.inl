@@ -218,6 +218,7 @@
 						"game_attackmove_raid_smart",
 						"game_guard_all_idle_ground_combat",
 						"game_set_money_debug",
+						"automation_worker_rule",
 						"adapter_log_configure",
 						"adapter_log_reset",
 						"game_camera_set",
@@ -484,6 +485,25 @@
 					return;
 				}
 
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Automation.ConfigureWorkerRule")
+			{
+				std::string reason;
+				if (!configureWorkerAutomationRule(message, reason))
+				{
+					sendActionAck(requestId, false, "bad_request", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Automation.ClearWorkerRule")
+			{
+				clearWorkerAutomationRule();
 				sendActionAck(requestId, true);
 				return;
 			}

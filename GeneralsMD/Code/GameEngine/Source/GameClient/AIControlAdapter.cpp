@@ -65,6 +65,19 @@ namespace
 		DWORD untilTick;
 	};
 
+	struct WorkerAutomationRule
+	{
+		bool enabled;
+		bool hasExplicitPlayerIndex;
+		bool hasExplicitProducerKind;
+		Int playerIndex;
+		Int minIdleWorkers;
+		Int queueCount;
+		std::string producerKind;
+		DWORD cooldownMs;
+		DWORD nextAllowedTick;
+	};
+
 	class AIControlAdapterState
 	{
 	public:
@@ -81,6 +94,15 @@ namespace
 			m_ownedCacheVersion(0),
 			m_ownedCacheLastRefreshTick(0u)
 		{
+			m_workerAutomationRule.enabled = false;
+			m_workerAutomationRule.hasExplicitPlayerIndex = false;
+			m_workerAutomationRule.hasExplicitProducerKind = false;
+			m_workerAutomationRule.playerIndex = -1;
+			m_workerAutomationRule.minIdleWorkers = 0;
+			m_workerAutomationRule.queueCount = 1;
+			m_workerAutomationRule.producerKind.clear();
+			m_workerAutomationRule.cooldownMs = 3000u;
+			m_workerAutomationRule.nextAllowedTick = 0u;
 			char buffer[32];
 			sprintf_s(buffer, "%08X%08X", static_cast<unsigned int>(::GetCurrentProcessId()), static_cast<unsigned int>(::GetTickCount()));
 			m_sessionId = buffer;
@@ -107,6 +129,15 @@ namespace
 			m_ownedCacheUnits = nlohmann::json::array();
 			m_ownedCacheBuildings = nlohmann::json::array();
 			m_ownedCacheIdleWorkers = nlohmann::json::array();
+			m_workerAutomationRule.enabled = false;
+			m_workerAutomationRule.hasExplicitPlayerIndex = false;
+			m_workerAutomationRule.hasExplicitProducerKind = false;
+			m_workerAutomationRule.playerIndex = -1;
+			m_workerAutomationRule.minIdleWorkers = 0;
+			m_workerAutomationRule.queueCount = 1;
+			m_workerAutomationRule.producerKind.clear();
+			m_workerAutomationRule.cooldownMs = 3000u;
+			m_workerAutomationRule.nextAllowedTick = 0u;
 			resetClientConnection();
 		}
 
@@ -125,6 +156,7 @@ namespace
 			}
 
 			readIncomingData();
+			evaluateAutomationRules();
 		}
 
 	private:
@@ -151,10 +183,226 @@ namespace
 		nlohmann::json m_ownedCacheUnits;
 		nlohmann::json m_ownedCacheBuildings;
 		nlohmann::json m_ownedCacheIdleWorkers;
+		WorkerAutomationRule m_workerAutomationRule;
 
 		#include "AIControlAdapterTransport.inl"
 
 		#include "AIControlAdapterProtocol.inl"
+
+		void evaluateAutomationRules()
+		{
+			evaluateWorkerAutomationRule();
+		}
+
+		void evaluateWorkerAutomationRule()
+		{
+			if (!m_workerAutomationRule.enabled)
+			{
+				return;
+			}
+
+			const DWORD now = ::GetTickCount();
+			if (static_cast<LONG>(m_workerAutomationRule.nextAllowedTick - now) > 0)
+			{
+				return;
+			}
+
+			Player* player = nullptr;
+			if (m_workerAutomationRule.hasExplicitPlayerIndex)
+			{
+				player = getPlayerByIndex(m_workerAutomationRule.playerIndex);
+			}
+			else if (ThePlayerList != nullptr)
+			{
+				player = ThePlayerList->getLocalPlayer();
+			}
+
+			if (player == nullptr)
+			{
+				m_workerAutomationRule.nextAllowedTick = now + m_workerAutomationRule.cooldownMs;
+				adapterLog("automation_worker_rule_skip reason=player_not_found");
+				return;
+			}
+
+			refreshOwnedObjectCache(player);
+			const Int idleWorkers = m_ownedCacheIdleWorkersTotal;
+			if (idleWorkers >= m_workerAutomationRule.minIdleWorkers)
+			{
+				return;
+			}
+
+			nlohmann::json args = nlohmann::json::object();
+			args["count"] = m_workerAutomationRule.queueCount;
+			if (m_workerAutomationRule.hasExplicitProducerKind && !m_workerAutomationRule.producerKind.empty())
+			{
+				args["producer_kind"] = m_workerAutomationRule.producerKind;
+			}
+			if (m_workerAutomationRule.hasExplicitPlayerIndex)
+			{
+				args["player_index"] = m_workerAutomationRule.playerIndex;
+			}
+
+			char requestIdBuffer[64];
+			sprintf_s(
+				requestIdBuffer,
+				"auto_worker_%08X_%08X",
+				static_cast<unsigned int>(player->getPlayerIndex()),
+				static_cast<unsigned int>(now));
+
+			nlohmann::json message = {
+				{"type", "SessionCommand"},
+				{"request_id", std::string(requestIdBuffer)},
+				{"cmd", "Game.BuildWorker"},
+				{"args", args}
+			};
+
+			std::string reason;
+			const bool ok = executeGameBuildWorker(message, reason);
+			m_workerAutomationRule.nextAllowedTick = now + m_workerAutomationRule.cooldownMs;
+			adapterLog(
+				"automation_worker_rule request_id=%s player=%d idle_workers=%d min_idle_workers=%d queue_count=%d producer_kind=%s ok=%d reason=%s",
+				requestIdBuffer,
+				player->getPlayerIndex(),
+				idleWorkers,
+				m_workerAutomationRule.minIdleWorkers,
+				m_workerAutomationRule.queueCount,
+				m_workerAutomationRule.hasExplicitProducerKind ? m_workerAutomationRule.producerKind.c_str() : "default",
+				ok ? 1 : 0,
+				ok ? "" : reason.c_str());
+
+			if (ok)
+			{
+				m_ownedCacheValid = false;
+			}
+		}
+
+		bool configureWorkerAutomationRule(const nlohmann::json& message, std::string& reason)
+		{
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			WorkerAutomationRule rule;
+			rule.enabled = true;
+			rule.hasExplicitPlayerIndex = false;
+			rule.hasExplicitProducerKind = false;
+			rule.playerIndex = -1;
+			rule.minIdleWorkers = 0;
+			rule.queueCount = 1;
+			rule.producerKind.clear();
+			rule.cooldownMs = 3000u;
+			rule.nextAllowedTick = 0u;
+
+			const auto enabledIt = argsIt->find("enabled");
+			if (enabledIt != argsIt->end())
+			{
+				if (!enabledIt->is_boolean())
+				{
+					reason = "invalid_enabled";
+					return false;
+				}
+				rule.enabled = enabledIt->get<bool>();
+			}
+
+			const auto playerIndexIt = argsIt->find("player_index");
+			if (playerIndexIt != argsIt->end())
+			{
+				if (!playerIndexIt->is_number_integer())
+				{
+					reason = "invalid_player_index";
+					return false;
+				}
+				rule.hasExplicitPlayerIndex = true;
+				rule.playerIndex = playerIndexIt->get<Int>();
+			}
+
+			const auto minIdleIt = argsIt->find("min_idle_workers");
+			if (minIdleIt == argsIt->end() || !minIdleIt->is_number_integer())
+			{
+				reason = "missing_min_idle_workers";
+				return false;
+			}
+			rule.minIdleWorkers = minIdleIt->get<Int>();
+			if (rule.minIdleWorkers < 0)
+			{
+				reason = "invalid_min_idle_workers";
+				return false;
+			}
+
+			const auto queueCountIt = argsIt->find("queue_count");
+			if (queueCountIt != argsIt->end())
+			{
+				if (!queueCountIt->is_number_integer())
+				{
+					reason = "invalid_queue_count";
+					return false;
+				}
+				rule.queueCount = queueCountIt->get<Int>();
+			}
+			if (rule.queueCount <= 0)
+			{
+				reason = "invalid_queue_count";
+				return false;
+			}
+
+			const auto producerKindIt = argsIt->find("producer_kind");
+			if (producerKindIt != argsIt->end())
+			{
+				if (!producerKindIt->is_string())
+				{
+					reason = "invalid_producer_kind";
+					return false;
+				}
+				rule.hasExplicitProducerKind = true;
+				rule.producerKind = producerKindIt->get<std::string>();
+			}
+
+			const auto cooldownIt = argsIt->find("cooldown_ms");
+			if (cooldownIt != argsIt->end())
+			{
+				if (!cooldownIt->is_number_integer())
+				{
+					reason = "invalid_cooldown_ms";
+					return false;
+				}
+				const Int cooldownValue = cooldownIt->get<Int>();
+				if (cooldownValue < 0)
+				{
+					reason = "invalid_cooldown_ms";
+					return false;
+				}
+				rule.cooldownMs = static_cast<DWORD>(cooldownValue);
+			}
+
+			m_workerAutomationRule = rule;
+			adapterLog(
+				"automation_worker_rule_configured enabled=%d player=%d explicit_player=%d min_idle_workers=%d queue_count=%d producer_kind=%s cooldown_ms=%lu",
+				m_workerAutomationRule.enabled ? 1 : 0,
+				m_workerAutomationRule.playerIndex,
+				m_workerAutomationRule.hasExplicitPlayerIndex ? 1 : 0,
+				m_workerAutomationRule.minIdleWorkers,
+				m_workerAutomationRule.queueCount,
+				m_workerAutomationRule.hasExplicitProducerKind ? m_workerAutomationRule.producerKind.c_str() : "default",
+				static_cast<unsigned long>(m_workerAutomationRule.cooldownMs));
+			return true;
+		}
+
+		void clearWorkerAutomationRule()
+		{
+			m_workerAutomationRule.enabled = false;
+			m_workerAutomationRule.hasExplicitPlayerIndex = false;
+			m_workerAutomationRule.hasExplicitProducerKind = false;
+			m_workerAutomationRule.playerIndex = -1;
+			m_workerAutomationRule.minIdleWorkers = 0;
+			m_workerAutomationRule.queueCount = 1;
+			m_workerAutomationRule.producerKind.clear();
+			m_workerAutomationRule.cooldownMs = 3000u;
+			m_workerAutomationRule.nextAllowedTick = 0u;
+			adapterLog("automation_worker_rule_cleared");
+		}
 
 		nlohmann::json buildLocalPlayerSummary(const Player* player) const
 		{
