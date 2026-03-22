@@ -108,6 +108,9 @@ DEFAULT_PALACE_RECOVERY_GRACE_SEC = 30.0
 DEFAULT_STASH_SUPPLY_CLAIM_RADIUS = 260.0
 DEFAULT_BUILD_TICK_IDLE_RESERVE = 2
 DEFAULT_EXPANSION_ECO_SHARE = 0.4
+DEFAULT_WORKER_TRICKLE_CADENCE_SEC = 3.0
+DEFAULT_WORKER_TRICKLE_MIN_MONEY = 8000
+DEFAULT_WORKER_TRICKLE_MIN_INCOME_PER_SEC = 50.0
 RADAR_KEEPALIVE_INFLIGHT_SEC = 90.0
 RADAR_KEEPALIVE_WATCHDOG_SEC = 240.0
 DEFAULT_LOW_MONEY_THRESHOLD = 3500
@@ -1437,6 +1440,12 @@ def queue_building_mix(
                 sent_ok += 1
                 if cmd == "Game.BuildSupplyStashSmart" and requested_supply_id is not None and claimed_supply_source_ids is not None:
                     claimed_supply_source_ids.add(int(requested_supply_id))
+            elif last_reason == "idle_worker_not_found":
+                print(
+                    f"[loop {cycle}] building_mix cmd={cmd} stop=idle_worker_starved",
+                    flush=True,
+                )
+                return sent_ok, last_code, last_reason
 
     return sent_ok, last_code, last_reason
 
@@ -1904,6 +1913,7 @@ def main() -> int:
     warmonger_step_index = 0
     last_attempt_at = 0.0
     last_worker_topup_at = 0.0
+    last_worker_trickle_at = 0.0
     cc_worker_pressure_cycles = 0
     defense_worker_pressure_cycles = 0
     defense_worker_failure_cycles = 0
@@ -2299,6 +2309,52 @@ def main() -> int:
                     )
                     if stash_added > 0:
                         worker_topup_done = True
+                trickle_phase_active = current_phase.name in (PHASE_OPENING_NAME, PHASE_EXPANSION_NAME)
+                trickle_budget_ready = (
+                    money >= DEFAULT_WORKER_TRICKLE_MIN_MONEY
+                    or effective_net_income_per_sec >= DEFAULT_WORKER_TRICKLE_MIN_INCOME_PER_SEC
+                )
+                if (
+                    trickle_phase_active
+                    and trickle_budget_ready
+                    and not worker_topup_done
+                    and (now - last_worker_trickle_at) >= DEFAULT_WORKER_TRICKLE_CADENCE_SEC
+                ):
+                    trickle_added = 0
+                    prefer_stash_trickle = allow_stash_topup and len(stash_worker_issued) > 0
+                    if prefer_stash_trickle:
+                        trickle_added = top_up_workers_for_producers(
+                            client=client,
+                            timeout_ms=args.timeout_ms,
+                            cycle=cycle,
+                            producer_label="stash",
+                            producer_target=STASH_WORKER_TARGET,
+                            producer_worker_issued=stash_worker_issued,
+                            max_total_to_add=1,
+                            pending_until_by_key=pending_until_by_key,
+                            now=now,
+                            pending_cooldown_sec=worker_pending_cooldown,
+                        )
+                    if trickle_added <= 0 and allow_cc_topup:
+                        trickle_added = top_up_workers_for_producers(
+                            client=client,
+                            timeout_ms=args.timeout_ms,
+                            cycle=cycle,
+                            producer_label="command_center",
+                            producer_target=COMMAND_CENTER_WORKER_TARGET,
+                            producer_worker_issued=command_center_worker_issued,
+                            max_total_to_add=1,
+                            pending_until_by_key=pending_until_by_key,
+                            now=now,
+                            pending_cooldown_sec=worker_pending_cooldown,
+                        )
+                    if trickle_added > 0:
+                        last_worker_trickle_at = now
+                        print(
+                            f"[loop {cycle}] worker_trickle added={trickle_added} "
+                            f"money={money} net_income_per_sec={effective_net_income_per_sec:.2f}",
+                            flush=True,
+                        )
                 if worker_topup_done:
                     last_worker_topup_at = now
 
