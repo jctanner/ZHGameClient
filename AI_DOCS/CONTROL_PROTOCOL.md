@@ -103,32 +103,33 @@ Supported `cmd` values (v1):
 17. `Game.PurchaseScience`
 18. `Game.BuildWorker`
 19. `Game.SetMoney`
-20. `Game.QueueSoldiersAllBarracks`
-21. `Game.QueueRpgTroopersAllBarracks`
-22. `Game.QueueQuadsAllWarFactories`
-23. `Game.QueueScorpionsAllWarFactories`
-24. `Game.QueueRadarVansAllWarFactories`
-25. `Game.QueueRadarVan`
-26. `Game.FindSupplySources`
-27. `Game.FindBuildLocationNearSupply`
-28. `Game.DozerConstruct`
-29. `Game.BuildSupplyStashAuto`
-30. `Game.BuildSupplyStashSmart`
-31. `Game.BuildBarracksSmart`
-32. `Game.BuildCommandCenterSmart`
-33. `Game.BuildArmsDealerSmart`
-34. `Game.BuildPalaceSmart`
-35. `Game.BuildBlackMarketSmart`
-36. `Game.BuildScudStormSmart`
-37. `Game.BuildBuildingMix`
-38. `Game.ScudStormAtPosition`
-39. `Game.ScudStormAtPlayer`
-40. `Game.AttackMove`
-41. `Game.AttackMove.RaidSmart`
-42. `Game.Camera.Set`
-43. `Game.Camera.LookAt`
-44. `Game.Camera.SetZoomLimited`
-45. `Game.Camera.Get`
+20. `Game.DebugDeshroud`
+21. `Game.QueueSoldiersAllBarracks`
+22. `Game.QueueRpgTroopersAllBarracks`
+23. `Game.QueueQuadsAllWarFactories`
+24. `Game.QueueScorpionsAllWarFactories`
+25. `Game.QueueRadarVansAllWarFactories`
+26. `Game.QueueRadarVan`
+27. `Game.FindSupplySources`
+28. `Game.FindBuildLocationNearSupply`
+29. `Game.DozerConstruct`
+30. `Game.BuildSupplyStashAuto`
+31. `Game.BuildSupplyStashSmart`
+32. `Game.BuildBarracksSmart`
+33. `Game.BuildCommandCenterSmart`
+34. `Game.BuildArmsDealerSmart`
+35. `Game.BuildPalaceSmart`
+36. `Game.BuildBlackMarketSmart`
+37. `Game.BuildScudStormSmart`
+38. `Game.BuildBuildingMix`
+39. `Game.ScudStormAtPosition`
+40. `Game.ScudStormAtPlayer`
+41. `Game.AttackMove`
+42. `Game.AttackMove.RaidSmart`
+43. `Game.Camera.Set`
+44. `Game.Camera.LookAt`
+45. `Game.Camera.SetZoomLimited`
+46. `Game.Camera.Get`
 
 `Lobby.Join` args:
 
@@ -342,6 +343,17 @@ Supported `cmd` values (v1):
 1. Directly mutates the selected player's current `Money` total.
 2. Intended for debugging only.
 3. Rejects multiplayer sessions with `invalid_state` + `cash_mutation_not_allowed_in_multiplayer`.
+4. Safe target modes are single-player and skirmish.
+
+`Game.DebugDeshroud` args:
+
+1. `player_index` (optional int, default local player)
+
+`Game.DebugDeshroud` behavior:
+
+1. Permanently reveals the selected player's map for debugging.
+2. Intended for debugging only.
+3. Rejects multiplayer sessions with `invalid_state` + `deshroud_not_allowed_in_multiplayer`.
 4. Safe target modes are single-player and skirmish.
 
 `Game.QueueSoldiersAllBarracks` args:
