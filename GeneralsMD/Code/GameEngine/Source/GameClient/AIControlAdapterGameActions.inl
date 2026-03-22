@@ -1024,7 +1024,8 @@
 			const Coord3D* workerPos = worker->getPosition();
 
 			bool found = false;
-			Real bestDistSq = 0.0f;
+			Real bestRing = 0.0f;
+			Real bestWorkerDistSq = 0.0f;
 			Coord3D best = *supplyPos;
 			best.z = 0.0f;
 
@@ -1048,10 +1049,13 @@
 					}
 
 					const Real distSq = workerPos != nullptr ? distanceSq2D(&candidate, workerPos) : 0.0f;
-					if (!found || distSq < bestDistSq)
+					if (!found ||
+						ring < bestRing ||
+						(ring == bestRing && distSq < bestWorkerDistSq))
 					{
 						found = true;
-						bestDistSq = distSq;
+						bestRing = ring;
+						bestWorkerDistSq = distSq;
 						best = candidate;
 					}
 				}
@@ -1689,7 +1693,13 @@
 			return obj != nullptr ? obj->getPosition() : nullptr;
 		}
 
+		static std::string getRequestIdForLog(const nlohmann::json& message)
+		{
+			return getJsonString(message, "request_id");
+		}
+
 		void logSmartBuildPlacement(
+			const nlohmann::json& message,
 			const char* kind,
 			const char* phase,
 			Player* player,
@@ -1704,10 +1714,12 @@
 		{
 			const Coord3D* workerPos = getObjectPositionOrNull(worker);
 			const Coord3D* anchorPos = getObjectPositionOrNull(anchor);
+			const std::string requestId = getRequestIdForLog(message);
 			adapterLog(
-				"smart_build_%s_%s player=%d worker=%d worker_pos=(%.1f,%.1f) template=%s requested_anchor=%d anchor=%d anchor_pos=(%.1f,%.1f) zone_enabled=%d zone_center=(%.1f,%.1f) zone_radius=%.1f strict_zone=%d source=%s target=(%.1f,%.1f) angle=%.3f",
+				"smart_build_%s_%s request_id=%s player=%d worker=%d worker_pos=(%.1f,%.1f) template=%s requested_anchor=%d anchor=%d anchor_pos=(%.1f,%.1f) zone_enabled=%d zone_center=(%.1f,%.1f) zone_radius=%.1f strict_zone=%d source=%s target=(%.1f,%.1f) angle=%.3f",
 				kind != nullptr ? kind : "unknown",
 				phase != nullptr ? phase : "unknown",
+				requestId.c_str(),
 				player != nullptr ? static_cast<int>(player->getPlayerIndex()) : -1,
 				worker != nullptr ? static_cast<int>(worker->getID()) : 0,
 				workerPos != nullptr ? workerPos->x : 0.0f,
@@ -3855,12 +3867,14 @@
 
 			const Coord3D* workerPos = worker->getPosition();
 			const Coord3D* supplyPos = selectedSupply != nullptr ? selectedSupply->getPosition() : nullptr;
+			const std::string requestId = getRequestIdForLog(message);
 			Coord3D location;
 			Real angle = 0.0f;
 			if (!findBuildLocationNearSupply(player, worker, selectedSupply, buildingTemplate, location, angle))
 			{
 				adapterLog(
-					"supply_find_location_failed player=%d worker=%d worker_pos=(%.1f,%.1f) supply=%d supply_pos=(%.1f,%.1f) template=%s reason=%s",
+					"supply_find_location_failed request_id=%s player=%d worker=%d worker_pos=(%.1f,%.1f) supply=%d supply_pos=(%.1f,%.1f) template=%s reason=%s",
+					requestId.c_str(),
 					static_cast<int>(player->getPlayerIndex()),
 					static_cast<int>(worker->getID()),
 					workerPos != nullptr ? workerPos->x : 0.0f,
@@ -3875,7 +3889,8 @@
 			}
 
 			adapterLog(
-				"supply_find_location_ok player=%d worker=%d worker_pos=(%.1f,%.1f) requested_supply=%d selected_supply=%d supply_pos=(%.1f,%.1f) template=%s location=(%.1f,%.1f) angle=%.3f",
+				"supply_find_location_ok request_id=%s player=%d worker=%d worker_pos=(%.1f,%.1f) requested_supply=%d selected_supply=%d supply_pos=(%.1f,%.1f) template=%s location=(%.1f,%.1f) angle=%.3f",
+				requestId.c_str(),
 				static_cast<int>(player->getPlayerIndex()),
 				static_cast<int>(worker->getID()),
 				workerPos != nullptr ? workerPos->x : 0.0f,
@@ -4036,11 +4051,12 @@
 
 			// Preserve legacy auto behavior when no explicit supply source was requested.
 			std::string buildReason;
+			const std::string requestId = getRequestIdForLog(message);
 			if (requestedSupplyId <= 0)
 			{
 				if (executeGameBuildSupplyStashAuto(message, buildReason))
 				{
-					adapterLog("supply_stash_smart_auto_success requested_supply=0");
+					adapterLog("supply_stash_smart_auto_success request_id=%s requested_supply=0", requestId.c_str());
 					return true;
 				}
 
@@ -4055,7 +4071,7 @@
 					reason = buildReason;
 					return false;
 				}
-				adapterLog("supply_stash_smart_auto_fallback reason=%s", buildReason.c_str());
+				adapterLog("supply_stash_smart_auto_fallback request_id=%s reason=%s", requestId.c_str(), buildReason.c_str());
 			}
 
 			if (TheThingFactory == nullptr || TheGameLogic == nullptr)
@@ -4148,7 +4164,8 @@
 				const Coord3D* workerPos = worker->getPosition();
 				const Coord3D* supplyPos = selectedSupply->getPosition();
 				adapterLog(
-					"supply_stash_smart_construct player=%d worker=%d worker_pos=(%.1f,%.1f) requested_supply=%d selected_supply=%d supply_pos=(%.1f,%.1f) template=%s location=(%.1f,%.1f) angle=%.3f",
+					"supply_stash_smart_construct request_id=%s player=%d worker=%d worker_pos=(%.1f,%.1f) requested_supply=%d selected_supply=%d supply_pos=(%.1f,%.1f) template=%s location=(%.1f,%.1f) angle=%.3f",
+					requestId.c_str(),
 					static_cast<int>(player->getPlayerIndex()),
 					static_cast<int>(worker->getID()),
 					workerPos != nullptr ? workerPos->x : 0.0f,
@@ -4196,7 +4213,8 @@
 			}
 			target.z = 0.0f;
 			adapterLog(
-				"supply_stash_smart_move player=%d worker=%d requested_supply=%d selected_supply=%d supply_pos=(%.1f,%.1f) move_target=(%.1f,%.1f) template=%s",
+				"supply_stash_smart_move request_id=%s player=%d worker=%d requested_supply=%d selected_supply=%d supply_pos=(%.1f,%.1f) move_target=(%.1f,%.1f) template=%s",
+				requestId.c_str(),
 				static_cast<int>(player->getPlayerIndex()),
 				static_cast<int>(worker->getID()),
 				static_cast<int>(requestedSupplyId),
@@ -4288,7 +4306,7 @@
 				foundLocation = findBuildLocationInZone(player, worker, buildingTemplate, zoneArgs.zoneCenter, zoneArgs.zoneRadius, location, angle);
 				if (!foundLocation && zoneArgs.strictZone)
 				{
-					logSmartBuildPlacement("barracks", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &zoneArgs.zoneCenter, 0.0f, "zone_strict");
+					logSmartBuildPlacement(message, "barracks", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &zoneArgs.zoneCenter, 0.0f, "zone_strict");
 					return moveWorkerToPosition(worker, &zoneArgs.zoneCenter, reason);
 				}
 			}
@@ -4301,11 +4319,11 @@
 				const Coord3D* moveTarget = zoneArgs.hasZoneCenter
 					? &zoneArgs.zoneCenter
 					: (anchor != nullptr ? anchor->getPosition() : worker->getPosition());
-				logSmartBuildPlacement("barracks", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, moveTarget, 0.0f, zoneArgs.hasZoneCenter ? "zone_fallback" : "anchor_fallback");
+				logSmartBuildPlacement(message, "barracks", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, moveTarget, 0.0f, zoneArgs.hasZoneCenter ? "zone_fallback" : "anchor_fallback");
 				return moveWorkerToPosition(worker, moveTarget, reason);
 			}
 
-			logSmartBuildPlacement("barracks", "construct", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &location, angle, zoneArgs.hasZoneCenter ? "zone_or_anchor" : "anchor");
+			logSmartBuildPlacement(message, "barracks", "construct", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &location, angle, zoneArgs.hasZoneCenter ? "zone_or_anchor" : "anchor");
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
 		}
 
@@ -4393,7 +4411,7 @@
 				foundLocation = findBuildLocationInZone(player, worker, buildingTemplate, zoneArgs.zoneCenter, zoneArgs.zoneRadius, location, angle);
 				if (!foundLocation && zoneArgs.strictZone)
 				{
-					logSmartBuildPlacement("command_center", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &zoneArgs.zoneCenter, 0.0f, "zone_strict");
+					logSmartBuildPlacement(message, "command_center", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &zoneArgs.zoneCenter, 0.0f, "zone_strict");
 					return moveWorkerToPosition(worker, &zoneArgs.zoneCenter, reason);
 				}
 			}
@@ -4406,11 +4424,11 @@
 				const Coord3D* moveTarget = zoneArgs.hasZoneCenter
 					? &zoneArgs.zoneCenter
 					: (anchor != nullptr ? anchor->getPosition() : worker->getPosition());
-				logSmartBuildPlacement("command_center", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, moveTarget, 0.0f, zoneArgs.hasZoneCenter ? "zone_fallback" : "anchor_fallback");
+				logSmartBuildPlacement(message, "command_center", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, moveTarget, 0.0f, zoneArgs.hasZoneCenter ? "zone_fallback" : "anchor_fallback");
 				return moveWorkerToPosition(worker, moveTarget, reason);
 			}
 
-			logSmartBuildPlacement("command_center", "construct", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &location, angle, zoneArgs.hasZoneCenter ? "zone_or_anchor" : "anchor");
+			logSmartBuildPlacement(message, "command_center", "construct", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &location, angle, zoneArgs.hasZoneCenter ? "zone_or_anchor" : "anchor");
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
 		}
 
@@ -4493,7 +4511,7 @@
 				foundLocation = findBuildLocationInZone(player, worker, buildingTemplate, zoneArgs.zoneCenter, zoneArgs.zoneRadius, location, angle);
 				if (!foundLocation && zoneArgs.strictZone)
 				{
-					logSmartBuildPlacement("arms_dealer", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &zoneArgs.zoneCenter, 0.0f, "zone_strict");
+					logSmartBuildPlacement(message, "arms_dealer", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &zoneArgs.zoneCenter, 0.0f, "zone_strict");
 					return moveWorkerToPosition(worker, &zoneArgs.zoneCenter, reason);
 				}
 			}
@@ -4506,11 +4524,11 @@
 				const Coord3D* moveTarget = zoneArgs.hasZoneCenter
 					? &zoneArgs.zoneCenter
 					: (anchor != nullptr ? anchor->getPosition() : worker->getPosition());
-				logSmartBuildPlacement("arms_dealer", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, moveTarget, 0.0f, zoneArgs.hasZoneCenter ? "zone_fallback" : "anchor_fallback");
+				logSmartBuildPlacement(message, "arms_dealer", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, moveTarget, 0.0f, zoneArgs.hasZoneCenter ? "zone_fallback" : "anchor_fallback");
 				return moveWorkerToPosition(worker, moveTarget, reason);
 			}
 
-			logSmartBuildPlacement("arms_dealer", "construct", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &location, angle, zoneArgs.hasZoneCenter ? "zone_or_anchor" : "anchor");
+			logSmartBuildPlacement(message, "arms_dealer", "construct", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &location, angle, zoneArgs.hasZoneCenter ? "zone_or_anchor" : "anchor");
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
 		}
 
@@ -4593,7 +4611,7 @@
 				foundLocation = findBuildLocationInZone(player, worker, buildingTemplate, zoneArgs.zoneCenter, zoneArgs.zoneRadius, location, angle);
 				if (!foundLocation && zoneArgs.strictZone)
 				{
-					logSmartBuildPlacement("palace", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &zoneArgs.zoneCenter, 0.0f, "zone_strict");
+					logSmartBuildPlacement(message, "palace", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &zoneArgs.zoneCenter, 0.0f, "zone_strict");
 					return moveWorkerToPosition(worker, &zoneArgs.zoneCenter, reason);
 				}
 			}
@@ -4606,11 +4624,11 @@
 				const Coord3D* moveTarget = zoneArgs.hasZoneCenter
 					? &zoneArgs.zoneCenter
 					: (anchor != nullptr ? anchor->getPosition() : worker->getPosition());
-				logSmartBuildPlacement("palace", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, moveTarget, 0.0f, zoneArgs.hasZoneCenter ? "zone_fallback" : "anchor_fallback");
+				logSmartBuildPlacement(message, "palace", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, moveTarget, 0.0f, zoneArgs.hasZoneCenter ? "zone_fallback" : "anchor_fallback");
 				return moveWorkerToPosition(worker, moveTarget, reason);
 			}
 
-			logSmartBuildPlacement("palace", "construct", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &location, angle, zoneArgs.hasZoneCenter ? "zone_or_anchor" : "anchor");
+			logSmartBuildPlacement(message, "palace", "construct", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &location, angle, zoneArgs.hasZoneCenter ? "zone_or_anchor" : "anchor");
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
 		}
 
@@ -4693,7 +4711,7 @@
 				foundLocation = findBuildLocationInZone(player, worker, buildingTemplate, zoneArgs.zoneCenter, zoneArgs.zoneRadius, location, angle);
 				if (!foundLocation && zoneArgs.strictZone)
 				{
-					logSmartBuildPlacement("black_market", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &zoneArgs.zoneCenter, 0.0f, "zone_strict");
+					logSmartBuildPlacement(message, "black_market", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &zoneArgs.zoneCenter, 0.0f, "zone_strict");
 					return moveWorkerToPosition(worker, &zoneArgs.zoneCenter, reason);
 				}
 			}
@@ -4706,11 +4724,11 @@
 				const Coord3D* moveTarget = zoneArgs.hasZoneCenter
 					? &zoneArgs.zoneCenter
 					: (anchor != nullptr ? anchor->getPosition() : worker->getPosition());
-				logSmartBuildPlacement("black_market", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, moveTarget, 0.0f, zoneArgs.hasZoneCenter ? "zone_fallback" : "anchor_fallback");
+				logSmartBuildPlacement(message, "black_market", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, moveTarget, 0.0f, zoneArgs.hasZoneCenter ? "zone_fallback" : "anchor_fallback");
 				return moveWorkerToPosition(worker, moveTarget, reason);
 			}
 
-			logSmartBuildPlacement("black_market", "construct", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &location, angle, zoneArgs.hasZoneCenter ? "zone_or_anchor" : "anchor");
+			logSmartBuildPlacement(message, "black_market", "construct", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &location, angle, zoneArgs.hasZoneCenter ? "zone_or_anchor" : "anchor");
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
 		}
 
@@ -4793,7 +4811,7 @@
 				foundLocation = findBuildLocationInZone(player, worker, buildingTemplate, zoneArgs.zoneCenter, zoneArgs.zoneRadius, location, angle);
 				if (!foundLocation && zoneArgs.strictZone)
 				{
-					logSmartBuildPlacement("scud_storm", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &zoneArgs.zoneCenter, 0.0f, "zone_strict");
+					logSmartBuildPlacement(message, "scud_storm", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &zoneArgs.zoneCenter, 0.0f, "zone_strict");
 					return moveWorkerToPosition(worker, &zoneArgs.zoneCenter, reason);
 				}
 			}
@@ -4806,11 +4824,11 @@
 				const Coord3D* moveTarget = zoneArgs.hasZoneCenter
 					? &zoneArgs.zoneCenter
 					: (anchor != nullptr ? anchor->getPosition() : worker->getPosition());
-				logSmartBuildPlacement("scud_storm", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, moveTarget, 0.0f, zoneArgs.hasZoneCenter ? "zone_fallback" : "anchor_fallback");
+				logSmartBuildPlacement(message, "scud_storm", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, moveTarget, 0.0f, zoneArgs.hasZoneCenter ? "zone_fallback" : "anchor_fallback");
 				return moveWorkerToPosition(worker, moveTarget, reason);
 			}
 
-			logSmartBuildPlacement("scud_storm", "construct", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &location, angle, zoneArgs.hasZoneCenter ? "zone_or_anchor" : "anchor");
+			logSmartBuildPlacement(message, "scud_storm", "construct", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &location, angle, zoneArgs.hasZoneCenter ? "zone_or_anchor" : "anchor");
 			return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
 		}
 
