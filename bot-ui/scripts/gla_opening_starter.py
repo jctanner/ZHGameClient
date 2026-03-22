@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import random
+import re
 import sys
 import time
 from pathlib import Path
@@ -104,6 +105,9 @@ DEFAULT_DEFENSE_WORKER_MIN_IDLE = 3
 DEFAULT_CC_WORKER_PRESSURE_CYCLES = 3
 DEFAULT_ECO_BUILD_DELAY_AFTER_DEFENSE_SEC = 10.0
 DEFAULT_PALACE_RECOVERY_GRACE_SEC = 30.0
+DEFAULT_STASH_SUPPLY_CLAIM_RADIUS = 260.0
+DEFAULT_BUILD_TICK_IDLE_RESERVE = 2
+DEFAULT_EXPANSION_ECO_SHARE = 0.4
 RADAR_KEEPALIVE_INFLIGHT_SEC = 90.0
 RADAR_KEEPALIVE_WATCHDOG_SEC = 240.0
 DEFAULT_LOW_MONEY_THRESHOLD = 3500
@@ -139,7 +143,10 @@ ZONE_SINGLETON_BUILD_RULES: dict[str, tuple[str, ...]] = {
 
 
 def send_request(client: PipeClient, payload: dict[str, Any], timeout_ms: int) -> dict[str, Any]:
-    return client.request_once(payload, timeout_ms=timeout_ms)
+    resp = client.request_once(payload, timeout_ms=timeout_ms)
+    if isinstance(resp, dict):
+        resp.setdefault("request_id", str(payload.get("request_id", "")))
+    return resp
 
 
 def send_session_command(
@@ -152,6 +159,20 @@ def send_session_command(
     return send_request(client, payload, timeout_ms)
 
 
+def request_id_suffix(resp: dict[str, Any] | None) -> str:
+    if not isinstance(resp, dict):
+        return ""
+    request_id = resp.get("request_id")
+    return f" request_id={request_id}" if isinstance(request_id, str) and request_id else ""
+
+
+def extract_request_id_from_error(exc: Exception) -> str:
+    match = re.search(r"request_id=([0-9a-fA-F]+)", str(exc))
+    if match is None:
+        return ""
+    return match.group(1)
+
+
 def try_send_session_command(
     client: PipeClient,
     cmd: str,
@@ -160,12 +181,16 @@ def try_send_session_command(
 ) -> dict[str, Any] | None:
     try:
         return send_session_command(client, cmd, args, timeout_ms)
-    except TimeoutError:
+    except TimeoutError as exc:
         path_note = f" path={args.get('path')}" if isinstance(args, dict) and isinstance(args.get("path"), str) else ""
-        print(f"timeout waiting for {cmd} reply{path_note}; will retry", flush=True)
+        request_id = extract_request_id_from_error(exc)
+        req_note = f" request_id={request_id}" if request_id else ""
+        print(f"timeout waiting for {cmd} reply{path_note}{req_note}; will retry", flush=True)
         return None
     except Exception as exc:  # noqa: BLE001
-        print(f"request failed cmd={cmd}: {exc}", flush=True)
+        request_id = extract_request_id_from_error(exc)
+        req_note = f" request_id={request_id}" if request_id else ""
+        print(f"request failed cmd={cmd}{req_note}: {exc}", flush=True)
         return None
 
 
@@ -208,7 +233,7 @@ def force_debug_cash(client: PipeClient, timeout_ms: int, amount: int) -> bool:
     code = resp.get("code")
     reason = resp.get("reason")
     print(
-        f"[debug_cash] amount={int(amount)} ok={ok} code={code} reason={reason}",
+        f"[debug_cash] amount={int(amount)} ok={ok} code={code} reason={reason}{request_id_suffix(resp)}",
         flush=True,
     )
     return ok
@@ -222,7 +247,21 @@ def force_debug_deshroud(client: PipeClient, timeout_ms: int) -> bool:
     code = resp.get("code")
     reason = resp.get("reason")
     print(
-        f"[debug_deshroud] ok={ok} code={code} reason={reason}",
+        f"[debug_deshroud] ok={ok} code={code} reason={reason}{request_id_suffix(resp)}",
+        flush=True,
+    )
+    return ok
+
+
+def reset_adapter_log(client: PipeClient, timeout_ms: int) -> bool:
+    resp = try_send_session_command(client, "Adapter.Log.Reset", {"truncate": True}, timeout_ms)
+    if resp is None:
+        return False
+    ok = bool(resp.get("ok", False))
+    code = resp.get("code")
+    reason = resp.get("reason")
+    print(
+        f"[adapter_log_reset] ok={ok} code={code} reason={reason}{request_id_suffix(resp)}",
         flush=True,
     )
     return ok
@@ -376,6 +415,22 @@ def query_supply_sources(
         return []
     rows = payload.get("sources")
     return rows if isinstance(rows, list) else []
+
+
+def build_supply_source_position_map(rows: list[dict[str, Any]]) -> dict[int, tuple[float, float]]:
+    positions: dict[int, tuple[float, float]] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        object_id = row.get("object_id")
+        x = row.get("x")
+        y = row.get("y")
+        if not isinstance(object_id, int):
+            continue
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            continue
+        positions[int(object_id)] = (float(x), float(y))
+    return positions
 
 
 def query_grid_summary(
@@ -579,6 +634,34 @@ def count_complete_matching_templates(rows: list[dict[str, Any]], needles: tuple
         if any(needle in text for needle in needles):
             total += 1
     return total
+
+
+def has_stash_near_supply_source(
+    buildings: list[dict[str, Any]],
+    supply_source_id: int,
+    supply_source_positions: dict[int, tuple[float, float]] | None,
+    claim_radius: float = DEFAULT_STASH_SUPPLY_CLAIM_RADIUS,
+) -> bool:
+    if not supply_source_positions:
+        return False
+    source_pos = supply_source_positions.get(int(supply_source_id))
+    if source_pos is None:
+        return False
+    radius_sq = float(claim_radius) * float(claim_radius)
+    for row in buildings:
+        if not isinstance(row, dict):
+            continue
+        if not is_supply_stash_template(template_text(row)):
+            continue
+        x = row.get("x")
+        y = row.get("y")
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            continue
+        dx = float(x) - source_pos[0]
+        dy = float(y) - source_pos[1]
+        if (dx * dx + dy * dy) <= radius_sq:
+            return True
+    return False
 
 
 def resolve_primary_anchor_xy(buildings: list[dict[str, Any]]) -> tuple[float, float]:
@@ -951,7 +1034,7 @@ def issue_worker_for_producer(
     print(
         f"[loop {cycle}] {producer_label}_workers producer_id={producer_id} "
         f"added={sent_ok} issued={producer_worker_issued.get(producer_id, 0)}/{producer_target} "
-        f"last_code={last_code} last_reason={last_reason}",
+        f"last_code={last_code} last_reason={last_reason}{request_id_suffix(resp if sent_ok > 0 or last_code is not None or last_reason is not None else None)}",
         flush=True,
     )
     return sent_ok
@@ -1133,7 +1216,7 @@ def queue_infantry_mix(
         last_code = resp.get("code")
         last_reason = resp.get("reason")
         print(
-            f"[loop {cycle}] infantry_mix cmd={cmd} ok={ok} code={last_code} reason={last_reason}",
+            f"[loop {cycle}] infantry_mix cmd={cmd} ok={ok} code={last_code} reason={last_reason}{request_id_suffix(resp)}",
             flush=True,
         )
         if ok:
@@ -1162,7 +1245,7 @@ def queue_vehicle_mix(
         last_code = resp.get("code")
         last_reason = resp.get("reason")
         print(
-            f"[loop {cycle}] vehicle_mix cmd=Game.QueueRadarVan ok={ok} code={last_code} reason={last_reason}",
+            f"[loop {cycle}] vehicle_mix cmd=Game.QueueRadarVan ok={ok} code={last_code} reason={last_reason}{request_id_suffix(resp)}",
             flush=True,
         )
         if ok:
@@ -1178,6 +1261,11 @@ def queue_vehicle_mix(
             sent_ok += 1
             last_code = fallback.get("code")
             last_reason = fallback.get("reason")
+            print(
+                f"[loop {cycle}] vehicle_mix cmd=Game.QueueRadarVansAllWarFactories ok=True "
+                f"code={last_code} reason={last_reason}{request_id_suffix(fallback)}",
+                flush=True,
+            )
 
     requests: tuple[tuple[str, dict[str, Any]], ...] = (
         ("Game.QueueQuadsAllWarFactories", {"count": max(1, int(quads_count))}),
@@ -1191,7 +1279,7 @@ def queue_vehicle_mix(
         last_code = resp.get("code")
         last_reason = resp.get("reason")
         print(
-            f"[loop {cycle}] vehicle_mix cmd={cmd} ok={ok} code={last_code} reason={last_reason}",
+            f"[loop {cycle}] vehicle_mix cmd={cmd} ok={ok} code={last_code} reason={last_reason}{request_id_suffix(resp)}",
             flush=True,
         )
         if ok:
@@ -1211,6 +1299,10 @@ def queue_building_mix(
     tunnel_networks_count: int,
     stinger_sites_count: int,
     stash_supply_source_ids: list[int] | None = None,
+    stash_supply_source_positions: dict[int, tuple[float, float]] | None = None,
+    claimed_supply_source_ids: set[int] | None = None,
+    available_idle_workers: int | None = None,
+    idle_worker_reserve: int = DEFAULT_BUILD_TICK_IDLE_RESERVE,
     zone_center: tuple[float, float] | None = None,
     zone_radius: float | None = None,
     buildings: list[dict[str, Any]] | None = None,
@@ -1243,6 +1335,9 @@ def queue_building_mix(
         [("Game.BuildSupplyStashSmart", max(0, int(stash_count)), {})] + primary_requests
     )
     stash_source_queue = list(stash_supply_source_ids or [])
+    build_budget_remaining: int | None = None
+    if available_idle_workers is not None:
+        build_budget_remaining = max(0, int(available_idle_workers) - max(0, int(idle_worker_reserve)))
 
     def resolve_build_target(cmd_name: str, args_map: dict[str, Any]) -> str:
         explicit = args_map.get("building_template")
@@ -1266,6 +1361,13 @@ def queue_building_mix(
             )
             continue
         for _ in range(count):
+            if build_budget_remaining is not None and build_budget_remaining <= 0:
+                print(
+                    f"[loop {cycle}] building_mix cmd={cmd} skip=idle_worker_budget_exhausted "
+                    f"reserve={max(0, int(idle_worker_reserve))}",
+                    flush=True,
+                )
+                return sent_ok, last_code, last_reason
             if zone_center is not None and zone_radius is not None and buildings is not None:
                 singleton_needles = ZONE_SINGLETON_BUILD_RULES.get(cmd)
                 if singleton_needles is not None:
@@ -1288,6 +1390,24 @@ def queue_building_mix(
             if cmd == "Game.BuildSupplyStashSmart":
                 requested_supply_id = stash_source_queue.pop(0) if stash_source_queue else None
                 if requested_supply_id is not None:
+                    if claimed_supply_source_ids is not None and int(requested_supply_id) in claimed_supply_source_ids:
+                        print(
+                            f"[loop {cycle}] building_mix cmd={cmd} target=GLASupplyStash "
+                            f"supply_source_id={requested_supply_id} skip=supply_already_claimed",
+                            flush=True,
+                        )
+                        continue
+                    if buildings is not None and has_stash_near_supply_source(
+                        buildings,
+                        int(requested_supply_id),
+                        stash_supply_source_positions,
+                    ):
+                        print(
+                            f"[loop {cycle}] building_mix cmd={cmd} target=GLASupplyStash "
+                            f"supply_source_id={requested_supply_id} skip=supply_already_claimed",
+                            flush=True,
+                        )
+                        continue
                     command_args["supply_source_id"] = int(requested_supply_id)
                     print(
                         f"[loop {cycle}] building_mix cmd={cmd} target=GLASupplyStash supply_source_id={requested_supply_id}",
@@ -1301,6 +1421,8 @@ def queue_building_mix(
                     command_args.pop("strict_zone", None)
             build_target = resolve_build_target(cmd, command_args)
             resp = try_send_session_command(client, cmd, command_args, timeout_ms)
+            if build_budget_remaining is not None:
+                build_budget_remaining = max(0, build_budget_remaining - 1)
             if resp is None:
                 continue
             ok = bool(resp.get("ok", False))
@@ -1308,11 +1430,13 @@ def queue_building_mix(
             last_reason = resp.get("reason")
             print(
                 f"[loop {cycle}] building_mix cmd={cmd} target={build_target} "
-                f"ok={ok} code={last_code} reason={last_reason}",
+                f"ok={ok} code={last_code} reason={last_reason}{request_id_suffix(resp)}",
                 flush=True,
             )
             if ok:
                 sent_ok += 1
+                if cmd == "Game.BuildSupplyStashSmart" and requested_supply_id is not None and claimed_supply_source_ids is not None:
+                    claimed_supply_source_ids.add(int(requested_supply_id))
 
     return sent_ok, last_code, last_reason
 
@@ -1351,7 +1475,7 @@ def maybe_purchase_science(
         reason = resp.get("reason")
         print(
             f"[loop {cycle}] science_purchase science={science_name} points={science_points} "
-            f"ok={ok} code={code} reason={reason}",
+            f"ok={ok} code={code} reason={reason}{request_id_suffix(resp)}",
             flush=True,
         )
         if ok:
@@ -1404,7 +1528,7 @@ def maybe_queue_upgrade(
         reason = resp.get("reason")
         print(
             f"[loop {cycle}] upgrade_queue producer={producer_kind} upgrade={upgrade_name} "
-            f"ok={ok} code={code} reason={reason}",
+            f"ok={ok} code={code} reason={reason}{request_id_suffix(resp)}",
             flush=True,
         )
         if ok:
@@ -1557,6 +1681,12 @@ def main() -> int:
         help="Per-command cooldown after a successful queue/build to avoid duplicate spam (default: 20.0).",
     )
     parser.add_argument(
+        "--build-tick-idle-reserve",
+        type=int,
+        default=DEFAULT_BUILD_TICK_IDLE_RESERVE,
+        help="Minimum idle workers to keep available while issuing building bursts each tick (default: 2).",
+    )
+    parser.add_argument(
         "--reserve-cash",
         type=int,
         default=BUDGET_RESERVE_CASH,
@@ -1681,6 +1811,7 @@ def main() -> int:
         return 1
 
     print("Connected to adapter. Starting starter macro loop.", flush=True)
+    reset_adapter_log(client, args.timeout_ms)
     print(
         f"Plan phases: opening={len(PHASE_OPENING.steps)} expansion={len(PHASE_EXPANSION.steps)} "
         f"warmonger={len(PHASE_WARMONGER.steps)} | cc_worker_target={COMMAND_CENTER_WORKER_TARGET} "
@@ -1697,6 +1828,7 @@ def main() -> int:
         include_buildings=True,
     )
     startup_supply_sources = query_supply_sources(client, args.timeout_ms)
+    startup_supply_source_positions = build_supply_source_position_map(startup_supply_sources)
     startup_counts = query_zone_counts(client, args.timeout_ms)
     startup_unit_counts = query_unit_composition(client, args.timeout_ms, previous_counts={})
     cached_status = query_game_status(client, args.timeout_ms, previous_status={})
@@ -1718,6 +1850,7 @@ def main() -> int:
         anchor_y,
         limit=max(1, opening_stash_target),
     )
+    opening_claimed_supply_source_ids: set[int] = set()
     zone_centers = build_zone_centers(anchor_x, anchor_y, max(128.0, float(args.zone_step)), max(1, int(args.zone_count)))
     zone_index = 0
     cached_grid_summary: dict[str, Any] | None = None
@@ -2595,6 +2728,41 @@ def main() -> int:
                             f"name='{expansion_step.name}' stash_skip=cadence every={SUSTAIN_STASH_EVERY_CYCLES}",
                             flush=True,
                         )
+                idle_worker_reserve = int(args.build_tick_idle_reserve)
+                usable_idle_workers = max(0, cached_idle_workers - max(0, idle_worker_reserve))
+                eco_request_count = (
+                    stash_count_for_cycle
+                    + barracks_count_for_cycle
+                    + arms_count_for_cycle
+                    + black_markets_count_for_cycle
+                )
+                defense_request_count = tunnel_networks_count_for_cycle + stinger_sites_count_for_cycle
+                post_defense_delay_active = now < delay_eco_until
+                eco_usable_budget = 0
+                defense_usable_budget = 0
+                if market_bootstrap_priority:
+                    eco_usable_budget = usable_idle_workers
+                elif defense_request_count > 0 and eco_request_count > 0:
+                    eco_usable_budget = int(round(float(usable_idle_workers) * DEFAULT_EXPANSION_ECO_SHARE))
+                    eco_usable_budget = max(1, eco_usable_budget)
+                    if post_defense_delay_active or force_defense_first:
+                        eco_usable_budget = min(eco_usable_budget, max(1, usable_idle_workers // 3))
+                    eco_usable_budget = min(usable_idle_workers, eco_usable_budget)
+                    defense_usable_budget = max(0, usable_idle_workers - eco_usable_budget)
+                elif defense_request_count > 0:
+                    defense_usable_budget = usable_idle_workers
+                else:
+                    eco_usable_budget = usable_idle_workers
+
+                if defense_request_count > 0 or eco_request_count > 0:
+                    print(
+                        f"[loop {cycle}] phase=expansion build_split "
+                        f"usable_idle_workers={usable_idle_workers} reserve={max(0, idle_worker_reserve)} "
+                        f"eco_budget={eco_usable_budget} defense_budget={defense_usable_budget} "
+                        f"eco_requests={eco_request_count} defense_requests={defense_request_count} "
+                        f"pressure={force_defense_first} post_defense_delay={post_defense_delay_active}",
+                        flush=True,
+                    )
                 expansion_defense_added, expansion_defense_code, expansion_defense_reason = queue_building_mix(
                     client,
                     args.timeout_ms,
@@ -2605,6 +2773,8 @@ def main() -> int:
                     black_markets_count=0,
                     tunnel_networks_count=tunnel_networks_count_for_cycle,
                     stinger_sites_count=stinger_sites_count_for_cycle,
+                    available_idle_workers=defense_usable_budget + max(0, idle_worker_reserve),
+                    idle_worker_reserve=idle_worker_reserve,
                     zone_center=active_zone_center,
                     zone_radius=float(args.zone_radius),
                     buildings=buildings,
@@ -2621,16 +2791,20 @@ def main() -> int:
                     defense_worker_failure_cycles = 0
                 if expansion_defense_added > 0:
                     delay_eco_until = max(delay_eco_until, now + max(0.0, float(args.eco_build_delay_after_defense_sec)))
-                should_delay_eco = force_defense_first or (now < delay_eco_until)
-                if should_delay_eco:
+                eco_gate_reason: str | None = None
+                if eco_request_count <= 0:
+                    eco_gate_reason = "no_eco_requests"
+                elif eco_usable_budget <= 0:
+                    eco_gate_reason = "eco_budget_exhausted"
+                if eco_gate_reason is not None:
                     remaining_delay = max(0.0, delay_eco_until - now)
                     print(
                         f"[loop {cycle}] phase=expansion econ=eco_hold "
-                        f"reason={'defense_pressure' if force_defense_first else 'post_defense_delay'} "
+                        f"reason={eco_gate_reason} "
                         f"idle_workers={cached_idle_workers} remaining_sec={remaining_delay:.1f}",
                         flush=True,
                     )
-                    expansion_eco_added, expansion_eco_code, expansion_eco_reason = 0, None, "eco_hold_for_defense"
+                    expansion_eco_added, expansion_eco_code, expansion_eco_reason = 0, None, eco_gate_reason
                 else:
                     expansion_eco_added, expansion_eco_code, expansion_eco_reason = queue_building_mix(
                         client,
@@ -2642,6 +2816,8 @@ def main() -> int:
                         black_markets_count=black_markets_count_for_cycle,
                         tunnel_networks_count=0,
                         stinger_sites_count=0,
+                        available_idle_workers=eco_usable_budget + max(0, idle_worker_reserve),
+                        idle_worker_reserve=idle_worker_reserve,
                         zone_center=eco_zone_center,
                         zone_radius=float(args.zone_radius),
                         buildings=buildings,
@@ -2871,6 +3047,11 @@ def main() -> int:
                             tunnel_networks_count=int(current.args.get("tunnel_networks", 0)),
                             stinger_sites_count=int(current.args.get("stinger_sites", 0)),
                             stash_supply_source_ids=opening_supply_source_ids if current_phase.name == PHASE_OPENING_NAME else None,
+                            stash_supply_source_positions=startup_supply_source_positions,
+                            claimed_supply_source_ids=opening_claimed_supply_source_ids if current_phase.name == PHASE_OPENING_NAME else None,
+                            available_idle_workers=cached_idle_workers,
+                            idle_worker_reserve=0 if current_phase.name == PHASE_OPENING_NAME else int(args.build_tick_idle_reserve),
+                            buildings=buildings,
                         )
                         last_code = mix_code
                         last_reason = mix_reason
@@ -3310,6 +3491,8 @@ def main() -> int:
                     black_markets_count=black_markets_count_for_cycle,
                     tunnel_networks_count=0,
                     stinger_sites_count=0,
+                    available_idle_workers=cached_idle_workers,
+                    idle_worker_reserve=int(args.build_tick_idle_reserve),
                     zone_center=eco_zone_center,
                     zone_radius=float(args.zone_radius),
                     buildings=buildings,
@@ -3325,6 +3508,8 @@ def main() -> int:
                     black_markets_count=0,
                     tunnel_networks_count=tunnel_networks_count_for_cycle,
                     stinger_sites_count=stinger_sites_count_for_cycle,
+                    available_idle_workers=max(0, cached_idle_workers - sustain_eco_added),
+                    idle_worker_reserve=int(args.build_tick_idle_reserve),
                     zone_center=active_zone_center,
                     zone_radius=float(args.zone_radius),
                     buildings=buildings,
