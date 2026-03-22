@@ -767,6 +767,85 @@
 			};
 		}
 
+		nlohmann::json buildCapturableBuildingsSummary(Player* localPlayer)
+		{
+			nlohmann::json buildings = nlohmann::json::array();
+			if (ThePlayerList == nullptr || localPlayer == nullptr)
+			{
+				return nlohmann::json{
+					{"count", 0},
+					{"buildings", buildings}
+				};
+			}
+
+			const Int count = ThePlayerList->getPlayerCount();
+			for (Int i = 0; i < count; ++i)
+			{
+				Player* player = ThePlayerList->getNthPlayer(i);
+				if (player == nullptr)
+				{
+					continue;
+				}
+
+				struct CapturableCollectContext
+				{
+					AIControlAdapterState* self;
+					Player* localPlayer;
+					Player* ownerPlayer;
+					nlohmann::json* buildings;
+				} ctx = { this, localPlayer, player, &buildings };
+
+				player->iterateObjects(
+					[](Object* obj, void* userData)
+					{
+						if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+						{
+							return;
+						}
+						if (!obj->isKindOf(KINDOF_STRUCTURE))
+						{
+							return;
+						}
+						if (!obj->isKindOf(KINDOF_CAPTURABLE) && !obj->isKindOf(KINDOF_TECH_BUILDING) && !obj->isKindOf(KINDOF_TECH_BASE_DEFENSE))
+						{
+							return;
+						}
+						if (obj->isKindOf(KINDOF_IMMUNE_TO_CAPTURE))
+						{
+							return;
+						}
+						if (obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION) || obj->testStatus(OBJECT_STATUS_SOLD))
+						{
+							return;
+						}
+
+						CapturableCollectContext* ctx = static_cast<CapturableCollectContext*>(userData);
+						const Player* ownerPlayer = obj->getControllingPlayer();
+						if (ownerPlayer != nullptr)
+						{
+							const Relationship relationship = ctx->localPlayer->getRelationship(ownerPlayer->getDefaultTeam());
+							if (relationship == ALLIES)
+							{
+								return;
+							}
+						}
+
+						nlohmann::json row = ctx->self->buildObjectSummaryRow(obj, false);
+						row["player_index"] = ownerPlayer != nullptr ? ownerPlayer->getPlayerIndex() : -1;
+						row["capturable"] = true;
+						ctx->buildings->push_back(row);
+					},
+					&ctx
+				);
+			}
+
+			return nlohmann::json{
+				{"count", buildings.size()},
+				{"buildings", buildings},
+				{"path", "game.capturable_buildings"}
+			};
+		}
+
 		struct GridConfig
 		{
 			Int cols;
@@ -1434,6 +1513,12 @@
 			{
 				// Visibility is always from local player's perspective.
 				result = buildVisibleEnemiesSummary(localPlayer);
+				return true;
+			}
+
+			if (path == "game.capturable_buildings")
+			{
+				result = buildCapturableBuildingsSummary(localPlayer);
 				return true;
 			}
 

@@ -85,7 +85,7 @@ BUDGET_INFANTRY_MIX_MIN = 1200
 BUDGET_VEHICLE_MIX_MIN = 2600
 OBJECTS_FULL_REFRESH_EVERY = 0
 OBJECTS_CACHE_REFRESH_EVERY_CYCLES = 6
-OBJECTS_UNITS_QUERY_EVERY_CYCLES = 0
+OBJECTS_UNITS_QUERY_EVERY_CYCLES = 3
 OBJECTS_BUILDINGS_QUERY_EVERY_CYCLES = 3
 HEAVY_QUERY_BACKOFF_SEC = 20.0
 IDLE_WORKERS_QUERY_EVERY_CYCLES = 2
@@ -111,11 +111,14 @@ DEFAULT_EXPANSION_ECO_SHARE = 0.4
 DEFAULT_WORKER_TRICKLE_CADENCE_SEC = 3.0
 DEFAULT_WORKER_TRICKLE_MIN_MONEY = 8000
 DEFAULT_WORKER_TRICKLE_MIN_INCOME_PER_SEC = 50.0
+DEFAULT_CAPTURABLE_BUILDINGS_QUERY_EVERY_CYCLES = 6
+DEFAULT_CAPTURE_ATTEMPT_EVERY_CYCLES = 3
 RADAR_KEEPALIVE_INFLIGHT_SEC = 90.0
 RADAR_KEEPALIVE_WATCHDOG_SEC = 240.0
 DEFAULT_LOW_MONEY_THRESHOLD = 3500
 DEFAULT_LOW_MONEY_SKIP_CYCLES = 3
 DEBUG_FORCED_CASH = 999_999
+CAPTURE_BUILDING_UPGRADE = "Upgrade_InfantryCaptureBuilding"
 SCIENCE_PURCHASE_PLAN: tuple[str, ...] = (
     "SCIENCE_ScudLauncher",
     "SCIENCE_CashBounty1",
@@ -420,6 +423,21 @@ def query_supply_sources(
     return rows if isinstance(rows, list) else []
 
 
+def query_capturable_buildings(
+    client: PipeClient,
+    timeout_ms: int,
+    previous_buildings: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    resp = try_send_session_command(client, "Game.Query", {"path": "game.capturable_buildings"}, timeout_ms)
+    if resp is None or resp.get("ok") is False:
+        return list(previous_buildings or [])
+    payload = extract_payload(resp)
+    if not isinstance(payload, dict):
+        return list(previous_buildings or [])
+    rows = payload.get("buildings")
+    return rows if isinstance(rows, list) else list(previous_buildings or [])
+
+
 def build_supply_source_position_map(rows: list[dict[str, Any]]) -> dict[int, tuple[float, float]]:
     positions: dict[int, tuple[float, float]] = {}
     for row in rows:
@@ -611,6 +629,15 @@ def is_command_center_template(template_name: str) -> bool:
     return "commandcenter" in template_name.lower()
 
 
+def is_barracks_template(template_name: str) -> bool:
+    return "barracks" in template_name.lower()
+
+
+def is_rebel_template(template_name: str) -> bool:
+    text = template_name.lower()
+    return "rebel" in text and "rpg" not in text
+
+
 def template_text(row: dict[str, Any]) -> str:
     return str(row.get("template", row.get("template_name", ""))).lower()
 
@@ -637,6 +664,94 @@ def count_complete_matching_templates(rows: list[dict[str, Any]], needles: tuple
         if any(needle in text for needle in needles):
             total += 1
     return total
+
+
+def collect_barracks_ids(buildings: list[dict[str, Any]]) -> list[int]:
+    ids: list[int] = []
+    for row in buildings:
+        if not isinstance(row, dict):
+            continue
+        if bool(row.get("under_construction", False)):
+            continue
+        object_id = parse_object_id(row)
+        if object_id is None:
+            continue
+        if is_barracks_template(template_text(row)):
+            ids.append(object_id)
+    return ids
+
+
+def collect_idle_rebel_ids(units: list[dict[str, Any]]) -> list[int]:
+    ids: list[int] = []
+    for row in units:
+        if not isinstance(row, dict):
+            continue
+        if bool(row.get("under_construction", False)):
+            continue
+        if not bool(row.get("idle", False)):
+            continue
+        object_id = parse_object_id(row)
+        if object_id is None:
+            continue
+        if is_rebel_template(template_text(row)):
+            ids.append(object_id)
+    return ids
+
+
+def choose_capture_assignments(
+    rebel_ids: list[int],
+    units: list[dict[str, Any]],
+    targets: list[dict[str, Any]],
+    claimed_target_ids: set[int],
+) -> list[tuple[int, int]]:
+    if not rebel_ids or not targets:
+        return []
+
+    rebel_positions: dict[int, tuple[float, float]] = {}
+    for row in units:
+        if not isinstance(row, dict):
+            continue
+        object_id = parse_object_id(row)
+        if object_id is None or object_id not in rebel_ids:
+            continue
+        x = row.get("x")
+        y = row.get("y")
+        if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+            rebel_positions[object_id] = (float(x), float(y))
+
+    assignments: list[tuple[int, int]] = []
+    used_rebels: set[int] = set()
+    for target in targets:
+        if not isinstance(target, dict):
+            continue
+        target_id = parse_object_id(target)
+        if target_id is None or target_id in claimed_target_ids:
+            continue
+        x = target.get("x")
+        y = target.get("y")
+        if not isinstance(x, (int, float)) or not isinstance(y, (int, float)):
+            continue
+
+        best_rebel_id: int | None = None
+        best_dist_sq = 0.0
+        for rebel_id in rebel_ids:
+            if rebel_id in used_rebels:
+                continue
+            pos = rebel_positions.get(rebel_id)
+            if pos is None:
+                continue
+            dx = pos[0] - float(x)
+            dy = pos[1] - float(y)
+            dist_sq = (dx * dx) + (dy * dy)
+            if best_rebel_id is None or dist_sq < best_dist_sq:
+                best_rebel_id = rebel_id
+                best_dist_sq = dist_sq
+
+        if best_rebel_id is None:
+            continue
+        used_rebels.add(best_rebel_id)
+        assignments.append((best_rebel_id, target_id))
+    return assignments
 
 
 def has_stash_near_supply_source(
@@ -1558,6 +1673,117 @@ def maybe_queue_upgrade(
     return False
 
 
+def maybe_queue_capture_upgrade(
+    client: PipeClient,
+    timeout_ms: int,
+    cycle: int,
+    barracks_ids: list[int],
+    queued_or_completed_upgrades: set[str],
+    pending_until_by_key: dict[str, float],
+    now: float,
+    pending_cooldown_sec: float,
+) -> bool:
+    if not barracks_ids or CAPTURE_BUILDING_UPGRADE in queued_or_completed_upgrades:
+        return False
+    pending_key = f"Game.QueueUpgrade:barracks:{CAPTURE_BUILDING_UPGRADE}"
+    if is_pending(pending_until_by_key, pending_key, now):
+        return False
+
+    producer_id = int(barracks_ids[0])
+    resp = try_send_session_command(
+        client,
+        "Game.QueueUpgrade",
+        {"producer_object_id": producer_id, "upgrade_name": CAPTURE_BUILDING_UPGRADE},
+        timeout_ms,
+    )
+    if resp is None:
+        return False
+    ok = bool(resp.get("ok", False))
+    code = resp.get("code")
+    reason = resp.get("reason")
+    print(
+        f"[loop {cycle}] upgrade_queue producer=barracks producer_id={producer_id} "
+        f"upgrade={CAPTURE_BUILDING_UPGRADE} ok={ok} code={code} reason={reason}{request_id_suffix(resp)}",
+        flush=True,
+    )
+    if ok:
+        queued_or_completed_upgrades.add(CAPTURE_BUILDING_UPGRADE)
+        mark_pending(pending_until_by_key, pending_key, now, pending_cooldown_sec)
+        return True
+    if reason in ("upgrade_already_complete", "upgrade_already_in_production", "upgrade_already_in_queue"):
+        queued_or_completed_upgrades.add(CAPTURE_BUILDING_UPGRADE)
+        return False
+    return False
+
+
+def maybe_capture_buildings(
+    client: PipeClient,
+    timeout_ms: int,
+    cycle: int,
+    units: list[dict[str, Any]],
+    capturable_buildings: list[dict[str, Any]],
+    pending_until_by_key: dict[str, float],
+    now: float,
+    pending_cooldown_sec: float,
+) -> int:
+    rebel_ids = collect_idle_rebel_ids(units)
+    if not rebel_ids:
+        print(
+            f"[loop {cycle}] capture_skip reason=no_idle_rebels known_units={len(units)} targets={len(capturable_buildings)}",
+            flush=True,
+        )
+        return 0
+    if not capturable_buildings:
+        print(
+            f"[loop {cycle}] capture_skip reason=no_capturable_targets known_units={len(units)}",
+            flush=True,
+        )
+        return 0
+
+    claimed_target_ids: set[int] = set()
+    for key, until in pending_until_by_key.items():
+        if not key.startswith("Game.CaptureBuilding:") or until <= now:
+            continue
+        try:
+            claimed_target_ids.add(int(key.rsplit(":", 1)[1]))
+        except ValueError:
+            continue
+
+    assignments = choose_capture_assignments(rebel_ids, units, capturable_buildings, claimed_target_ids)
+    if not assignments:
+        print(
+            f"[loop {cycle}] capture_skip reason=no_assignments rebels={len(rebel_ids)} "
+            f"targets={len(capturable_buildings)} claimed={len(claimed_target_ids)}",
+            flush=True,
+        )
+        return 0
+    sent_ok = 0
+    for rebel_id, target_id in assignments:
+        pending_key = f"Game.CaptureBuilding:{target_id}"
+        if is_pending(pending_until_by_key, pending_key, now):
+            continue
+        resp = try_send_session_command(
+            client,
+            "Game.CaptureBuilding",
+            {"source_object_id": rebel_id, "target_object_id": target_id},
+            timeout_ms,
+        )
+        if resp is None:
+            continue
+        ok = bool(resp.get("ok", False))
+        code = resp.get("code")
+        reason = resp.get("reason")
+        print(
+            f"[loop {cycle}] capture_building source_id={rebel_id} target_id={target_id} "
+            f"ok={ok} code={code} reason={reason}{request_id_suffix(resp)}",
+            flush=True,
+        )
+        if ok:
+            sent_ok += 1
+            mark_pending(pending_until_by_key, pending_key, now, max(20.0, pending_cooldown_sec))
+    return sent_ok
+
+
 def is_pending(pending_until: dict[str, float], key: str, now_monotonic: float) -> bool:
     return pending_until.get(key, 0.0) > now_monotonic
 
@@ -1833,11 +2059,12 @@ def main() -> int:
     startup_units, startup_buildings = query_objects_compact(
         client,
         args.timeout_ms,
-        include_units=False,
+        include_units=True,
         include_buildings=True,
     )
     startup_supply_sources = query_supply_sources(client, args.timeout_ms)
     startup_supply_source_positions = build_supply_source_position_map(startup_supply_sources)
+    cached_capturable_buildings = query_capturable_buildings(client, args.timeout_ms, previous_buildings=[])
     startup_counts = query_zone_counts(client, args.timeout_ms)
     startup_unit_counts = query_unit_composition(client, args.timeout_ms, previous_counts={})
     cached_status = query_game_status(client, args.timeout_ms, previous_status={})
@@ -2047,6 +2274,13 @@ def main() -> int:
                     else:
                         grid_index = 0
                         active_grid_label = ""
+
+            if cycle % max(1, DEFAULT_CAPTURABLE_BUILDINGS_QUERY_EVERY_CYCLES) == 1:
+                cached_capturable_buildings = query_capturable_buildings(
+                    client,
+                    args.timeout_ms,
+                    previous_buildings=cached_capturable_buildings,
+                )
 
             units, buildings = cached_units, cached_buildings
             existing_workers = int(cached_unit_counts.get("workers", 0))
@@ -2365,6 +2599,7 @@ def main() -> int:
             completed_palaces = count_complete_matching_templates(buildings, ("palace",))
             completed_black_markets = count_complete_matching_templates(buildings, ("blackmarket", "black_market"))
             completed_arms = count_complete_matching_templates(buildings, ("armsdealer", "warfactory"))
+            barracks_ids = collect_barracks_ids(buildings)
             home_zone_center = zone_centers[0]
             home_zone_label = "zone[0]"
             active_zone_center, active_zone_label = current_expansion_anchor(
@@ -2406,6 +2641,27 @@ def main() -> int:
                     time.sleep(args.tick_sec)
                     continue
 
+                capture_upgrade_changed = maybe_queue_capture_upgrade(
+                    client,
+                    args.timeout_ms,
+                    cycle,
+                    barracks_ids=barracks_ids,
+                    queued_or_completed_upgrades=queued_or_completed_upgrades,
+                    pending_until_by_key=pending_until_by_key,
+                    now=now,
+                    pending_cooldown_sec=max(10.0, float(args.pending_cooldown_sec)),
+                )
+                if capture_upgrade_changed:
+                    print(
+                        f"[loop {cycle}] tech_progress type=upgrade rank={rank_level} "
+                        f"science_points={science_points} barracks={len(barracks_ids)} upgrade={CAPTURE_BUILDING_UPGRADE}",
+                        flush=True,
+                    )
+                    last_attempt_at = now
+                    cycle += 1
+                    time.sleep(args.tick_sec)
+                    continue
+
                 upgrade_changed = maybe_queue_upgrade(
                     client,
                     args.timeout_ms,
@@ -2421,6 +2677,30 @@ def main() -> int:
                     print(
                         f"[loop {cycle}] tech_progress type=upgrade rank={rank_level} "
                         f"science_points={science_points} palaces={palaces} black_markets={black_markets}",
+                        flush=True,
+                    )
+                    last_attempt_at = now
+                    cycle += 1
+                    time.sleep(args.tick_sec)
+                    continue
+
+            if (
+                CAPTURE_BUILDING_UPGRADE in queued_or_completed_upgrades
+                and cycle % max(1, DEFAULT_CAPTURE_ATTEMPT_EVERY_CYCLES) == 0
+            ):
+                capture_added = maybe_capture_buildings(
+                    client,
+                    args.timeout_ms,
+                    cycle,
+                    units,
+                    cached_capturable_buildings,
+                    pending_until_by_key,
+                    now,
+                    max(12.0, float(args.pending_cooldown_sec)),
+                )
+                if capture_added > 0:
+                    print(
+                        f"[loop {cycle}] tech_capture added={capture_added} targets={len(cached_capturable_buildings)}",
                         flush=True,
                     )
                     last_attempt_at = now

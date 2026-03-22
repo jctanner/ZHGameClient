@@ -125,11 +125,12 @@ Supported `cmd` values (v1):
 39. `Game.ScudStormAtPosition`
 40. `Game.ScudStormAtPlayer`
 41. `Game.AttackMove`
-42. `Game.AttackMove.RaidSmart`
-43. `Game.Camera.Set`
-44. `Game.Camera.LookAt`
-45. `Game.Camera.SetZoomLimited`
-46. `Game.Camera.Get`
+42. `Game.CaptureBuilding`
+43. `Game.AttackMove.RaidSmart`
+44. `Game.Camera.Set`
+45. `Game.Camera.LookAt`
+46. `Game.Camera.SetZoomLimited`
+47. `Game.Camera.Get`
 
 `Lobby.Join` args:
 
@@ -393,6 +394,19 @@ Supported `cmd` values (v1):
 4. `object_id` (optional int, single controlled object)
 5. `object_ids` (optional int[], multiple controlled objects)
 
+`Game.CaptureBuilding` args:
+
+1. `player_index` (optional int, default local player)
+2. `target_object_id` (required int, capturable building object)
+3. `source_object_id` (optional int, explicit rebel/Black Lotus source; defaults to first idle owned capture-capable unit)
+
+`Game.CaptureBuilding` behavior:
+
+1. Resolve a capturable target building.
+2. Resolve an owned capture-capable source unit, preferring the explicit `source_object_id` when provided.
+3. Validate the capture action through the engine's normal special-power checks.
+4. Issue `MSG_DO_SPECIAL_POWER_AT_OBJECT` using the capture-building special power against the target.
+
 `Game.AttackMove.RaidSmart` args:
 
 1. `player_index` (optional int, default local player)
@@ -470,8 +484,9 @@ Common `path` values:
 16. `game.objects_cache_refresh`
 17. `game.zone_counts`
 18. `game.visible_enemies`
-19. `game.grid`
-20. `game.grid_objects`
+19. `game.capturable_buildings`
+20. `game.grid`
+21. `game.grid_objects`
 
 `game.objects_units_map`, `game.objects_buildings_map`, and `game.idle_workers` are served from a short-lived adapter cache (owned objects for the selected player). Responses include:
 
@@ -483,6 +498,12 @@ Common `path` values:
 1. `player_index` (optional int, default local player)
 2. `zone_center` (optional object `{x,y}`; omitted means whole owned map state)
 3. `zone_radius` (optional number; default adapter-defined)
+
+`game.capturable_buildings` args:
+
+1. `player_index` (optional int, default local player perspective for ally filtering)
+
+Returns non-allied capturable tech/neutral buildings visible to the engine object list, including `id`, `template`, `x`, `y`, and `player_index`.
 
 `game.grid` args:
 

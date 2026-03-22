@@ -5345,6 +5345,162 @@
 			});
 		}
 
+		bool executeGameCaptureBuilding(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheGameLogic == nullptr || TheActionManager == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			const auto targetIdIt = argsIt->find("target_object_id");
+			if (targetIdIt == argsIt->end() || !targetIdIt->is_number_integer())
+			{
+				reason = "missing_target_object_id";
+				return false;
+			}
+
+			const Int targetId = targetIdIt->get<Int>();
+			if (targetId <= 0)
+			{
+				reason = "invalid_target_object_id";
+				return false;
+			}
+
+			Object* target = TheGameLogic->findObjectByID(static_cast<ObjectID>(targetId));
+			if (target == nullptr)
+			{
+				reason = "target_not_found";
+				return false;
+			}
+
+			Object* source = nullptr;
+			const auto sourceIdIt = argsIt->find("source_object_id");
+			if (sourceIdIt != argsIt->end() && sourceIdIt->is_number_integer())
+			{
+				const Int sourceId = sourceIdIt->get<Int>();
+				if (sourceId <= 0)
+				{
+					reason = "invalid_source_object_id";
+					return false;
+				}
+				source = TheGameLogic->findObjectByID(static_cast<ObjectID>(sourceId));
+				if (source == nullptr)
+				{
+					reason = "source_not_found";
+					return false;
+				}
+				if (source->getControllingPlayer() != player)
+				{
+					reason = "source_not_owned";
+					return false;
+				}
+			}
+			else
+			{
+				struct CaptureSourceSearchContext
+				{
+					Object* found;
+					Object* target;
+				} ctx = { nullptr, target };
+
+				player->iterateObjects([](Object* obj, void* userData)
+				{
+					if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+					{
+						return;
+					}
+					CaptureSourceSearchContext* ctx = static_cast<CaptureSourceSearchContext*>(userData);
+					if (ctx->found != nullptr)
+					{
+						return;
+					}
+					if (!obj->hasSpecialPower(SPECIAL_INFANTRY_CAPTURE_BUILDING) && !obj->hasSpecialPower(SPECIAL_BLACKLOTUS_CAPTURE_BUILDING))
+					{
+						return;
+					}
+					const AIUpdateInterface* ai = obj->getAI();
+					if (ai != nullptr && !ai->isIdle())
+					{
+						return;
+					}
+					if (!TheActionManager->canCaptureBuilding(obj, ctx->target, CMD_FROM_PLAYER))
+					{
+						return;
+					}
+					ctx->found = obj;
+				}, &ctx);
+
+				source = ctx.found;
+			}
+
+			if (source == nullptr)
+			{
+				reason = "capture_source_not_found";
+				return false;
+			}
+			if (!TheActionManager->canCaptureBuilding(source, target, CMD_FROM_PLAYER))
+			{
+				reason = "target_not_capturable";
+				return false;
+			}
+
+			SpecialPowerType powerType = SPECIAL_INFANTRY_CAPTURE_BUILDING;
+			SpecialPowerModuleInterface* spInterface = source->findSpecialPowerModuleInterface(powerType);
+			if (spInterface == nullptr)
+			{
+				powerType = SPECIAL_BLACKLOTUS_CAPTURE_BUILDING;
+				spInterface = source->findSpecialPowerModuleInterface(powerType);
+			}
+			if (spInterface == nullptr)
+			{
+				reason = "capture_power_not_found";
+				return false;
+			}
+
+			const char* powerTemplateName = (powerType == SPECIAL_BLACKLOTUS_CAPTURE_BUILDING)
+				? "SpecialAbilityBlackLotusCaptureBuilding"
+				: "SpecialAbilityRebelCaptureBuilding";
+			const SpecialPowerTemplate* powerTemplate = TheSpecialPowerStore != nullptr
+				? TheSpecialPowerStore->findSpecialPowerTemplate(powerTemplateName)
+				: nullptr;
+			if (powerTemplate == nullptr)
+			{
+				reason = "capture_power_template_not_found";
+				return false;
+			}
+			if (!TheActionManager->canDoSpecialPowerAtObject(source, target, CMD_FROM_PLAYER, powerTemplate, 0u))
+			{
+				reason = "capture_not_ready";
+				return false;
+			}
+
+			GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_SPECIAL_POWER_AT_OBJECT);
+			if (msg == nullptr)
+			{
+				reason = "message_stream_not_ready";
+				return false;
+			}
+			msg->appendIntegerArgument(static_cast<Int>(powerTemplate->getID()));
+			msg->appendObjectIDArgument(target->getID());
+			msg->appendIntegerArgument(0);
+			msg->appendObjectIDArgument(source->getID());
+			return true;
+		}
+
 		bool executeGameAttackMoveRaidSmart(const nlohmann::json& message, std::string& reason)
 		{
 			if (TheGameLogic == nullptr || ThePlayerList == nullptr)

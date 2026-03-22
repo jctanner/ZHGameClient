@@ -670,6 +670,18 @@
 				return;
 			}
 
+			if (cmd == "Game.CaptureBuilding")
+			{
+				std::string reason;
+				if (!executeGameCaptureBuilding(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
 			if (cmd == "Game.AttackMoveAllCombatToPlayer")
 			{
 				std::string reason;
