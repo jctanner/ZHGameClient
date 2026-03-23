@@ -62,6 +62,7 @@ DEFAULT_ZONE_COUNT = 64
 DEFAULT_GRID_COLS = 32
 DEFAULT_GRID_ROWS = 32
 DEFAULT_GRID_QUERY_EVERY_CYCLES = 6
+DEFAULT_GRID_EXPANSION_MAX_DISTANCE = 1800.0
 GRID_QUERY_BACKOFF_SEC = 45.0
 DEFAULT_TECH_CHECK_EVERY_CYCLES = 2
 DEFAULT_EXPANSION_COMMAND_CENTER_EVERY = 5
@@ -118,6 +119,10 @@ RADAR_KEEPALIVE_WATCHDOG_SEC = 240.0
 DEFAULT_LOW_MONEY_THRESHOLD = 3500
 DEFAULT_LOW_MONEY_SKIP_CYCLES = 3
 DEBUG_FORCED_CASH = 999_999
+USE_ADAPTER_WORKER_RULE = True
+USE_ADAPTER_RADAR_VAN_RULE = True
+ENABLE_DEBUG_FORCED_CASH = False
+ENABLE_DEBUG_DESHROUD = False
 CAPTURE_BUILDING_UPGRADE = "Upgrade_InfantryCaptureBuilding"
 SCIENCE_PURCHASE_PLAN: tuple[str, ...] = (
     "SCIENCE_ScudLauncher",
@@ -302,6 +307,130 @@ def configure_worker_rule(
         "[worker_rule] "
         f"min_idle_workers={int(min_idle_workers)} queue_count={int(queue_count)} "
         f"producer_kind={producer_kind or 'default'} cooldown_ms={int(cooldown_ms)} "
+        f"ok={ok} code={code} reason={reason}{request_id_suffix(resp)}",
+        flush=True,
+    )
+    return ok
+
+
+def configure_attack_rule(
+    client: PipeClient,
+    timeout_ms: int,
+    *,
+    min_units: int,
+    group_size: int,
+    distance: float,
+    cooldown_ms: int,
+    player_index: int | None = None,
+) -> bool:
+    args: dict[str, Any] = {
+        "min_units": int(min_units),
+        "group_size": int(group_size),
+        "distance": float(distance),
+        "cooldown_ms": int(cooldown_ms),
+    }
+    if player_index is not None:
+        args["player_index"] = int(player_index)
+    resp = try_send_session_command(client, "Automation.ConfigureAttackRule", args, timeout_ms)
+    if resp is None:
+        return False
+    ok = bool(resp.get("ok", False))
+    code = resp.get("code")
+    reason = resp.get("reason")
+    print(
+        "[attack_rule] "
+        f"min_units={int(min_units)} group_size={int(group_size)} "
+        f"distance={float(distance):.1f} cooldown_ms={int(cooldown_ms)} "
+        f"ok={ok} code={code} reason={reason}{request_id_suffix(resp)}",
+        flush=True,
+    )
+    return ok
+
+
+def configure_stash_worker_rule(
+    client: PipeClient,
+    timeout_ms: int,
+    *,
+    target_workers_per_stash: int,
+    cooldown_ms: int,
+    player_index: int | None = None,
+) -> bool:
+    args: dict[str, Any] = {
+        "target_workers_per_stash": int(target_workers_per_stash),
+        "cooldown_ms": int(cooldown_ms),
+    }
+    if player_index is not None:
+        args["player_index"] = int(player_index)
+    resp = try_send_session_command(client, "Automation.ConfigureStashWorkerRule", args, timeout_ms)
+    if resp is None:
+        return False
+    ok = bool(resp.get("ok", False))
+    code = resp.get("code")
+    reason = resp.get("reason")
+    print(
+        "[stash_worker_rule] "
+        f"target_workers_per_stash={int(target_workers_per_stash)} "
+        f"cooldown_ms={int(cooldown_ms)} "
+        f"ok={ok} code={code} reason={reason}{request_id_suffix(resp)}",
+        flush=True,
+    )
+    return ok
+
+
+def configure_capture_rule(
+    client: PipeClient,
+    timeout_ms: int,
+    *,
+    max_concurrent: int,
+    cooldown_ms: int,
+    prefer_idle: bool = True,
+    player_index: int | None = None,
+) -> bool:
+    args: dict[str, Any] = {
+        "max_concurrent": int(max_concurrent),
+        "cooldown_ms": int(cooldown_ms),
+        "prefer_idle": bool(prefer_idle),
+    }
+    if player_index is not None:
+        args["player_index"] = int(player_index)
+    resp = try_send_session_command(client, "Automation.ConfigureCaptureRule", args, timeout_ms)
+    if resp is None:
+        return False
+    ok = bool(resp.get("ok", False))
+    code = resp.get("code")
+    reason = resp.get("reason")
+    print(
+        "[capture_rule] "
+        f"max_concurrent={int(max_concurrent)} prefer_idle={bool(prefer_idle)} "
+        f"cooldown_ms={int(cooldown_ms)} ok={ok} code={code} reason={reason}{request_id_suffix(resp)}",
+        flush=True,
+    )
+    return ok
+
+
+def configure_radar_van_rule(
+    client: PipeClient,
+    timeout_ms: int,
+    *,
+    min_count: int,
+    cooldown_ms: int,
+    player_index: int | None = None,
+) -> bool:
+    args: dict[str, Any] = {
+        "min_count": int(min_count),
+        "cooldown_ms": int(cooldown_ms),
+    }
+    if player_index is not None:
+        args["player_index"] = int(player_index)
+    resp = try_send_session_command(client, "Automation.ConfigureRadarVanRule", args, timeout_ms)
+    if resp is None:
+        return False
+    ok = bool(resp.get("ok", False))
+    code = resp.get("code")
+    reason = resp.get("reason")
+    print(
+        "[radar_van_rule] "
+        f"min_count={int(min_count)} cooldown_ms={int(cooldown_ms)} "
         f"ok={ok} code={code} reason={reason}{request_id_suffix(resp)}",
         flush=True,
     )
@@ -922,6 +1051,8 @@ def build_grid_targets(
     grid_summary: dict[str, Any] | None,
     anchor_x: float,
     anchor_y: float,
+    local_player_index: int | None = None,
+    max_distance: float = DEFAULT_GRID_EXPANSION_MAX_DISTANCE,
 ) -> list[dict[str, Any]]:
     if not isinstance(grid_summary, dict):
         return []
@@ -943,6 +1074,7 @@ def build_grid_targets(
     map_min_y = float(min_y)
     map_max_x = float(max_x)
     map_max_y = float(max_y)
+    max_distance_sq = max(256.0, float(max_distance)) ** 2
     cell_w = (map_max_x - map_min_x) / float(grid_cols) if grid_cols > 0 else 0.0
     cell_h = (map_max_y - map_min_y) / float(grid_rows) if grid_rows > 0 else 0.0
     if cell_w <= 0.0 or cell_h <= 0.0:
@@ -969,6 +1101,31 @@ def build_grid_targets(
             buildings = int(raw.get("buildings", 0)) if isinstance(raw.get("buildings"), int) else 0
             units = int(raw.get("units", 0)) if isinstance(raw.get("units"), int) else 0
             distance_sq = ((center_x - anchor_x) ** 2) + ((center_y - anchor_y) ** 2)
+            if distance_sq > max_distance_sq:
+                continue
+            dominant_player_index = int(raw.get("dominant_player_index", -1)) if isinstance(raw.get("dominant_player_index"), int) else -1
+            player_counts = raw.get("player_counts") if isinstance(raw.get("player_counts"), dict) else {}
+            local_total = 0
+            enemy_total = 0
+            if local_player_index is not None:
+                local_node = player_counts.get(str(local_player_index))
+                if isinstance(local_node, dict) and isinstance(local_node.get("total"), int):
+                    local_total = int(local_node.get("total", 0))
+                for key, node in player_counts.items():
+                    if not isinstance(node, dict) or not isinstance(node.get("total"), int):
+                        continue
+                    try:
+                        player_index = int(key)
+                    except (TypeError, ValueError):
+                        continue
+                    if player_index == local_player_index or player_index < 0:
+                        continue
+                    enemy_total = max(enemy_total, int(node.get("total", 0)))
+            enemy_penalty = 0
+            if local_player_index is not None and dominant_player_index >= 0 and dominant_player_index != local_player_index:
+                enemy_penalty += 10
+            if enemy_total > 0 and local_total <= 0:
+                enemy_penalty += 6
             occupancy_penalty = (3 if buildings > 0 else 0) + (1 if units > 0 else 0)
             targets.append(
                 {
@@ -979,8 +1136,11 @@ def build_grid_targets(
                     "objects_total": objects_total,
                     "buildings": buildings,
                     "units": units,
+                    "dominant_player_index": dominant_player_index,
+                    "local_total": local_total,
+                    "enemy_total": enemy_total,
                     "distance_sq": distance_sq,
-                    "sort_key": (occupancy_penalty, objects_total, distance_sq, row, col),
+                    "sort_key": (enemy_penalty, occupancy_penalty, objects_total, distance_sq, row, col),
                 }
             )
 
@@ -2089,6 +2249,34 @@ def main() -> int:
         queue_count=9,
         cooldown_ms=3000,
     )
+    configure_stash_worker_rule(
+        client,
+        args.timeout_ms,
+        target_workers_per_stash=STASH_WORKER_TARGET,
+        cooldown_ms=4000,
+    )
+    configure_attack_rule(
+        client,
+        args.timeout_ms,
+        min_units=max(1, int(args.raid_min_units)),
+        group_size=max(1, int(args.raid_group_size)),
+        distance=max(256.0, float(args.raid_distance)),
+        cooldown_ms=max(1000, int(float(args.raid_cooldown_sec) * 1000.0)),
+    )
+    configure_capture_rule(
+        client,
+        args.timeout_ms,
+        max_concurrent=3,
+        prefer_idle=True,
+        cooldown_ms=4000,
+    )
+    if USE_ADAPTER_RADAR_VAN_RULE:
+        configure_radar_van_rule(
+            client,
+            args.timeout_ms,
+            min_count=2,
+            cooldown_ms=12000,
+        )
     print(
         f"Plan phases: opening={len(PHASE_OPENING.steps)} expansion={len(PHASE_EXPANSION.steps)} "
         f"warmonger={len(PHASE_WARMONGER.steps)} | cc_worker_target={COMMAND_CENTER_WORKER_TARGET} "
@@ -2110,6 +2298,7 @@ def main() -> int:
     startup_counts = query_zone_counts(client, args.timeout_ms)
     startup_unit_counts = query_unit_composition(client, args.timeout_ms, previous_counts={})
     cached_status = query_game_status(client, args.timeout_ms, previous_status={})
+    local_player_index = int(cached_status.get("player_index", -1)) if isinstance(cached_status.get("player_index"), int) else None
     command_center_ids, stash_ids = collect_producer_ids(startup_buildings)
     existing_workers = int(startup_unit_counts.get("workers", 0))
     startup_has_palace = has_palace_started(startup_buildings) or (
@@ -2142,7 +2331,12 @@ def main() -> int:
             max(1, int(args.grid_cols)),
             max(1, int(args.grid_rows)),
         )
-        grid_targets = build_grid_targets(cached_grid_summary, anchor_x, anchor_y)
+        grid_targets = build_grid_targets(
+            cached_grid_summary,
+            anchor_x,
+            anchor_y,
+            local_player_index=local_player_index,
+        )
         if grid_targets:
             active_grid_label = str(grid_targets[0].get("cell", ""))
 
@@ -2190,9 +2384,6 @@ def main() -> int:
     last_palace_success_at = 0.0
     heavy_query_backoff_until = 0.0
     grid_query_backoff_until = 0.0
-    radar_keepalive_inflight_until = 0.0
-    radar_keepalive_queued = False
-    radar_keepalive_queued_at = 0.0
     low_money_skip_until_cycle = 0
     cycle = 1
     pending_until_by_key: dict[str, float] = {}
@@ -2201,8 +2392,10 @@ def main() -> int:
     cached_units = startup_units
     cached_buildings = startup_buildings
     cached_unit_counts = startup_unit_counts
-    force_debug_cash(client, args.timeout_ms, DEBUG_FORCED_CASH)
-    force_debug_deshroud(client, args.timeout_ms)
+    if ENABLE_DEBUG_FORCED_CASH:
+        force_debug_cash(client, args.timeout_ms, DEBUG_FORCED_CASH)
+    if ENABLE_DEBUG_DESHROUD:
+        force_debug_deshroud(client, args.timeout_ms)
     cached_money = query_money(client, args.timeout_ms, previous_money=DEBUG_FORCED_CASH)
     cached_idle_workers = query_idle_workers_count(client, args.timeout_ms, previous_count=0)
     last_money_sample = cached_money
@@ -2305,7 +2498,12 @@ def main() -> int:
                 elif refreshed_grid_summary is not None:
                     previous_label = active_grid_label
                     cached_grid_summary = refreshed_grid_summary
-                    grid_targets = build_grid_targets(cached_grid_summary, anchor_x, anchor_y)
+                    grid_targets = build_grid_targets(
+                        cached_grid_summary,
+                        anchor_x,
+                        anchor_y,
+                        local_player_index=local_player_index,
+                    )
                     if grid_targets:
                         remapped_index = find_grid_index_by_label(grid_targets, previous_label) if previous_label else None
                         if remapped_index is not None:
@@ -2425,168 +2623,114 @@ def main() -> int:
                     guard_idle_reason = f"cooldown_gate remaining_sec={remaining:.1f}"
                 print(f"[loop {cycle}] guard_idle_skip {guard_idle_reason}", flush=True)
 
-            radar_keepalive_key = "Game.QueueRadarVan.Keepalive"
-            if assets.get("radar_vans", 0) > 0:
-                radar_keepalive_inflight_until = 0.0
-                radar_keepalive_queued = False
-                radar_keepalive_queued_at = 0.0
-            if radar_keepalive_queued and (now - radar_keepalive_queued_at) >= RADAR_KEEPALIVE_WATCHDOG_SEC:
-                radar_keepalive_queued = False
-                radar_keepalive_queued_at = 0.0
-            radar_keepalive_inflight = radar_keepalive_inflight_until > now
-            radar_ready_or_pending = (
-                assets.get("radar_vans", 0) > 0
-                or is_pending(pending_until_by_key, radar_keepalive_key, now)
-                or radar_keepalive_inflight
-                or radar_keepalive_queued
-            )
-            if assets.get("arms", 0) > 0 and not radar_ready_or_pending:
-                radar_resp = try_send_session_command(client, "Game.QueueRadarVan", {}, args.timeout_ms)
-                radar_ok = False
-                radar_code: Any = None
-                radar_reason: Any = None
-                if radar_resp is not None:
-                    radar_ok = bool(radar_resp.get("ok", False))
-                    radar_code = radar_resp.get("code")
-                    radar_reason = radar_resp.get("reason")
-                if not radar_ok:
-                    fallback_resp = try_send_session_command(
-                        client,
-                        "Game.QueueRadarVansAllWarFactories",
-                        {"count": 1},
-                        args.timeout_ms,
-                    )
-                    if fallback_resp is not None:
-                        radar_ok = bool(fallback_resp.get("ok", False))
-                        radar_code = fallback_resp.get("code")
-                        radar_reason = fallback_resp.get("reason")
-                print(
-                    f"[loop {cycle}] radar_keepalive arms={assets.get('arms', 0)} radar_vans={assets.get('radar_vans', 0)} "
-                    f"ok={radar_ok} code={radar_code} reason={radar_reason}",
-                    flush=True,
-                )
-                if radar_ok:
-                    mark_pending(
-                        pending_until_by_key,
-                        radar_keepalive_key,
-                        now,
-                        max(12.0, float(args.pending_cooldown_sec)),
-                    )
-                    radar_keepalive_inflight_until = now + RADAR_KEEPALIVE_INFLIGHT_SEC
-                    radar_keepalive_queued = True
-                    radar_keepalive_queued_at = now
-                last_attempt_at = now
-                cycle += 1
-                time.sleep(args.tick_sec)
-                continue
-
-            # Keep a healthy worker pool throughout the run. GLA workers are both economy and
-            # build pressure, so stopping stash top-up after opening leaves expansion starved.
             current_phase = PLAN_PHASES[phase_index]
-            allow_cc_topup = True
-            allow_stash_topup = True
-            idle_skip_threshold = max(0, int(args.idle_workers_skip_topup_threshold))
-            defense_worker_min_idle = max(0, int(args.defense_worker_min_idle))
-            pressure_cycle_threshold = max(1, int(args.cc_worker_pressure_cycles))
-            if cached_idle_workers < defense_worker_min_idle:
-                defense_worker_pressure_cycles += 1
-            else:
-                defense_worker_pressure_cycles = 0
-            if cached_idle_workers < idle_skip_threshold:
-                cc_worker_pressure_cycles += 1
-            else:
-                cc_worker_pressure_cycles = 0
+            if not USE_ADAPTER_WORKER_RULE:
+                # Keep a healthy worker pool throughout the run. GLA workers are both economy and
+                # build pressure, so stopping stash top-up after opening leaves expansion starved.
+                allow_cc_topup = True
+                allow_stash_topup = True
+                idle_skip_threshold = max(0, int(args.idle_workers_skip_topup_threshold))
+                defense_worker_min_idle = max(0, int(args.defense_worker_min_idle))
+                pressure_cycle_threshold = max(1, int(args.cc_worker_pressure_cycles))
+                if cached_idle_workers < defense_worker_min_idle:
+                    defense_worker_pressure_cycles += 1
+                else:
+                    defense_worker_pressure_cycles = 0
+                if cached_idle_workers < idle_skip_threshold:
+                    cc_worker_pressure_cycles += 1
+                else:
+                    cc_worker_pressure_cycles = 0
 
-            forced_cc_topup = current_phase.name in (PHASE_EXPANSION_NAME, PHASE_SUSTAIN_NAME) and (
-                defense_worker_pressure_cycles >= pressure_cycle_threshold
-                or cc_worker_pressure_cycles >= pressure_cycle_threshold
-                or defense_worker_failure_cycles >= pressure_cycle_threshold
-            )
-            if forced_cc_topup:
-                print(
-                    f"[loop {cycle}] worker_topup_force cc_idle_workers={cached_idle_workers} "
-                    f"pressure_cycles={cc_worker_pressure_cycles} defense_pressure_cycles={defense_worker_pressure_cycles} "
-                    f"defense_failure_cycles={defense_worker_failure_cycles}",
-                    flush=True,
+                forced_cc_topup = current_phase.name in (PHASE_EXPANSION_NAME, PHASE_SUSTAIN_NAME) and (
+                    defense_worker_pressure_cycles >= pressure_cycle_threshold
+                    or cc_worker_pressure_cycles >= pressure_cycle_threshold
+                    or defense_worker_failure_cycles >= pressure_cycle_threshold
                 )
-            if phase_index > 0:
-                worker_money_gate = max(0, int(args.worker_topup_min_money))
-                if money < worker_money_gate and not forced_cc_topup:
-                    allow_cc_topup = False
+                if forced_cc_topup:
                     print(
-                        f"[loop {cycle}] worker_topup_skip cc_low_cash money={money} required={worker_money_gate}",
+                        f"[loop {cycle}] worker_topup_force cc_idle_workers={cached_idle_workers} "
+                        f"pressure_cycles={cc_worker_pressure_cycles} defense_pressure_cycles={defense_worker_pressure_cycles} "
+                        f"defense_failure_cycles={defense_worker_failure_cycles}",
                         flush=True,
                     )
-            if (allow_cc_topup or allow_stash_topup) and (now - last_worker_topup_at) >= DEFAULT_WORKER_TOPUP_COOLDOWN_SEC:
-                command_center_count = len(command_center_worker_issued)
-                stash_count = len(stash_worker_issued)
-                target_total_workers = (command_center_count * COMMAND_CENTER_WORKER_TARGET) + (stash_count * STASH_WORKER_TARGET if allow_stash_topup else 0)
-                worker_deficit_total = max(0, target_total_workers - existing_workers)
-                worker_topup_done = False
-                prefer_stash_topup = allow_stash_topup and current_phase.name != PHASE_WARMONGER_NAME
-                worker_pending_cooldown = 1.0
-                if idle_skip_threshold > 0 and cached_idle_workers >= idle_skip_threshold and worker_deficit_total <= 0 and not forced_cc_topup:
-                    allow_cc_topup = False
-                    print(
-                        f"[loop {cycle}] worker_topup_skip cc_idle_workers={cached_idle_workers} "
-                        f"threshold={idle_skip_threshold} target_satisfied={target_total_workers}",
-                        flush=True,
-                    )
-                if worker_deficit_total <= 0:
-                    print(
-                        f"[loop {cycle}] worker_topup_skip ratio_satisfied workers={existing_workers} "
-                        f"target={target_total_workers} stashes={stash_count}",
-                        flush=True,
-                    )
-                if worker_deficit_total > 0 and prefer_stash_topup and not worker_topup_done and allow_stash_topup:
-                    stash_added = top_up_workers_for_producers(
-                        client=client,
-                        timeout_ms=args.timeout_ms,
-                        cycle=cycle,
-                        producer_label="stash",
-                        producer_target=STASH_WORKER_TARGET,
-                        producer_worker_issued=stash_worker_issued,
-                        max_total_to_add=worker_deficit_total,
-                        pending_until_by_key=pending_until_by_key,
-                        now=now,
-                        pending_cooldown_sec=worker_pending_cooldown,
-                    )
-                    if stash_added > 0:
-                        worker_topup_done = True
-                        worker_deficit_total = max(0, worker_deficit_total - stash_added)
-                if worker_deficit_total > 0 and not worker_topup_done and allow_cc_topup:
-                    cc_added = top_up_workers_for_producers(
-                        client=client,
-                        timeout_ms=args.timeout_ms,
-                        cycle=cycle,
-                        producer_label="command_center",
-                        producer_target=COMMAND_CENTER_WORKER_TARGET,
-                        producer_worker_issued=command_center_worker_issued,
-                        max_total_to_add=worker_deficit_total,
-                        pending_until_by_key=pending_until_by_key,
-                        now=now,
-                        pending_cooldown_sec=worker_pending_cooldown,
-                    )
-                    if cc_added > 0:
-                        worker_topup_done = True
-                        worker_deficit_total = max(0, worker_deficit_total - cc_added)
-                if worker_deficit_total > 0 and not worker_topup_done and allow_stash_topup:
-                    stash_added = top_up_workers_for_producers(
-                        client=client,
-                        timeout_ms=args.timeout_ms,
-                        cycle=cycle,
-                        producer_label="stash",
-                        producer_target=STASH_WORKER_TARGET,
-                        producer_worker_issued=stash_worker_issued,
-                        max_total_to_add=worker_deficit_total,
-                        pending_until_by_key=pending_until_by_key,
-                        now=now,
-                        pending_cooldown_sec=worker_pending_cooldown,
-                    )
-                    if stash_added > 0:
-                        worker_topup_done = True
-                if worker_topup_done:
-                    last_worker_topup_at = now
+                if phase_index > 0:
+                    worker_money_gate = max(0, int(args.worker_topup_min_money))
+                    if money < worker_money_gate and not forced_cc_topup:
+                        allow_cc_topup = False
+                        print(
+                            f"[loop {cycle}] worker_topup_skip cc_low_cash money={money} required={worker_money_gate}",
+                            flush=True,
+                        )
+                if (allow_cc_topup or allow_stash_topup) and (now - last_worker_topup_at) >= DEFAULT_WORKER_TOPUP_COOLDOWN_SEC:
+                    command_center_count = len(command_center_worker_issued)
+                    stash_count = len(stash_worker_issued)
+                    target_total_workers = (command_center_count * COMMAND_CENTER_WORKER_TARGET) + (stash_count * STASH_WORKER_TARGET if allow_stash_topup else 0)
+                    worker_deficit_total = max(0, target_total_workers - existing_workers)
+                    worker_topup_done = False
+                    prefer_stash_topup = allow_stash_topup and current_phase.name != PHASE_WARMONGER_NAME
+                    worker_pending_cooldown = 1.0
+                    if idle_skip_threshold > 0 and cached_idle_workers >= idle_skip_threshold and worker_deficit_total <= 0 and not forced_cc_topup:
+                        allow_cc_topup = False
+                        print(
+                            f"[loop {cycle}] worker_topup_skip cc_idle_workers={cached_idle_workers} "
+                            f"threshold={idle_skip_threshold} target_satisfied={target_total_workers}",
+                            flush=True,
+                        )
+                    if worker_deficit_total <= 0:
+                        print(
+                            f"[loop {cycle}] worker_topup_skip ratio_satisfied workers={existing_workers} "
+                            f"target={target_total_workers} stashes={stash_count}",
+                            flush=True,
+                        )
+                    if worker_deficit_total > 0 and prefer_stash_topup and not worker_topup_done and allow_stash_topup:
+                        stash_added = top_up_workers_for_producers(
+                            client=client,
+                            timeout_ms=args.timeout_ms,
+                            cycle=cycle,
+                            producer_label="stash",
+                            producer_target=STASH_WORKER_TARGET,
+                            producer_worker_issued=stash_worker_issued,
+                            max_total_to_add=worker_deficit_total,
+                            pending_until_by_key=pending_until_by_key,
+                            now=now,
+                            pending_cooldown_sec=worker_pending_cooldown,
+                        )
+                        if stash_added > 0:
+                            worker_topup_done = True
+                            worker_deficit_total = max(0, worker_deficit_total - stash_added)
+                    if worker_deficit_total > 0 and not worker_topup_done and allow_cc_topup:
+                        cc_added = top_up_workers_for_producers(
+                            client=client,
+                            timeout_ms=args.timeout_ms,
+                            cycle=cycle,
+                            producer_label="command_center",
+                            producer_target=COMMAND_CENTER_WORKER_TARGET,
+                            producer_worker_issued=command_center_worker_issued,
+                            max_total_to_add=worker_deficit_total,
+                            pending_until_by_key=pending_until_by_key,
+                            now=now,
+                            pending_cooldown_sec=worker_pending_cooldown,
+                        )
+                        if cc_added > 0:
+                            worker_topup_done = True
+                            worker_deficit_total = max(0, worker_deficit_total - cc_added)
+                    if worker_deficit_total > 0 and not worker_topup_done and allow_stash_topup:
+                        stash_added = top_up_workers_for_producers(
+                            client=client,
+                            timeout_ms=args.timeout_ms,
+                            cycle=cycle,
+                            producer_label="stash",
+                            producer_target=STASH_WORKER_TARGET,
+                            producer_worker_issued=stash_worker_issued,
+                            max_total_to_add=worker_deficit_total,
+                            pending_until_by_key=pending_until_by_key,
+                            now=now,
+                            pending_cooldown_sec=worker_pending_cooldown,
+                        )
+                        if stash_added > 0:
+                            worker_topup_done = True
+                    if worker_topup_done:
+                        last_worker_topup_at = now
 
             current_phase = PLAN_PHASES[phase_index]
             black_markets = assets["black_markets"]
@@ -2680,30 +2824,6 @@ def main() -> int:
                     time.sleep(args.tick_sec)
                     continue
 
-            if (
-                CAPTURE_BUILDING_UPGRADE in queued_or_completed_upgrades
-                and cycle % max(1, DEFAULT_CAPTURE_ATTEMPT_EVERY_CYCLES) == 0
-            ):
-                capture_added = maybe_capture_buildings(
-                    client,
-                    args.timeout_ms,
-                    cycle,
-                    units,
-                    cached_capturable_buildings,
-                    pending_until_by_key,
-                    now,
-                    max(12.0, float(args.pending_cooldown_sec)),
-                )
-                if capture_added > 0:
-                    print(
-                        f"[loop {cycle}] tech_capture added={capture_added} targets={len(cached_capturable_buildings)}",
-                        flush=True,
-                    )
-                    last_attempt_at = now
-                    cycle += 1
-                    time.sleep(args.tick_sec)
-                    continue
-
             palace_recovery_grace_sec = max(0.0, float(args.palace_recovery_grace_sec))
             can_attempt_palace_recovery = (now - last_palace_success_at) >= palace_recovery_grace_sec
             if current_phase.name != PHASE_OPENING_NAME and palaces <= 0 and can_attempt_palace_recovery:
@@ -2781,6 +2901,10 @@ def main() -> int:
             if current_phase.name == PHASE_EXPANSION_NAME:
                 desired_markets_for_next_palace = max(4, (palaces + 1) * max(1, int(args.palace_market_ratio)))
                 market_bootstrap_target = max(0, int(args.market_bootstrap_target))
+                prereq_market_floor = 4
+                pre_market_ramp = completed_palaces > 0 and black_markets < prereq_market_floor
+                pre_palace_completion_ramp = palaces > 0 and completed_palaces <= 0
+                tech_ramp_restriction = pre_palace_completion_ramp or pre_market_ramp
                 market_bootstrap_needed = (
                     completed_palaces > 0
                     and black_markets < min(desired_markets_for_next_palace, market_bootstrap_target)
@@ -2859,6 +2983,7 @@ def main() -> int:
                     arms_every > 0
                     and ((expansion_cycle_count + 1) % arms_every == 0)
                     and money >= max(0, int(args.arms_dealer_min_money))
+                    and not tech_ramp_restriction
                 )
                 if should_try_arms and not is_pending(pending_until_by_key, "Game.BuildArmsDealerSmart", now):
                     arms_complete_in_zone, arms_uc_in_zone = zone_building_state_counts(
@@ -2902,6 +3027,7 @@ def main() -> int:
                     cc_every > 0
                     and ((expansion_cycle_count + 1) % cc_every == 0)
                     and money >= max(0, int(args.command_center_min_money))
+                    and not tech_ramp_restriction
                 )
                 if should_try_command_center and not is_pending(pending_until_by_key, "Game.BuildCommandCenterSmart", now):
                     cc_complete, cc_uc = zone_building_state_counts(
@@ -2946,7 +3072,7 @@ def main() -> int:
                     and ((expansion_cycle_count + 1) % infantry_every == 0)
                     and money >= expansion_unit_min_money
                     and assets.get("barracks", 0) > 0
-                    and not market_bootstrap_priority
+                    and not tech_ramp_restriction
                     and not is_pending(pending_until_by_key, "Script.QueueInfantryMix.Expansion", now)
                 )
                 if should_queue_expansion_infantry:
@@ -2977,7 +3103,7 @@ def main() -> int:
                     and ((expansion_cycle_count + 1) % vehicle_every == 0)
                     and money >= expansion_unit_min_money
                     and assets.get("arms", 0) > 0
-                    and not market_bootstrap_priority
+                    and not tech_ramp_restriction
                     and not is_pending(pending_until_by_key, "Script.QueueVehicleMix.Expansion", now)
                 )
                 if should_queue_expansion_vehicle:
@@ -3025,7 +3151,17 @@ def main() -> int:
                 black_markets_count_for_cycle = int(expansion_step.args.get("black_markets", 0)) if money >= SUSTAIN_BLACK_MARKET_MIN_MONEY else 0
                 tunnel_networks_count_for_cycle = int(expansion_step.args.get("tunnel_networks", 0))
                 stinger_sites_count_for_cycle = int(expansion_step.args.get("stinger_sites", 0))
+                defense_needs_workers = defense_mix_needs_workers(
+                    tunnel_networks_count=tunnel_networks_count_for_cycle,
+                    stinger_sites_count=stinger_sites_count_for_cycle,
+                )
+                force_defense_first = defense_needs_workers and (
+                    cached_idle_workers < max(0, int(args.defense_worker_min_idle))
+                    or defense_worker_pressure_cycles > 0
+                )
                 if market_bootstrap_priority:
+                    requested_stash_count = 0
+                    stash_count_for_cycle = 0
                     barracks_count_for_cycle = 0
                     arms_count_for_cycle = 0
                     tunnel_networks_count_for_cycle = 0
@@ -3037,14 +3173,24 @@ def main() -> int:
                         f"net_income_per_sec={effective_net_income_per_sec:.2f}",
                         flush=True,
                     )
-                defense_needs_workers = defense_mix_needs_workers(
-                    tunnel_networks_count=tunnel_networks_count_for_cycle,
-                    stinger_sites_count=stinger_sites_count_for_cycle,
-                )
-                force_defense_first = defense_needs_workers and (
-                    cached_idle_workers < max(0, int(args.defense_worker_min_idle))
-                    or defense_worker_pressure_cycles > 0
-                )
+                elif tech_ramp_restriction:
+                    requested_stash_count = 0
+                    stash_count_for_cycle = 0
+                    barracks_count_for_cycle = 0
+                    arms_count_for_cycle = 0
+                    if force_defense_first:
+                        tunnel_networks_count_for_cycle = min(1, tunnel_networks_count_for_cycle)
+                        stinger_sites_count_for_cycle = 0
+                    else:
+                        tunnel_networks_count_for_cycle = 0
+                        stinger_sites_count_for_cycle = 0
+                    print(
+                        f"[loop {cycle}] phase=expansion econ=tech_ramp_lock "
+                        f"palaces={palaces} completed_palaces={completed_palaces} "
+                        f"bm={black_markets} market_floor={prereq_market_floor} "
+                        f"force_defense_first={force_defense_first} money={money}",
+                        flush=True,
+                    )
                 if requested_stash_count > 0:
                     if money < SUSTAIN_STASH_MIN_MONEY:
                         stash_count_for_cycle = 0
@@ -3074,6 +3220,10 @@ def main() -> int:
                 defense_usable_budget = 0
                 if market_bootstrap_priority:
                     eco_usable_budget = usable_idle_workers
+                    defense_usable_budget = 0
+                elif tech_ramp_restriction:
+                    eco_usable_budget = usable_idle_workers
+                    defense_usable_budget = 0 if not force_defense_first else min(1, usable_idle_workers)
                 elif defense_request_count > 0 and eco_request_count > 0:
                     eco_usable_budget = int(round(float(usable_idle_workers) * DEFAULT_EXPANSION_ECO_SHARE))
                     eco_usable_budget = max(1, eco_usable_budget)
@@ -3187,38 +3337,6 @@ def main() -> int:
                 continue
 
             if current_phase.name == PHASE_WARMONGER_NAME:
-                raid_every = max(1, int(args.raid_every_cycles))
-                raid_min_units = max(1, int(args.raid_min_units))
-                raid_group_size = max(1, int(args.raid_group_size))
-                raid_distance = max(256.0, float(args.raid_distance))
-                raid_key = "Game.AttackMove.RaidSmart"
-                raid_cycle_gate = (cycle % raid_every == 0)
-                raid_cooldown_gate = not is_pending(pending_until_by_key, raid_key, now)
-                if raid_cycle_gate and raid_cooldown_gate:
-                    raid_resp = try_send_session_command(
-                        client,
-                        "Game.AttackMove.RaidSmart",
-                        {"min_units": raid_min_units, "group_size": raid_group_size, "distance": raid_distance},
-                        args.timeout_ms,
-                    )
-                    if raid_resp is not None:
-                        raid_ok = bool(raid_resp.get("ok", False))
-                        print(
-                            f"[loop {cycle}] raid_smart ok={raid_ok} "
-                            f"code={raid_resp.get('code')} reason={raid_resp.get('reason')}",
-                            flush=True,
-                        )
-                        if raid_ok:
-                            mark_pending(pending_until_by_key, raid_key, now, max(1.0, float(args.raid_cooldown_sec)))
-                else:
-                    if not raid_cycle_gate:
-                        raid_reason = f"cycle_gate cycle={cycle} every={raid_every}"
-                    else:
-                        pending_until = pending_until_by_key.get(raid_key, 0.0)
-                        remaining = max(0.0, pending_until - now)
-                        raid_reason = f"cooldown_gate remaining_sec={remaining:.1f}"
-                    print(f"[loop {cycle}] raid_skip {raid_reason}", flush=True)
-
                 warmonger_step = PHASE_WARMONGER.steps[warmonger_step_index]
                 if is_pending(pending_until_by_key, warmonger_step.cmd, now):
                     warmonger_step_index = (warmonger_step_index + 1) % len(PHASE_WARMONGER.steps)
@@ -3332,6 +3450,17 @@ def main() -> int:
                         continue
 
                 current = PHASE_OPENING.steps[opening_step_index]
+                if USE_ADAPTER_WORKER_RULE and current.cmd == "Game.BuildWorker":
+                    opening_step_index += 1
+                    opening_step_attempt_count = 0
+                    print(
+                        f"[loop {cycle}] phase=open step={opening_step_index}/{len(PHASE_OPENING.steps)} "
+                        "skip=adapter_worker_rule",
+                        flush=True,
+                    )
+                    cycle += 1
+                    time.sleep(args.tick_sec)
+                    continue
                 if current.cmd == "Game.BuildWorker":
                     opening_step_attempt_count = max(
                         opening_step_attempt_count,
@@ -3536,54 +3665,11 @@ def main() -> int:
                 continue
 
             # Phase 3 (vesting): low-spend consolidation with measured cash growth.
-            raid_every = max(1, int(args.raid_every_cycles))
-            raid_min_units = max(1, int(args.raid_min_units))
-            raid_group_size = max(1, int(args.raid_group_size))
-            raid_distance = max(256.0, float(args.raid_distance))
-            raid_key = "Game.AttackMove.RaidSmart"
             low_money_threshold = max(0, int(args.low_money_threshold))
             low_money_skip_cycles = max(1, int(args.low_money_skip_cycles))
             if money < low_money_threshold:
                 low_money_skip_until_cycle = max(low_money_skip_until_cycle, cycle + low_money_skip_cycles)
             in_low_money_hold = (money < low_money_threshold) and (cycle < low_money_skip_until_cycle)
-
-            raid_cycle_gate = (cycle % raid_every == 0) and not in_low_money_hold
-            raid_cooldown_gate = not is_pending(pending_until_by_key, raid_key, now)
-            if raid_cycle_gate and raid_cooldown_gate:
-                raid_resp = try_send_session_command(
-                    client,
-                    "Game.AttackMove.RaidSmart",
-                    {
-                        "min_units": raid_min_units,
-                        "group_size": raid_group_size,
-                        "distance": raid_distance,
-                    },
-                    args.timeout_ms,
-                )
-                if raid_resp is not None:
-                    raid_ok = bool(raid_resp.get("ok", False))
-                    print(
-                        f"[loop {cycle}] raid_smart ok={raid_ok} "
-                        f"code={raid_resp.get('code')} reason={raid_resp.get('reason')}",
-                        flush=True,
-                    )
-                    if raid_ok:
-                        mark_pending(
-                            pending_until_by_key,
-                            raid_key,
-                            now,
-                            max(1.0, float(args.raid_cooldown_sec)),
-                        )
-            else:
-                if in_low_money_hold:
-                    raid_reason = f"low_money_hold money={money} threshold={low_money_threshold}"
-                elif not raid_cycle_gate:
-                    raid_reason = f"cycle_gate cycle={cycle} every={raid_every}"
-                else:
-                    pending_until = pending_until_by_key.get(raid_key, 0.0)
-                    remaining = max(0.0, pending_until - now)
-                    raid_reason = f"cooldown_gate remaining_sec={remaining:.1f}"
-                print(f"[loop {cycle}] raid_skip {raid_reason}", flush=True)
 
             black_markets = assets["black_markets"]
             palaces = assets["palaces"]

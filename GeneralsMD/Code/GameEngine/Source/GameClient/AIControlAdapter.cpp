@@ -32,6 +32,7 @@
 #include "GameLogic/Module/AIUpdate.h"
 #include "GameLogic/Module/ProductionUpdate.h"
 #include "GameLogic/Module/SpecialPowerModule.h"
+#include "GameLogic/Module/SupplyTruckAIUpdate.h"
 #include "GameLogic/Module/SupplyWarehouseDockUpdate.h"
 #include "GameNetwork/GameInfo.h"
 #include "GameNetwork/NetworkInterface.h"
@@ -78,6 +79,52 @@ namespace
 		DWORD nextAllowedTick;
 	};
 
+	struct AttackAutomationRule
+	{
+		bool enabled;
+		bool hasExplicitPlayerIndex;
+		Int playerIndex;
+		Int minUnits;
+		Int groupSize;
+		Real distance;
+		DWORD cooldownMs;
+		DWORD nextAllowedTick;
+	};
+
+	struct CaptureAutomationRule
+	{
+		bool enabled;
+		bool hasExplicitPlayerIndex;
+		bool preferIdle;
+		Int playerIndex;
+		Int maxConcurrent;
+		DWORD cooldownMs;
+		DWORD nextAllowedTick;
+		std::unordered_map<Int, DWORD> pendingTargetsUntilTick;
+		std::unordered_map<Int, DWORD> pendingSourcesUntilTick;
+	};
+
+	struct RadarVanAutomationRule
+	{
+		bool enabled;
+		bool hasExplicitPlayerIndex;
+		Int playerIndex;
+		Int minCount;
+		DWORD cooldownMs;
+		DWORD nextAllowedTick;
+	};
+
+	struct StashWorkerAutomationRule
+	{
+		bool enabled;
+		bool hasExplicitPlayerIndex;
+		Int playerIndex;
+		Int targetWorkersPerStash;
+		DWORD cooldownMs;
+		DWORD nextAllowedTick;
+		std::set<Int> servicedStashIds;
+	};
+
 	class AIControlAdapterState
 	{
 	public:
@@ -103,6 +150,36 @@ namespace
 			m_workerAutomationRule.producerKind.clear();
 			m_workerAutomationRule.cooldownMs = 3000u;
 			m_workerAutomationRule.nextAllowedTick = 0u;
+			m_attackAutomationRule.enabled = false;
+			m_attackAutomationRule.hasExplicitPlayerIndex = false;
+			m_attackAutomationRule.playerIndex = -1;
+			m_attackAutomationRule.minUnits = 40;
+			m_attackAutomationRule.groupSize = 30;
+			m_attackAutomationRule.distance = 3000.0f;
+			m_attackAutomationRule.cooldownMs = 15000u;
+			m_attackAutomationRule.nextAllowedTick = 0u;
+			m_captureAutomationRule.enabled = false;
+			m_captureAutomationRule.hasExplicitPlayerIndex = false;
+			m_captureAutomationRule.preferIdle = true;
+			m_captureAutomationRule.playerIndex = -1;
+			m_captureAutomationRule.maxConcurrent = 3;
+			m_captureAutomationRule.cooldownMs = 4000u;
+			m_captureAutomationRule.nextAllowedTick = 0u;
+			m_captureAutomationRule.pendingTargetsUntilTick.clear();
+			m_captureAutomationRule.pendingSourcesUntilTick.clear();
+			m_radarVanAutomationRule.enabled = false;
+			m_radarVanAutomationRule.hasExplicitPlayerIndex = false;
+			m_radarVanAutomationRule.playerIndex = -1;
+			m_radarVanAutomationRule.minCount = 1;
+			m_radarVanAutomationRule.cooldownMs = 12000u;
+			m_radarVanAutomationRule.nextAllowedTick = 0u;
+			m_stashWorkerAutomationRule.enabled = false;
+			m_stashWorkerAutomationRule.hasExplicitPlayerIndex = false;
+			m_stashWorkerAutomationRule.playerIndex = -1;
+			m_stashWorkerAutomationRule.targetWorkersPerStash = 9;
+			m_stashWorkerAutomationRule.cooldownMs = 4000u;
+			m_stashWorkerAutomationRule.nextAllowedTick = 0u;
+			m_stashWorkerAutomationRule.servicedStashIds.clear();
 			char buffer[32];
 			sprintf_s(buffer, "%08X%08X", static_cast<unsigned int>(::GetCurrentProcessId()), static_cast<unsigned int>(::GetTickCount()));
 			m_sessionId = buffer;
@@ -138,6 +215,36 @@ namespace
 			m_workerAutomationRule.producerKind.clear();
 			m_workerAutomationRule.cooldownMs = 3000u;
 			m_workerAutomationRule.nextAllowedTick = 0u;
+			m_attackAutomationRule.enabled = false;
+			m_attackAutomationRule.hasExplicitPlayerIndex = false;
+			m_attackAutomationRule.playerIndex = -1;
+			m_attackAutomationRule.minUnits = 40;
+			m_attackAutomationRule.groupSize = 30;
+			m_attackAutomationRule.distance = 3000.0f;
+			m_attackAutomationRule.cooldownMs = 15000u;
+			m_attackAutomationRule.nextAllowedTick = 0u;
+			m_captureAutomationRule.enabled = false;
+			m_captureAutomationRule.hasExplicitPlayerIndex = false;
+			m_captureAutomationRule.preferIdle = true;
+			m_captureAutomationRule.playerIndex = -1;
+			m_captureAutomationRule.maxConcurrent = 3;
+			m_captureAutomationRule.cooldownMs = 4000u;
+			m_captureAutomationRule.nextAllowedTick = 0u;
+			m_captureAutomationRule.pendingTargetsUntilTick.clear();
+			m_captureAutomationRule.pendingSourcesUntilTick.clear();
+			m_radarVanAutomationRule.enabled = false;
+			m_radarVanAutomationRule.hasExplicitPlayerIndex = false;
+			m_radarVanAutomationRule.playerIndex = -1;
+			m_radarVanAutomationRule.minCount = 1;
+			m_radarVanAutomationRule.cooldownMs = 12000u;
+			m_radarVanAutomationRule.nextAllowedTick = 0u;
+			m_stashWorkerAutomationRule.enabled = false;
+			m_stashWorkerAutomationRule.hasExplicitPlayerIndex = false;
+			m_stashWorkerAutomationRule.playerIndex = -1;
+			m_stashWorkerAutomationRule.targetWorkersPerStash = 9;
+			m_stashWorkerAutomationRule.cooldownMs = 4000u;
+			m_stashWorkerAutomationRule.nextAllowedTick = 0u;
+			m_stashWorkerAutomationRule.servicedStashIds.clear();
 			resetClientConnection();
 		}
 
@@ -184,6 +291,10 @@ namespace
 		nlohmann::json m_ownedCacheBuildings;
 		nlohmann::json m_ownedCacheIdleWorkers;
 		WorkerAutomationRule m_workerAutomationRule;
+		AttackAutomationRule m_attackAutomationRule;
+		CaptureAutomationRule m_captureAutomationRule;
+		RadarVanAutomationRule m_radarVanAutomationRule;
+		StashWorkerAutomationRule m_stashWorkerAutomationRule;
 
 		#include "AIControlAdapterTransport.inl"
 
@@ -191,7 +302,212 @@ namespace
 
 		void evaluateAutomationRules()
 		{
+			evaluateStashWorkerAutomationRule();
 			evaluateWorkerAutomationRule();
+			evaluateRadarVanAutomationRule();
+			evaluateAttackAutomationRule();
+			evaluateCaptureAutomationRule();
+		}
+
+		void collectCombatUnitsForRaid(Player* player, std::vector<Object*>& outUnits) const
+		{
+			outUnits.clear();
+			if (player == nullptr)
+			{
+				return;
+			}
+
+			player->iterateObjects([](Object* obj, void* userData)
+			{
+				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+				{
+					return;
+				}
+				if (obj->isKindOf(KINDOF_STRUCTURE) || obj->isKindOf(KINDOF_DOZER) || obj->isKindOf(KINDOF_HARVESTER))
+				{
+					return;
+				}
+				if (!obj->isKindOf(KINDOF_INFANTRY) && !obj->isKindOf(KINDOF_VEHICLE) && !obj->isKindOf(KINDOF_AIRCRAFT))
+				{
+					return;
+				}
+				const ThingTemplate* tt = obj->getTemplate();
+				const std::string name = tt != nullptr ? tt->getName().str() : "";
+				if (containsIgnoreCase(name, "radar"))
+				{
+					return;
+				}
+				if (obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+				{
+					return;
+				}
+				if (obj->getAI() == nullptr)
+				{
+					return;
+				}
+
+				std::vector<Object*>* units = static_cast<std::vector<Object*>*>(userData);
+				units->push_back(obj);
+			}, &outUnits);
+		}
+
+		void collectCapturableTargetsForPlayer(Player* player, std::vector<Object*>& outTargets) const
+		{
+			outTargets.clear();
+			if (player == nullptr || TheGameLogic == nullptr)
+			{
+				return;
+			}
+
+			for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
+			{
+				if (obj->isEffectivelyDead())
+				{
+					continue;
+				}
+				if (!obj->isKindOf(KINDOF_STRUCTURE) || !obj->isKindOf(KINDOF_CAPTURABLE))
+				{
+					continue;
+				}
+				if (obj->getControllingPlayer() == player)
+				{
+					continue;
+				}
+				outTargets.push_back(obj);
+			}
+		}
+
+		bool isCaptureSourceTemporarilyReserved(const Object* source) const
+		{
+			if (source == nullptr)
+			{
+				return false;
+			}
+			const Int sourceId = static_cast<Int>(source->getID());
+			if (sourceId <= 0)
+			{
+				return false;
+			}
+			const auto it = m_captureAutomationRule.pendingSourcesUntilTick.find(sourceId);
+			if (it == m_captureAutomationRule.pendingSourcesUntilTick.end())
+			{
+				return false;
+			}
+			const DWORD now = ::GetTickCount();
+			return static_cast<LONG>(it->second - now) > 0;
+		}
+
+		void collectCaptureSourcesForPlayer(Player* player, bool preferIdle, std::vector<Object*>& outSources) const
+		{
+			outSources.clear();
+			if (player == nullptr || TheActionManager == nullptr)
+			{
+				return;
+			}
+
+			struct CaptureSourceSearchContext
+			{
+				const AIControlAdapterState* self;
+				bool preferIdle;
+				std::vector<Object*>* outSources;
+			} ctx = { this, preferIdle, &outSources };
+
+			player->iterateObjects([](Object* obj, void* userData)
+			{
+				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+				{
+					return;
+				}
+				CaptureSourceSearchContext* ctx = static_cast<CaptureSourceSearchContext*>(userData);
+				if (ctx->self == nullptr || ctx->outSources == nullptr)
+				{
+					return;
+				}
+				if (!obj->hasSpecialPower(SPECIAL_INFANTRY_CAPTURE_BUILDING) && !obj->hasSpecialPower(SPECIAL_BLACKLOTUS_CAPTURE_BUILDING))
+				{
+					return;
+				}
+				if (ctx->self->isCaptureSourceTemporarilyReserved(obj))
+				{
+					return;
+				}
+				if (obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+				{
+					return;
+				}
+
+				AIUpdateInterface* ai = obj->getAI();
+				const bool isIdle = (ai != nullptr && ai->isIdle() && !ai->isBusy());
+				if (ctx->preferIdle && !isIdle)
+				{
+					return;
+				}
+
+				ctx->outSources->push_back(obj);
+			}, &ctx);
+
+			if (!outSources.empty() || !preferIdle)
+			{
+				return;
+			}
+
+			ctx.preferIdle = false;
+			player->iterateObjects([](Object* obj, void* userData)
+			{
+				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+				{
+					return;
+				}
+				CaptureSourceSearchContext* ctx = static_cast<CaptureSourceSearchContext*>(userData);
+				if (ctx->self == nullptr || ctx->outSources == nullptr)
+				{
+					return;
+				}
+				if (!obj->hasSpecialPower(SPECIAL_INFANTRY_CAPTURE_BUILDING) && !obj->hasSpecialPower(SPECIAL_BLACKLOTUS_CAPTURE_BUILDING))
+				{
+					return;
+				}
+				if (ctx->self->isCaptureSourceTemporarilyReserved(obj))
+				{
+					return;
+				}
+				if (obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+				{
+					return;
+				}
+				ctx->outSources->push_back(obj);
+			}, &ctx);
+		}
+
+		void pruneCaptureAutomationPendingTargets()
+		{
+			if (m_captureAutomationRule.pendingTargetsUntilTick.empty())
+			{
+				// fall through and still prune pending sources
+			}
+			const DWORD now = ::GetTickCount();
+			for (auto it = m_captureAutomationRule.pendingTargetsUntilTick.begin(); it != m_captureAutomationRule.pendingTargetsUntilTick.end(); )
+			{
+				if (static_cast<LONG>(it->second - now) <= 0)
+				{
+					it = m_captureAutomationRule.pendingTargetsUntilTick.erase(it);
+				}
+				else
+				{
+					++it;
+				}
+			}
+			for (auto it = m_captureAutomationRule.pendingSourcesUntilTick.begin(); it != m_captureAutomationRule.pendingSourcesUntilTick.end(); )
+			{
+				if (static_cast<LONG>(it->second - now) <= 0)
+				{
+					it = m_captureAutomationRule.pendingSourcesUntilTick.erase(it);
+				}
+				else
+				{
+					++it;
+				}
+			}
 		}
 
 		void evaluateWorkerAutomationRule()
@@ -273,6 +589,527 @@ namespace
 			if (ok)
 			{
 				m_ownedCacheValid = false;
+			}
+		}
+
+		void evaluateStashWorkerAutomationRule()
+		{
+			if (!m_stashWorkerAutomationRule.enabled)
+			{
+				return;
+			}
+
+			const DWORD now = ::GetTickCount();
+			if (static_cast<LONG>(m_stashWorkerAutomationRule.nextAllowedTick - now) > 0)
+			{
+				return;
+			}
+
+			Player* player = nullptr;
+			if (m_stashWorkerAutomationRule.hasExplicitPlayerIndex)
+			{
+				player = getPlayerByIndex(m_stashWorkerAutomationRule.playerIndex);
+			}
+			else if (ThePlayerList != nullptr)
+			{
+				player = ThePlayerList->getLocalPlayer();
+			}
+			if (player == nullptr)
+			{
+				m_stashWorkerAutomationRule.nextAllowedTick = now + m_stashWorkerAutomationRule.cooldownMs;
+				adapterLog("automation_stash_worker_rule_skip reason=player_not_found");
+				return;
+			}
+
+			std::vector<Object*> stashes;
+			player->iterateObjects([](Object* obj, void* userData)
+			{
+				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+				{
+					return;
+				}
+
+				std::vector<Object*>* stashes = static_cast<std::vector<Object*>*>(userData);
+				if (stashes == nullptr)
+				{
+					return;
+				}
+
+				const ThingTemplate* tt = obj->getTemplate();
+				const std::string name = tt != nullptr ? tt->getName().str() : "";
+				if (!obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION)
+					&& (containsIgnoreCase(name, "supplystash") || containsIgnoreCase(name, "supplycenter")))
+				{
+					stashes->push_back(obj);
+				}
+			}, &stashes);
+
+			if (stashes.empty())
+			{
+				m_stashWorkerAutomationRule.nextAllowedTick = now + m_stashWorkerAutomationRule.cooldownMs;
+				adapterLog("automation_stash_worker_rule_skip player=%d reason=no_stashes", player->getPlayerIndex());
+				return;
+			}
+
+			Object* targetStash = nullptr;
+			for (Object* stash : stashes)
+			{
+				if (stash == nullptr)
+				{
+					continue;
+				}
+				const Int stashId = static_cast<Int>(stash->getID());
+				if (m_stashWorkerAutomationRule.servicedStashIds.find(stashId) != m_stashWorkerAutomationRule.servicedStashIds.end())
+				{
+					continue;
+				}
+				targetStash = stash;
+				break;
+			}
+
+			if (targetStash == nullptr)
+			{
+				return;
+			}
+
+			char requestIdBuffer[64];
+			sprintf_s(
+				requestIdBuffer,
+				"auto_stash_worker_%08X_%08X",
+				static_cast<unsigned int>(player->getPlayerIndex()),
+				static_cast<unsigned int>(now));
+
+			nlohmann::json args = {
+				{"count", m_stashWorkerAutomationRule.targetWorkersPerStash},
+				{"producer_kind", "supply_stash"},
+				{"producer_object_id", static_cast<Int>(targetStash->getID())}
+			};
+			if (m_stashWorkerAutomationRule.hasExplicitPlayerIndex)
+			{
+				args["player_index"] = m_stashWorkerAutomationRule.playerIndex;
+			}
+
+			nlohmann::json message = {
+				{"type", "SessionCommand"},
+				{"request_id", std::string(requestIdBuffer)},
+				{"cmd", "Game.BuildWorker"},
+				{"args", args}
+			};
+
+			std::string reason;
+			const bool ok = executeGameBuildWorker(message, reason);
+			m_stashWorkerAutomationRule.nextAllowedTick = now + m_stashWorkerAutomationRule.cooldownMs;
+			if (ok)
+			{
+				m_stashWorkerAutomationRule.servicedStashIds.insert(static_cast<Int>(targetStash->getID()));
+			}
+			adapterLog(
+				"automation_stash_worker_rule request_id=%s player=%d stash_id=%d target_workers=%d serviced=%d ok=%d reason=%s",
+				requestIdBuffer,
+				player->getPlayerIndex(),
+				static_cast<Int>(targetStash->getID()),
+				m_stashWorkerAutomationRule.targetWorkersPerStash,
+				ok ? 1 : 0,
+				ok ? 1 : 0,
+				ok ? "" : reason.c_str());
+		}
+
+		void evaluateAttackAutomationRule()
+		{
+			if (!m_attackAutomationRule.enabled)
+			{
+				return;
+			}
+
+			const DWORD now = ::GetTickCount();
+			if (static_cast<LONG>(m_attackAutomationRule.nextAllowedTick - now) > 0)
+			{
+				return;
+			}
+
+			Player* player = nullptr;
+			if (m_attackAutomationRule.hasExplicitPlayerIndex)
+			{
+				player = getPlayerByIndex(m_attackAutomationRule.playerIndex);
+			}
+			else if (ThePlayerList != nullptr)
+			{
+				player = ThePlayerList->getLocalPlayer();
+			}
+
+			if (player == nullptr)
+			{
+				m_attackAutomationRule.nextAllowedTick = now + m_attackAutomationRule.cooldownMs;
+				adapterLog("automation_attack_rule_skip reason=player_not_found");
+				return;
+			}
+
+			std::vector<Object*> combatUnits;
+			collectCombatUnitsForRaid(player, combatUnits);
+			const Int combatUnitCount = static_cast<Int>(combatUnits.size());
+			if (combatUnitCount < m_attackAutomationRule.minUnits)
+			{
+				return;
+			}
+
+			nlohmann::json args = nlohmann::json::object({
+				{"min_units", m_attackAutomationRule.minUnits},
+				{"group_size", m_attackAutomationRule.groupSize},
+				{"distance", m_attackAutomationRule.distance}
+			});
+			if (m_attackAutomationRule.hasExplicitPlayerIndex)
+			{
+				args["player_index"] = m_attackAutomationRule.playerIndex;
+			}
+
+			char requestIdBuffer[64];
+			sprintf_s(
+				requestIdBuffer,
+				"auto_attack_%08X_%08X",
+				static_cast<unsigned int>(player->getPlayerIndex()),
+				static_cast<unsigned int>(now));
+
+			nlohmann::json message = {
+				{"type", "SessionCommand"},
+				{"request_id", std::string(requestIdBuffer)},
+				{"cmd", "Game.AttackMove.RaidSmart"},
+				{"args", args}
+			};
+
+			std::string reason;
+			const bool ok = executeGameAttackMoveRaidSmart(message, reason);
+			m_attackAutomationRule.nextAllowedTick = now + m_attackAutomationRule.cooldownMs;
+			adapterLog(
+				"automation_attack_rule request_id=%s player=%d combat_units=%d min_units=%d group_size=%d distance=%.1f ok=%d reason=%s",
+				requestIdBuffer,
+				player->getPlayerIndex(),
+				combatUnitCount,
+				m_attackAutomationRule.minUnits,
+				m_attackAutomationRule.groupSize,
+				static_cast<double>(m_attackAutomationRule.distance),
+				ok ? 1 : 0,
+				ok ? "" : reason.c_str());
+		}
+
+		void evaluateRadarVanAutomationRule()
+		{
+			if (!m_radarVanAutomationRule.enabled)
+			{
+				return;
+			}
+
+			const DWORD now = ::GetTickCount();
+			if (static_cast<LONG>(m_radarVanAutomationRule.nextAllowedTick - now) > 0)
+			{
+				return;
+			}
+
+			Player* player = nullptr;
+			if (m_radarVanAutomationRule.hasExplicitPlayerIndex)
+			{
+				player = getPlayerByIndex(m_radarVanAutomationRule.playerIndex);
+			}
+			else if (ThePlayerList != nullptr)
+			{
+				player = ThePlayerList->getLocalPlayer();
+			}
+			if (player == nullptr)
+			{
+				m_radarVanAutomationRule.nextAllowedTick = now + m_radarVanAutomationRule.cooldownMs;
+				adapterLog("automation_radar_van_rule_skip reason=player_not_found");
+				return;
+			}
+
+			struct RadarVanCountContext
+			{
+				Int armsCount;
+				Int radarVanCount;
+			} counts = { 0, 0 };
+			player->iterateObjects([](Object* obj, void* userData)
+			{
+				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+				{
+					return;
+				}
+				RadarVanCountContext* counts = static_cast<RadarVanCountContext*>(userData);
+				if (counts == nullptr)
+				{
+					return;
+				}
+				const ThingTemplate* tt = obj->getTemplate();
+				const std::string name = tt != nullptr ? tt->getName().str() : "";
+				if (containsIgnoreCase(name, "armsdealer"))
+				{
+					++counts->armsCount;
+				}
+				if (containsIgnoreCase(name, "radarvan"))
+				{
+					++counts->radarVanCount;
+				}
+			}, &counts);
+			const Int armsCount = counts.armsCount;
+			const Int radarVanCount = counts.radarVanCount;
+
+			if (armsCount <= 0 || radarVanCount >= m_radarVanAutomationRule.minCount)
+			{
+				return;
+			}
+
+			char requestIdBuffer[64];
+			sprintf_s(
+				requestIdBuffer,
+				"auto_radar_van_%08X_%08X",
+				static_cast<unsigned int>(player->getPlayerIndex()),
+				static_cast<unsigned int>(now));
+
+			nlohmann::json args = nlohmann::json::object();
+			if (m_radarVanAutomationRule.hasExplicitPlayerIndex)
+			{
+				args["player_index"] = m_radarVanAutomationRule.playerIndex;
+			}
+
+			nlohmann::json message = {
+				{"type", "SessionCommand"},
+				{"request_id", std::string(requestIdBuffer)},
+				{"cmd", "Game.QueueRadarVan"},
+				{"args", args}
+			};
+
+			std::string reason;
+			bool ok = executeGameQueueRadarVan(message, reason);
+			if (!ok)
+			{
+				nlohmann::json fallbackMessage = {
+					{"type", "SessionCommand"},
+					{"request_id", std::string(requestIdBuffer)},
+					{"cmd", "Game.QueueRadarVansAllWarFactories"},
+					{"args", nlohmann::json::object({{"count", 1}})}
+				};
+				if (m_radarVanAutomationRule.hasExplicitPlayerIndex)
+				{
+					fallbackMessage["args"]["player_index"] = m_radarVanAutomationRule.playerIndex;
+				}
+				ok = executeGameQueueRadarVansAllWarFactories(fallbackMessage, reason);
+			}
+
+			m_radarVanAutomationRule.nextAllowedTick = now + m_radarVanAutomationRule.cooldownMs;
+			adapterLog(
+				"automation_radar_van_rule request_id=%s player=%d arms=%d radar_vans=%d min_count=%d ok=%d reason=%s",
+				requestIdBuffer,
+				player->getPlayerIndex(),
+				armsCount,
+				radarVanCount,
+				m_radarVanAutomationRule.minCount,
+				ok ? 1 : 0,
+				ok ? "" : reason.c_str());
+		}
+
+		void evaluateCaptureAutomationRule()
+		{
+			if (!m_captureAutomationRule.enabled)
+			{
+				return;
+			}
+
+			const DWORD now = ::GetTickCount();
+			pruneCaptureAutomationPendingTargets();
+			if (static_cast<LONG>(m_captureAutomationRule.nextAllowedTick - now) > 0)
+			{
+				return;
+			}
+
+			Player* player = nullptr;
+			if (m_captureAutomationRule.hasExplicitPlayerIndex)
+			{
+				player = getPlayerByIndex(m_captureAutomationRule.playerIndex);
+			}
+			else if (ThePlayerList != nullptr)
+			{
+				player = ThePlayerList->getLocalPlayer();
+			}
+
+			if (player == nullptr)
+			{
+				m_captureAutomationRule.nextAllowedTick = now + m_captureAutomationRule.cooldownMs;
+				adapterLog("automation_capture_rule_skip reason=player_not_found");
+				return;
+			}
+
+			const Int pendingCount = static_cast<Int>(m_captureAutomationRule.pendingTargetsUntilTick.size());
+			if (pendingCount >= m_captureAutomationRule.maxConcurrent)
+			{
+				return;
+			}
+
+			std::vector<Object*> targets;
+			collectCapturableTargetsForPlayer(player, targets);
+			if (targets.empty())
+			{
+				return;
+			}
+
+			std::vector<Object*> sources;
+			collectCaptureSourcesForPlayer(player, m_captureAutomationRule.preferIdle, sources);
+			if (sources.empty())
+			{
+				m_captureAutomationRule.nextAllowedTick = now + m_captureAutomationRule.cooldownMs;
+				adapterLog(
+					"automation_capture_rule_skip player=%d reason=no_capture_sources pending=%d max_concurrent=%d prefer_idle=%d",
+					player->getPlayerIndex(),
+					pendingCount,
+					m_captureAutomationRule.maxConcurrent,
+					m_captureAutomationRule.preferIdle ? 1 : 0);
+				return;
+			}
+
+			Coord3D anchor;
+			anchor.x = 0.0f;
+			anchor.y = 0.0f;
+			anchor.z = 0.0f;
+			bool hasAnchor = false;
+			Object* cc = findPrimaryCommandCenter(player);
+			if (cc != nullptr && cc->getPosition() != nullptr)
+			{
+				anchor = *cc->getPosition();
+				hasAnchor = true;
+			}
+			if (!hasAnchor)
+			{
+				nlohmann::json playerPos = buildPlayerMapPositionSummary(player);
+				const auto pxIt = playerPos.find("x");
+				const auto pyIt = playerPos.find("y");
+				if (pxIt != playerPos.end() && pyIt != playerPos.end() && pxIt->is_number() && pyIt->is_number())
+				{
+					anchor.x = pxIt->get<Real>();
+					anchor.y = pyIt->get<Real>();
+					anchor.z = 0.0f;
+					hasAnchor = true;
+				}
+			}
+
+			std::sort(targets.begin(), targets.end(), [&](const Object* lhs, const Object* rhs) -> bool
+			{
+				const Coord3D* lp = lhs != nullptr ? lhs->getPosition() : nullptr;
+				const Coord3D* rp = rhs != nullptr ? rhs->getPosition() : nullptr;
+				if (!hasAnchor || lp == nullptr || rp == nullptr)
+				{
+					const Int lid = lhs != nullptr ? static_cast<Int>(lhs->getID()) : 0;
+					const Int rid = rhs != nullptr ? static_cast<Int>(rhs->getID()) : 0;
+					return lid < rid;
+				}
+				const Real ldx = lp->x - anchor.x;
+				const Real ldy = lp->y - anchor.y;
+				const Real rdx = rp->x - anchor.x;
+				const Real rdy = rp->y - anchor.y;
+				return ((ldx * ldx) + (ldy * ldy)) < ((rdx * rdx) + (rdy * rdy));
+			});
+
+			Int assignmentsRemaining = std::max<Int>(0, m_captureAutomationRule.maxConcurrent - pendingCount);
+			Int sentOk = 0;
+			Int attemptsRemaining = std::max<Int>(assignmentsRemaining, 1) * 4;
+			std::string lastReason;
+			for (Object* target : targets)
+			{
+				if (assignmentsRemaining <= 0 || attemptsRemaining <= 0 || target == nullptr)
+				{
+					break;
+				}
+				const Int targetId = static_cast<Int>(target->getID());
+				if (targetId <= 0)
+				{
+					continue;
+				}
+				if (m_captureAutomationRule.pendingTargetsUntilTick.find(targetId) != m_captureAutomationRule.pendingTargetsUntilTick.end())
+				{
+					continue;
+				}
+
+				Object* selectedSource = nullptr;
+				for (Object* candidate : sources)
+				{
+					if (candidate == nullptr || candidate->isEffectivelyDead())
+					{
+						continue;
+					}
+					if (!TheActionManager->canCaptureBuilding(candidate, target, CMD_FROM_PLAYER))
+					{
+						continue;
+					}
+					selectedSource = candidate;
+					break;
+				}
+				if (selectedSource == nullptr)
+				{
+					continue;
+				}
+
+				char requestIdBuffer[64];
+				sprintf_s(
+					requestIdBuffer,
+					"auto_capture_%08X_%08X",
+					static_cast<unsigned int>(targetId),
+					static_cast<unsigned int>(now));
+
+				nlohmann::json args = nlohmann::json::object({
+					{"target_object_id", targetId},
+					{"source_object_id", static_cast<Int>(selectedSource->getID())}
+				});
+				if (m_captureAutomationRule.hasExplicitPlayerIndex)
+				{
+					args["player_index"] = m_captureAutomationRule.playerIndex;
+				}
+
+				nlohmann::json message = {
+					{"type", "SessionCommand"},
+					{"request_id", std::string(requestIdBuffer)},
+					{"cmd", "Game.CaptureBuilding"},
+					{"args", args}
+				};
+
+				std::string reason;
+				--attemptsRemaining;
+				const bool ok = executeGameCaptureBuilding(message, reason);
+				lastReason = reason;
+				adapterLog(
+					"automation_capture_rule request_id=%s player=%d source_id=%d target_id=%d pending=%d max_concurrent=%d ok=%d reason=%s",
+					requestIdBuffer,
+					player->getPlayerIndex(),
+					static_cast<Int>(selectedSource->getID()),
+					targetId,
+					pendingCount + sentOk,
+					m_captureAutomationRule.maxConcurrent,
+					ok ? 1 : 0,
+					ok ? "" : reason.c_str());
+				if (!ok)
+				{
+					continue;
+				}
+
+				++sentOk;
+				--assignmentsRemaining;
+				const DWORD pendingUntil = now + std::max<DWORD>(m_captureAutomationRule.cooldownMs, 20000u);
+				const Int sourceId = static_cast<Int>(selectedSource->getID());
+				m_captureAutomationRule.pendingTargetsUntilTick[targetId] = pendingUntil;
+				if (sourceId > 0)
+				{
+					m_captureAutomationRule.pendingSourcesUntilTick[sourceId] = pendingUntil;
+				}
+				sources.erase(std::remove(sources.begin(), sources.end(), selectedSource), sources.end());
+			}
+
+			if (sentOk > 0)
+			{
+				m_captureAutomationRule.nextAllowedTick = now + m_captureAutomationRule.cooldownMs;
+			}
+			else if (!lastReason.empty())
+			{
+				m_captureAutomationRule.nextAllowedTick = now + std::max<DWORD>(m_captureAutomationRule.cooldownMs, 2000u);
+				adapterLog(
+					"automation_capture_rule_skip player=%d reason=%s pending=%d max_concurrent=%d",
+					player->getPlayerIndex(),
+					lastReason.c_str(),
+					pendingCount,
+					m_captureAutomationRule.maxConcurrent);
 			}
 		}
 
@@ -402,6 +1239,404 @@ namespace
 			m_workerAutomationRule.cooldownMs = 3000u;
 			m_workerAutomationRule.nextAllowedTick = 0u;
 			adapterLog("automation_worker_rule_cleared");
+		}
+
+		bool configureAttackAutomationRule(const nlohmann::json& message, std::string& reason)
+		{
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			AttackAutomationRule rule;
+			rule.enabled = true;
+			rule.hasExplicitPlayerIndex = false;
+			rule.playerIndex = -1;
+			rule.minUnits = 40;
+			rule.groupSize = 30;
+			rule.distance = 3000.0f;
+			rule.cooldownMs = 15000u;
+			rule.nextAllowedTick = 0u;
+
+			const auto enabledIt = argsIt->find("enabled");
+			if (enabledIt != argsIt->end())
+			{
+				if (!enabledIt->is_boolean())
+				{
+					reason = "invalid_enabled";
+					return false;
+				}
+				rule.enabled = enabledIt->get<bool>();
+			}
+
+			const auto playerIndexIt = argsIt->find("player_index");
+			if (playerIndexIt != argsIt->end())
+			{
+				if (!playerIndexIt->is_number_integer())
+				{
+					reason = "invalid_player_index";
+					return false;
+				}
+				rule.hasExplicitPlayerIndex = true;
+				rule.playerIndex = playerIndexIt->get<Int>();
+			}
+
+			const auto minUnitsIt = argsIt->find("min_units");
+			if (minUnitsIt == argsIt->end() || !minUnitsIt->is_number_integer())
+			{
+				reason = "missing_min_units";
+				return false;
+			}
+			rule.minUnits = std::max<Int>(1, minUnitsIt->get<Int>());
+
+			const auto groupSizeIt = argsIt->find("group_size");
+			if (groupSizeIt != argsIt->end())
+			{
+				if (!groupSizeIt->is_number_integer())
+				{
+					reason = "invalid_group_size";
+					return false;
+				}
+				rule.groupSize = std::max<Int>(1, groupSizeIt->get<Int>());
+			}
+
+			const auto distanceIt = argsIt->find("distance");
+			if (distanceIt != argsIt->end())
+			{
+				if (!distanceIt->is_number())
+				{
+					reason = "invalid_distance";
+					return false;
+				}
+				rule.distance = std::max<Real>(256.0f, distanceIt->get<Real>());
+			}
+
+			const auto cooldownIt = argsIt->find("cooldown_ms");
+			if (cooldownIt != argsIt->end())
+			{
+				if (!cooldownIt->is_number_integer())
+				{
+					reason = "invalid_cooldown_ms";
+					return false;
+				}
+				const Int cooldownValue = cooldownIt->get<Int>();
+				if (cooldownValue < 0)
+				{
+					reason = "invalid_cooldown_ms";
+					return false;
+				}
+				rule.cooldownMs = static_cast<DWORD>(cooldownValue);
+			}
+
+			m_attackAutomationRule = rule;
+			adapterLog(
+				"automation_attack_rule_configured enabled=%d player=%d explicit_player=%d min_units=%d group_size=%d distance=%.1f cooldown_ms=%lu",
+				m_attackAutomationRule.enabled ? 1 : 0,
+				m_attackAutomationRule.playerIndex,
+				m_attackAutomationRule.hasExplicitPlayerIndex ? 1 : 0,
+				m_attackAutomationRule.minUnits,
+				m_attackAutomationRule.groupSize,
+				static_cast<double>(m_attackAutomationRule.distance),
+				static_cast<unsigned long>(m_attackAutomationRule.cooldownMs));
+			return true;
+		}
+
+		void clearAttackAutomationRule()
+		{
+			m_attackAutomationRule.enabled = false;
+			m_attackAutomationRule.hasExplicitPlayerIndex = false;
+			m_attackAutomationRule.playerIndex = -1;
+			m_attackAutomationRule.minUnits = 40;
+			m_attackAutomationRule.groupSize = 30;
+			m_attackAutomationRule.distance = 3000.0f;
+			m_attackAutomationRule.cooldownMs = 15000u;
+			m_attackAutomationRule.nextAllowedTick = 0u;
+			adapterLog("automation_attack_rule_cleared");
+		}
+
+		bool configureCaptureAutomationRule(const nlohmann::json& message, std::string& reason)
+		{
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			CaptureAutomationRule rule;
+			rule.enabled = true;
+			rule.hasExplicitPlayerIndex = false;
+			rule.preferIdle = true;
+			rule.playerIndex = -1;
+			rule.maxConcurrent = 3;
+			rule.cooldownMs = 4000u;
+			rule.nextAllowedTick = 0u;
+			rule.pendingTargetsUntilTick.clear();
+			rule.pendingSourcesUntilTick.clear();
+
+			const auto enabledIt = argsIt->find("enabled");
+			if (enabledIt != argsIt->end())
+			{
+				if (!enabledIt->is_boolean())
+				{
+					reason = "invalid_enabled";
+					return false;
+				}
+				rule.enabled = enabledIt->get<bool>();
+			}
+
+			const auto playerIndexIt = argsIt->find("player_index");
+			if (playerIndexIt != argsIt->end())
+			{
+				if (!playerIndexIt->is_number_integer())
+				{
+					reason = "invalid_player_index";
+					return false;
+				}
+				rule.hasExplicitPlayerIndex = true;
+				rule.playerIndex = playerIndexIt->get<Int>();
+			}
+
+			const auto maxConcurrentIt = argsIt->find("max_concurrent");
+			if (maxConcurrentIt == argsIt->end() || !maxConcurrentIt->is_number_integer())
+			{
+				reason = "missing_max_concurrent";
+				return false;
+			}
+			rule.maxConcurrent = std::max<Int>(1, maxConcurrentIt->get<Int>());
+
+			const auto preferIdleIt = argsIt->find("prefer_idle");
+			if (preferIdleIt != argsIt->end())
+			{
+				if (!preferIdleIt->is_boolean())
+				{
+					reason = "invalid_prefer_idle";
+					return false;
+				}
+				rule.preferIdle = preferIdleIt->get<bool>();
+			}
+
+			const auto cooldownIt = argsIt->find("cooldown_ms");
+			if (cooldownIt != argsIt->end())
+			{
+				if (!cooldownIt->is_number_integer())
+				{
+					reason = "invalid_cooldown_ms";
+					return false;
+				}
+				const Int cooldownValue = cooldownIt->get<Int>();
+				if (cooldownValue < 0)
+				{
+					reason = "invalid_cooldown_ms";
+					return false;
+				}
+				rule.cooldownMs = static_cast<DWORD>(cooldownValue);
+			}
+
+			m_captureAutomationRule = rule;
+			adapterLog(
+				"automation_capture_rule_configured enabled=%d player=%d explicit_player=%d max_concurrent=%d prefer_idle=%d cooldown_ms=%lu",
+				m_captureAutomationRule.enabled ? 1 : 0,
+				m_captureAutomationRule.playerIndex,
+				m_captureAutomationRule.hasExplicitPlayerIndex ? 1 : 0,
+				m_captureAutomationRule.maxConcurrent,
+				m_captureAutomationRule.preferIdle ? 1 : 0,
+				static_cast<unsigned long>(m_captureAutomationRule.cooldownMs));
+			return true;
+		}
+
+		bool configureRadarVanAutomationRule(const nlohmann::json& message, std::string& reason)
+		{
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			RadarVanAutomationRule rule;
+			rule.enabled = true;
+			rule.hasExplicitPlayerIndex = false;
+			rule.playerIndex = -1;
+			rule.minCount = 1;
+			rule.cooldownMs = 12000u;
+			rule.nextAllowedTick = 0u;
+
+			const auto enabledIt = argsIt->find("enabled");
+			if (enabledIt != argsIt->end())
+			{
+				if (!enabledIt->is_boolean())
+				{
+					reason = "invalid_enabled";
+					return false;
+				}
+				rule.enabled = enabledIt->get<bool>();
+			}
+			const auto playerIndexIt = argsIt->find("player_index");
+			if (playerIndexIt != argsIt->end())
+			{
+				if (!playerIndexIt->is_number_integer())
+				{
+					reason = "invalid_player_index";
+					return false;
+				}
+				rule.hasExplicitPlayerIndex = true;
+				rule.playerIndex = playerIndexIt->get<Int>();
+			}
+			const auto minCountIt = argsIt->find("min_count");
+			if (minCountIt == argsIt->end() || !minCountIt->is_number_integer())
+			{
+				reason = "missing_min_count";
+				return false;
+			}
+			rule.minCount = std::max<Int>(0, minCountIt->get<Int>());
+			const auto cooldownIt = argsIt->find("cooldown_ms");
+			if (cooldownIt != argsIt->end())
+			{
+				if (!cooldownIt->is_number_integer())
+				{
+					reason = "invalid_cooldown_ms";
+					return false;
+				}
+				const Int cooldownValue = cooldownIt->get<Int>();
+				if (cooldownValue < 0)
+				{
+					reason = "invalid_cooldown_ms";
+					return false;
+				}
+				rule.cooldownMs = static_cast<DWORD>(cooldownValue);
+			}
+
+			m_radarVanAutomationRule = rule;
+			adapterLog(
+				"automation_radar_van_rule_configured enabled=%d player=%d explicit_player=%d min_count=%d cooldown_ms=%lu",
+				m_radarVanAutomationRule.enabled ? 1 : 0,
+				m_radarVanAutomationRule.playerIndex,
+				m_radarVanAutomationRule.hasExplicitPlayerIndex ? 1 : 0,
+				m_radarVanAutomationRule.minCount,
+				static_cast<unsigned long>(m_radarVanAutomationRule.cooldownMs));
+			return true;
+		}
+
+		bool configureStashWorkerAutomationRule(const nlohmann::json& message, std::string& reason)
+		{
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			StashWorkerAutomationRule rule;
+			rule.enabled = true;
+			rule.hasExplicitPlayerIndex = false;
+			rule.playerIndex = -1;
+			rule.targetWorkersPerStash = 9;
+			rule.cooldownMs = 4000u;
+			rule.nextAllowedTick = 0u;
+			rule.servicedStashIds.clear();
+
+			const auto enabledIt = argsIt->find("enabled");
+			if (enabledIt != argsIt->end())
+			{
+				if (!enabledIt->is_boolean())
+				{
+					reason = "invalid_enabled";
+					return false;
+				}
+				rule.enabled = enabledIt->get<bool>();
+			}
+
+			const auto playerIndexIt = argsIt->find("player_index");
+			if (playerIndexIt != argsIt->end())
+			{
+				if (!playerIndexIt->is_number_integer())
+				{
+					reason = "invalid_player_index";
+					return false;
+				}
+				rule.hasExplicitPlayerIndex = true;
+				rule.playerIndex = playerIndexIt->get<Int>();
+			}
+
+			const auto targetIt = argsIt->find("target_workers_per_stash");
+			if (targetIt == argsIt->end() || !targetIt->is_number_integer())
+			{
+				reason = "missing_target_workers_per_stash";
+				return false;
+			}
+			rule.targetWorkersPerStash = targetIt->get<Int>();
+			if (rule.targetWorkersPerStash < 0)
+			{
+				reason = "invalid_target_workers_per_stash";
+				return false;
+			}
+
+			const auto cooldownIt = argsIt->find("cooldown_ms");
+			if (cooldownIt != argsIt->end())
+			{
+				if (!cooldownIt->is_number_integer())
+				{
+					reason = "invalid_cooldown_ms";
+					return false;
+				}
+				const Int cooldownValue = cooldownIt->get<Int>();
+				if (cooldownValue < 0)
+				{
+					reason = "invalid_cooldown_ms";
+					return false;
+				}
+				rule.cooldownMs = static_cast<DWORD>(cooldownValue);
+			}
+
+			m_stashWorkerAutomationRule = rule;
+			adapterLog(
+				"automation_stash_worker_rule_configured enabled=%d player=%d explicit_player=%d target_workers_per_stash=%d cooldown_ms=%lu",
+				m_stashWorkerAutomationRule.enabled ? 1 : 0,
+				m_stashWorkerAutomationRule.playerIndex,
+				m_stashWorkerAutomationRule.hasExplicitPlayerIndex ? 1 : 0,
+				m_stashWorkerAutomationRule.targetWorkersPerStash,
+				static_cast<unsigned long>(m_stashWorkerAutomationRule.cooldownMs));
+			return true;
+		}
+
+		void clearStashWorkerAutomationRule()
+		{
+			m_stashWorkerAutomationRule.enabled = false;
+			m_stashWorkerAutomationRule.hasExplicitPlayerIndex = false;
+			m_stashWorkerAutomationRule.playerIndex = -1;
+			m_stashWorkerAutomationRule.targetWorkersPerStash = 9;
+			m_stashWorkerAutomationRule.cooldownMs = 4000u;
+			m_stashWorkerAutomationRule.nextAllowedTick = 0u;
+			m_stashWorkerAutomationRule.servicedStashIds.clear();
+			adapterLog("automation_stash_worker_rule_cleared");
+		}
+
+		void clearRadarVanAutomationRule()
+		{
+			m_radarVanAutomationRule.enabled = false;
+			m_radarVanAutomationRule.hasExplicitPlayerIndex = false;
+			m_radarVanAutomationRule.playerIndex = -1;
+			m_radarVanAutomationRule.minCount = 1;
+			m_radarVanAutomationRule.cooldownMs = 12000u;
+			m_radarVanAutomationRule.nextAllowedTick = 0u;
+			adapterLog("automation_radar_van_rule_cleared");
+		}
+
+		void clearCaptureAutomationRule()
+		{
+			m_captureAutomationRule.enabled = false;
+			m_captureAutomationRule.hasExplicitPlayerIndex = false;
+			m_captureAutomationRule.preferIdle = true;
+			m_captureAutomationRule.playerIndex = -1;
+			m_captureAutomationRule.maxConcurrent = 3;
+			m_captureAutomationRule.cooldownMs = 4000u;
+			m_captureAutomationRule.nextAllowedTick = 0u;
+			m_captureAutomationRule.pendingTargetsUntilTick.clear();
+			m_captureAutomationRule.pendingSourcesUntilTick.clear();
+			adapterLog("automation_capture_rule_cleared");
 		}
 
 		nlohmann::json buildLocalPlayerSummary(const Player* player) const

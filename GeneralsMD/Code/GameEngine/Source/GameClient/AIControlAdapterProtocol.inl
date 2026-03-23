@@ -219,6 +219,10 @@
 						"game_guard_all_idle_ground_combat",
 						"game_set_money_debug",
 						"automation_worker_rule",
+						"automation_stash_worker_rule",
+						"automation_attack_rule",
+						"automation_capture_rule",
+						"automation_radar_van_rule",
 						"adapter_log_configure",
 						"adapter_log_reset",
 						"game_camera_set",
@@ -504,6 +508,82 @@
 			if (cmd == "Automation.ClearWorkerRule")
 			{
 				clearWorkerAutomationRule();
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Automation.ConfigureStashWorkerRule")
+			{
+				std::string reason;
+				if (!configureStashWorkerAutomationRule(message, reason))
+				{
+					sendActionAck(requestId, false, "bad_request", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Automation.ClearStashWorkerRule")
+			{
+				clearStashWorkerAutomationRule();
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Automation.ConfigureAttackRule")
+			{
+				std::string reason;
+				if (!configureAttackAutomationRule(message, reason))
+				{
+					sendActionAck(requestId, false, "bad_request", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Automation.ClearAttackRule")
+			{
+				clearAttackAutomationRule();
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Automation.ConfigureCaptureRule")
+			{
+				std::string reason;
+				if (!configureCaptureAutomationRule(message, reason))
+				{
+					sendActionAck(requestId, false, "bad_request", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Automation.ClearCaptureRule")
+			{
+				clearCaptureAutomationRule();
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Automation.ConfigureRadarVanRule")
+			{
+				std::string reason;
+				if (!configureRadarVanAutomationRule(message, reason))
+				{
+					sendActionAck(requestId, false, "bad_request", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Automation.ClearRadarVanRule")
+			{
+				clearRadarVanAutomationRule();
 				sendActionAck(requestId, true);
 				return;
 			}
