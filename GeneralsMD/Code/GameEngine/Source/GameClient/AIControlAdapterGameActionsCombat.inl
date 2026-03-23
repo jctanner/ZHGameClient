@@ -404,46 +404,10 @@
 				}
 			}
 
-			struct CombatCollectContext
-			{
-				std::vector<Object*> units;
-			};
-			CombatCollectContext collectCtx;
-			player->iterateObjects([](Object* obj, void* userData)
-			{
-				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
-				{
-					return;
-				}
-				if (obj->isKindOf(KINDOF_STRUCTURE) || obj->isKindOf(KINDOF_DOZER) || obj->isKindOf(KINDOF_HARVESTER))
-				{
-					return;
-				}
-				if (!obj->isKindOf(KINDOF_INFANTRY) && !obj->isKindOf(KINDOF_VEHICLE) && !obj->isKindOf(KINDOF_AIRCRAFT))
-				{
-					return;
-				}
-				const ThingTemplate* tt = obj->getTemplate();
-				const std::string name = tt != nullptr ? tt->getName().str() : "";
-				// Keep radar coverage at home; do not include radar-type units in raid groups.
-				if (containsIgnoreCase(name, "radar"))
-				{
-					return;
-				}
-				if (obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
-				{
-					return;
-				}
-				if (obj->getAI() == nullptr)
-				{
-					return;
-				}
+			std::vector<Object*> combatUnits;
+			collectCombatUnitsForRaid(player, combatUnits);
 
-				CombatCollectContext* ctx = static_cast<CombatCollectContext*>(userData);
-				ctx->units.push_back(obj);
-			}, &collectCtx);
-
-			if (static_cast<Int>(collectCtx.units.size()) < minUnits)
+			if (static_cast<Int>(combatUnits.size()) < minUnits)
 			{
 				reason = "insufficient_combat_units";
 				return false;
@@ -555,10 +519,10 @@
 			}
 
 			std::vector<ObjectID> selectedIds;
-			const std::size_t maxToCommand = std::min<std::size_t>(collectCtx.units.size(), static_cast<std::size_t>(groupSize));
+			const std::size_t maxToCommand = std::min<std::size_t>(combatUnits.size(), static_cast<std::size_t>(groupSize));
 			for (std::size_t i = 0; i < maxToCommand; ++i)
 			{
-				Object* obj = collectCtx.units[i];
+				Object* obj = combatUnits[i];
 				if (obj == nullptr || obj->getAI() == nullptr)
 				{
 					continue;
