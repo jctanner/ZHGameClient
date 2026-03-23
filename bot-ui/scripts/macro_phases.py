@@ -37,12 +37,12 @@ OPENING_INFANTRY_MIX: dict[str, int] = {"soldiers": 2, "rpg": 4}
 OPENING_VEHICLE_MIX: dict[str, int] = {"radar": 0, "quads": 3, "scorpions": 3}
 
 EXPANSION_BUILDING_MIX: dict[str, int] = {
-    "stash": 1,
-    "barracks": 1,
-    "arms": 1,
-    "black_markets": 2,
-    "tunnel_networks": 6,
-    "stinger_sites": 6,
+    "stash": 0,
+    "barracks": 0,
+    "arms": 0,
+    "black_markets": 4,
+    "tunnel_networks": 3,
+    "stinger_sites": 2,
 }
 VESTING_BUILDING_MIX: dict[str, int] = {
     "stash": 0,
