@@ -867,13 +867,6 @@
 			return ctx.found;
 		}
 
-		struct NearbyBarracksSearchContext
-		{
-			const Coord3D* targetPos;
-			Real maxDistSq;
-			bool found;
-		};
-
 		struct NearbyStructureClearanceContext
 		{
 			const Coord3D* targetPos;
@@ -882,7 +875,62 @@
 			bool tooClose;
 		};
 
-		static void findNearbyBarracksCallback(Object* obj, void* userData)
+		struct NearbySameTypeStructureClearanceContext
+		{
+			const Coord3D* targetPos;
+			Real candidateRadius;
+			Real extraPadding;
+			const char* spacingCategory;
+			bool tooClose;
+		};
+
+		static const char* getBuildSpacingCategory(const ThingTemplate* tt)
+		{
+			if (tt == nullptr)
+			{
+				return nullptr;
+			}
+
+			const std::string name = tt->getName().str();
+			if (containsIgnoreCase(name, "barracks"))
+			{
+				return "barracks";
+			}
+			if (containsIgnoreCase(name, "arms") && containsIgnoreCase(name, "dealer"))
+			{
+				return "arms_dealer";
+			}
+			if (containsIgnoreCase(name, "palace"))
+			{
+				return "palace";
+			}
+			return nullptr;
+		}
+
+		static Real getSameTypeSpacingPadding(const ThingTemplate* tt)
+		{
+			const char* category = getBuildSpacingCategory(tt);
+			if (category == nullptr)
+			{
+				return 0.0f;
+			}
+
+			if (std::strcmp(category, "barracks") == 0)
+			{
+				return 120.0f;
+			}
+			if (std::strcmp(category, "arms_dealer") == 0)
+			{
+				return 150.0f;
+			}
+			if (std::strcmp(category, "palace") == 0)
+			{
+				return 220.0f;
+			}
+			return 0.0f;
+		}
+
+		static void findNearbySameTypeStructureClearanceCallback(Object* obj, void* userData)
 		{
 			if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
 			{
@@ -892,38 +940,71 @@
 			{
 				return;
 			}
+
+			NearbySameTypeStructureClearanceContext* ctx = static_cast<NearbySameTypeStructureClearanceContext*>(userData);
+			if (ctx->tooClose || ctx->targetPos == nullptr || ctx->spacingCategory == nullptr)
+			{
+				return;
+			}
+
 			const ThingTemplate* tt = obj->getTemplate();
 			if (tt == nullptr)
 			{
 				return;
 			}
-			const std::string name = tt->getName().str();
-			if (!containsIgnoreCase(name, "barracks"))
+			const char* objectCategory = getBuildSpacingCategory(tt);
+			if (objectCategory == nullptr || std::strcmp(objectCategory, ctx->spacingCategory) != 0)
 			{
 				return;
 			}
 
-			NearbyBarracksSearchContext* ctx = static_cast<NearbyBarracksSearchContext*>(userData);
 			const Coord3D* pos = obj->getPosition();
-			if (ctx->targetPos == nullptr || pos == nullptr)
+			if (pos == nullptr)
 			{
 				return;
 			}
-			if (distanceSq2D(ctx->targetPos, pos) <= ctx->maxDistSq)
+
+			Real existingRadius = obj->getGeometryInfo().getBoundingCircleRadius();
+			if (existingRadius < 1.0f)
 			{
-				ctx->found = true;
+				existingRadius = 40.0f;
+			}
+
+			const Real required = ctx->candidateRadius + existingRadius + ctx->extraPadding;
+			if (distanceSq2D(ctx->targetPos, pos) <= required * required)
+			{
+				ctx->tooClose = true;
 			}
 		}
 
-		static bool hasNearbyOwnedBarracks(Player* player, const Coord3D* pos, Real maxDistance)
+		static bool hasOwnedSameTypeStructureTooClose(Player* player, const Coord3D* pos, const ThingTemplate* templateToPlace)
 		{
-			if (player == nullptr || pos == nullptr)
+			if (player == nullptr || pos == nullptr || templateToPlace == nullptr)
 			{
 				return false;
 			}
-			NearbyBarracksSearchContext ctx = { pos, maxDistance * maxDistance, false };
-			player->iterateObjects(findNearbyBarracksCallback, &ctx);
-			return ctx.found;
+
+			const char* spacingCategory = getBuildSpacingCategory(templateToPlace);
+			if (spacingCategory == nullptr)
+			{
+				return false;
+			}
+
+			Real candidateRadius = templateToPlace->getTemplateGeometryInfo().getBoundingCircleRadius();
+			if (candidateRadius < 1.0f)
+			{
+				candidateRadius = 40.0f;
+			}
+
+			NearbySameTypeStructureClearanceContext ctx = {
+				pos,
+				candidateRadius,
+				getSameTypeSpacingPadding(templateToPlace),
+				spacingCategory,
+				false
+			};
+			player->iterateObjects(findNearbySameTypeStructureClearanceCallback, &ctx);
+			return ctx.tooClose;
 		}
 
 		static void findNearbyStructureClearanceCallback(Object* obj, void* userData)
@@ -1046,7 +1127,9 @@
 				{
 					continue;
 				}
-				if (hasNearbyOwnedSupplyDropoff(player, info.source, 650.0f))
+				// Keep the "claimed" radius tighter so a badly placed stash does not
+				// accidentally mark an adjacent supply dock as already serviced.
+				if (hasNearbyOwnedSupplyDropoff(player, info.source, 430.0f))
 				{
 					continue;
 				}
@@ -1078,48 +1161,109 @@
 			}
 
 			const Real placeAngle = buildingTemplate->getPlacementViewAngle();
-			const Real baseRadius = supplySource->getGeometryInfo().getBoundingCircleRadius() + 20.0f;
+			const Real baseRadius = supplySource->getGeometryInfo().getBoundingCircleRadius() + 12.0f;
 			const UnsignedInt legalOpts =
 				BuildAssistant::TERRAIN_RESTRICTIONS |
 				BuildAssistant::CLEAR_PATH |
 				BuildAssistant::NO_OBJECT_OVERLAP |
 				BuildAssistant::SHROUD_REVEALED;
 			const Coord3D* workerPos = worker->getPosition();
+			const Coord3D* commandCenterPos = nullptr;
+			Object* commandCenter = findPrimaryCommandCenter(player);
+			if (commandCenter != nullptr)
+			{
+				commandCenterPos = commandCenter->getPosition();
+			}
+
+			const Coord3D* referencePos = workerPos != nullptr ? workerPos : commandCenterPos;
+			Real referenceDirX = 0.0f;
+			Real referenceDirY = 0.0f;
+			bool hasReferenceDir = false;
+			if (referencePos != nullptr)
+			{
+				referenceDirX = referencePos->x - supplyPos->x;
+				referenceDirY = referencePos->y - supplyPos->y;
+				const Real referenceLenSq = referenceDirX * referenceDirX + referenceDirY * referenceDirY;
+				if (referenceLenSq > 1.0f)
+				{
+					const Real invReferenceLen = 1.0f / std::sqrt(referenceLenSq);
+					referenceDirX *= invReferenceLen;
+					referenceDirY *= invReferenceLen;
+					hasReferenceDir = true;
+				}
+			}
 
 			bool found = false;
+			Int bestPass = 0;
 			Real bestRing = 0.0f;
+			Real bestSidePenalty = 0.0f;
 			Real bestWorkerDistSq = 0.0f;
 			Coord3D best = *supplyPos;
 			best.z = 0.0f;
 
-			for (Real ring = baseRadius; ring <= baseRadius + 450.0f; ring += 20.0f)
+			static const Real ringLimits[] = { 90.0f, 150.0f, 220.0f, 320.0f };
+			for (Int pass = 0; pass < static_cast<Int>(sizeof(ringLimits) / sizeof(ringLimits[0])) && !found; ++pass)
 			{
-				for (Int i = 0; i < 36; ++i)
+				const Real maxRing = baseRadius + ringLimits[pass];
+				const bool preferReferenceSideOnly = hasReferenceDir && pass < 2;
+				for (Real ring = baseRadius; ring <= maxRing; ring += 12.0f)
 				{
-					const Real theta = static_cast<Real>(i) * (6.28318530717958647692f / 36.0f);
-					Coord3D candidate = *supplyPos;
-					candidate.x += std::cos(theta) * ring;
-					candidate.y += std::sin(theta) * ring;
-					candidate.z = 0.0f;
+					for (Int i = 0; i < 72; ++i)
+					{
+						const Real theta = static_cast<Real>(i) * (6.28318530717958647692f / 72.0f);
+						Coord3D candidate = *supplyPos;
+						candidate.x += std::cos(theta) * ring;
+						candidate.y += std::sin(theta) * ring;
+						candidate.z = 0.0f;
 
-					if (TheBuildAssistant->isLocationLegalToBuild(&candidate, buildingTemplate, placeAngle, legalOpts, worker, nullptr) != LBC_OK)
-					{
-						continue;
-					}
-					if (isBuildLocationTemporarilyReserved(player, &candidate, buildingTemplate))
-					{
-						continue;
-					}
+						if (TheBuildAssistant->isLocationLegalToBuild(&candidate, buildingTemplate, placeAngle, legalOpts, worker, nullptr) != LBC_OK)
+						{
+							continue;
+						}
+						if (isBuildLocationTemporarilyReserved(player, &candidate, buildingTemplate))
+						{
+							continue;
+						}
+						if (hasOwnedStructureTooClose(player, &candidate, buildingTemplate, 30.0f))
+						{
+							continue;
+						}
 
-					const Real distSq = workerPos != nullptr ? distanceSq2D(&candidate, workerPos) : 0.0f;
-					if (!found ||
-						ring < bestRing ||
-						(ring == bestRing && distSq < bestWorkerDistSq))
-					{
-						found = true;
-						bestRing = ring;
-						bestWorkerDistSq = distSq;
-						best = candidate;
+						Real sidePenalty = 0.0f;
+						Real sideAlignment = 0.0f;
+						if (hasReferenceDir)
+						{
+							Real candidateDirX = candidate.x - supplyPos->x;
+							Real candidateDirY = candidate.y - supplyPos->y;
+							const Real candidateLenSq = candidateDirX * candidateDirX + candidateDirY * candidateDirY;
+							if (candidateLenSq > 1.0f)
+							{
+								const Real invCandidateLen = 1.0f / std::sqrt(candidateLenSq);
+								candidateDirX *= invCandidateLen;
+								candidateDirY *= invCandidateLen;
+								sideAlignment = (candidateDirX * referenceDirX) + (candidateDirY * referenceDirY);
+								sidePenalty = 1.0f - sideAlignment;
+							}
+						}
+						if (preferReferenceSideOnly && sideAlignment < 0.35f)
+						{
+							continue;
+						}
+
+						const Real distSq = workerPos != nullptr ? distanceSq2D(&candidate, workerPos) : 0.0f;
+						if (!found ||
+							pass < bestPass ||
+							(pass == bestPass && ring < bestRing) ||
+							(pass == bestPass && ring == bestRing && sidePenalty < bestSidePenalty) ||
+							(pass == bestPass && ring == bestRing && sidePenalty == bestSidePenalty && distSq < bestWorkerDistSq))
+						{
+							found = true;
+							bestPass = pass;
+							bestRing = ring;
+							bestSidePenalty = sidePenalty;
+							bestWorkerDistSq = distSq;
+							best = candidate;
+						}
 					}
 				}
 			}
@@ -2015,8 +2159,6 @@
 			Real bestDistSq = 0.0f;
 			Coord3D best = zoneCenter;
 			best.z = 0.0f;
-			const bool spacingBarracks = containsIgnoreCase(buildingTemplate->getName().str(), "barracks");
-			const Real barracksSpacingRadius = 280.0f;
 			const Real structurePadding = 36.0f;
 			const Real scanRadius = zoneRadius < 64.0f ? 64.0f : zoneRadius;
 
@@ -2042,7 +2184,7 @@
 					{
 						continue;
 					}
-					if (spacingBarracks && hasNearbyOwnedBarracks(player, &candidate, barracksSpacingRadius))
+					if (hasOwnedSameTypeStructureTooClose(player, &candidate, buildingTemplate))
 					{
 						continue;
 					}
@@ -2112,8 +2254,6 @@
 			Real bestDistSq = 0.0f;
 			Coord3D best = *anchorPos;
 			best.z = 0.0f;
-			const bool spacingBarracks = containsIgnoreCase(buildingTemplate->getName().str(), "barracks");
-			const Real barracksSpacingRadius = 280.0f;
 			const Real preferredRadius = getPreferredBuildExpansionRadius(player, buildingTemplate, baseRadius + 240.0f);
 			const Real ringStep = 24.0f;
 			const Real windowSpan = 720.0f;
@@ -2122,7 +2262,6 @@
 
 			for (Int pass = 0; pass < 3 && !found; ++pass)
 			{
-				const bool enforceSpacing = spacingBarracks && pass == 0;
 				const Real structurePadding = pass == 0 ? 36.0f : (pass == 1 ? 12.0f : 0.0f);
 				Real searchStart = std::max(baseRadius, preferredRadius - 240.0f);
 				Real searchEnd = std::min(baseRadius + maxExtraRadius, searchStart + windowSpan);
@@ -2147,7 +2286,7 @@
 							{
 								continue;
 							}
-							if (enforceSpacing && hasNearbyOwnedBarracks(player, &candidate, barracksSpacingRadius))
+							if (hasOwnedSameTypeStructureTooClose(player, &candidate, buildingTemplate))
 							{
 								continue;
 							}
@@ -2567,7 +2706,8 @@
 				if (attemptReason == "no_money" ||
 					attemptReason == "idle_worker_not_found" ||
 					attemptReason == "worker_not_found" ||
-					attemptReason == "black_market_prereq_missing")
+					attemptReason == "black_market_prereq_missing" ||
+					attemptReason == "construct_site_not_created")
 				{
 					break;
 				}

@@ -65,6 +65,17 @@ GLA_BLACK_MARKET_UPGRADE_SUGGESTIONS = (
     "Upgrade_GLACamoNetting",
 )
 
+AUTONOMY_PROFILE_OPTIONS = (
+    "sprawl_balanced",
+    "sprawl",
+    "standard",
+    "aggressive",
+    "economic",
+    "defensive",
+    "tech",
+    "builtin_passthrough",
+)
+
 
 class BotUIApp:
     def __init__(self, root: tk.Tk) -> None:
@@ -105,6 +116,7 @@ class BotUIApp:
         self.unit_queue_count_var = tk.IntVar(value=1)
         self.raid_count_var = tk.IntVar(value=1)
         self.target_player_index_var = tk.IntVar(value=0)
+        self.autonomy_target_player_index_var = tk.IntVar(value=1)
         self.money_player_index_var = tk.IntVar(value=0)
         self.money_value_var = tk.StringVar(value="20000")
         self.promotion_science_var = tk.StringVar(value=GLA_SCIENCE_SUGGESTIONS[0])
@@ -132,9 +144,13 @@ class BotUIApp:
         self.camera_zoom_var = tk.DoubleVar(value=1.0)
         self.camera_height_var = tk.DoubleVar(value=0.0)
         self.camera_zoom_limited_var = tk.BooleanVar(value=True)
-        self.autonomy_profile_var = tk.StringVar(value="sprawl")
-        self.autonomy_status_var = tk.StringVar(value="Autonomy: manual")
-        self.sprawl_multiplier_var = tk.DoubleVar(value=10.0)
+        self.autonomy_control_mode_var = tk.StringVar(value="autonomous")
+        self.autonomy_profile_var = tk.StringVar(value="sprawl_balanced")
+        self.autonomy_status_var = tk.StringVar(value="Autonomy: manual/sprawl_balanced")
+        self.autonomy_assets_var = tk.StringVar(value="Assets: units=- buildings=- workers=- money=-")
+        self.autonomy_zone_var = tk.StringVar(value="Zone: -")
+        self.autonomy_last_decision_var = tk.StringVar(value="Last decision: -")
+        self.sprawl_multiplier_var = tk.DoubleVar(value=1.5)
         self.sprawl_multiplier_var.trace_add("write", self._on_sprawl_multiplier_changed)
 
         self._build_ui()
@@ -149,21 +165,23 @@ class BotUIApp:
         notebook = ttk.Notebook(self.root)
         notebook.grid(row=0, column=0, sticky="nsew")
 
-        ops_tab = ttk.Frame(notebook, padding=8)
+        manual_tab = ttk.Frame(notebook, padding=8)
+        autonomy_tab = ttk.Frame(notebook, padding=8)
         menu_tab = ttk.Frame(notebook, padding=8)
-        notebook.add(ops_tab, text="Bot")
+        notebook.add(manual_tab, text="Manual")
+        notebook.add(autonomy_tab, text="Autonomy")
         notebook.add(menu_tab, text="Menu")
 
-        ops_tab.grid_columnconfigure(0, weight=1, uniform="cols")
-        ops_tab.grid_columnconfigure(1, weight=1, uniform="cols")
-        ops_tab.grid_rowconfigure(0, weight=1)
+        manual_tab.grid_columnconfigure(0, weight=1, uniform="cols")
+        manual_tab.grid_columnconfigure(1, weight=1, uniform="cols")
+        manual_tab.grid_rowconfigure(0, weight=1)
 
-        left = ttk.Frame(ops_tab, padding=8)
+        left = ttk.Frame(manual_tab, padding=8)
         left.grid(row=0, column=0, sticky="nsew")
         left.grid_columnconfigure(0, weight=1)
         left.grid_rowconfigure(3, weight=1)
 
-        right = ttk.Frame(ops_tab, padding=8)
+        right = ttk.Frame(manual_tab, padding=8)
         right.grid(row=0, column=1, sticky="nsew")
         right.grid_columnconfigure(0, weight=1)
         right.grid_rowconfigure(0, weight=1)
@@ -173,6 +191,7 @@ class BotUIApp:
         self._build_right_top_players(right)
         self._build_right_bottom_controls(right)
         self._build_left_bottom_map(left)
+        self._build_autonomy_tab(autonomy_tab)
         self._build_menu_tab(menu_tab)
 
     def _build_ops_left_panel(self, parent: ttk.Frame) -> None:
@@ -247,6 +266,89 @@ class BotUIApp:
         ttk.Button(nav, text="Query Players", command=lambda: self._query("game.players", quiet=False)).grid(
             row=6, column=1, sticky="ew", padx=2, pady=2
         )
+
+    def _build_autonomy_tab(self, parent: ttk.Frame) -> None:
+        parent.grid_columnconfigure(0, weight=1)
+        parent.grid_rowconfigure(2, weight=1)
+
+        conn = ttk.LabelFrame(parent, text="Connection", padding=8)
+        conn.grid(row=0, column=0, sticky="ew")
+        conn.grid_columnconfigure(1, weight=1)
+        ttk.Label(conn, text="Pipe").grid(row=0, column=0, sticky="w")
+        ttk.Entry(conn, textvariable=self.pipe_name_var).grid(row=0, column=1, sticky="ew", padx=6)
+        ttk.Button(conn, text="Connect", command=self.connect).grid(row=0, column=2, padx=2)
+        ttk.Button(conn, text="Disconnect", command=self.disconnect).grid(row=0, column=3, padx=2)
+        ttk.Label(conn, textvariable=self.connection_state_var).grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+        status = ttk.LabelFrame(parent, text="Status", padding=8)
+        status.grid(row=1, column=0, sticky="ew", pady=(8, 0))
+        status.grid_columnconfigure(0, weight=1)
+        ttk.Label(status, textvariable=self.autonomy_status_var).grid(row=0, column=0, sticky="w")
+        ttk.Label(status, textvariable=self.autonomy_assets_var).grid(row=1, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(status, textvariable=self.autonomy_zone_var).grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(status, textvariable=self.autonomy_last_decision_var).grid(row=3, column=0, sticky="w", pady=(4, 0))
+
+        controls = ttk.LabelFrame(parent, text="Autonomous Control", padding=8)
+        controls.grid(row=2, column=0, sticky="nsew", pady=(8, 0))
+        for idx in range(4):
+            controls.grid_columnconfigure(idx, weight=1)
+
+        ttk.Label(controls, text="Mode").grid(row=0, column=0, sticky="e")
+        ttk.Combobox(
+            controls,
+            textvariable=self.autonomy_control_mode_var,
+            values=("autonomous", "hybrid", "manual"),
+            state="readonly",
+        ).grid(row=0, column=1, sticky="ew", padx=(4, 6))
+        ttk.Button(controls, text="Apply", command=self._autonomy_apply_selected_mode).grid(row=0, column=2, sticky="ew", padx=2)
+        ttk.Button(controls, text="Refresh Status", command=self._autonomy_status).grid(row=0, column=3, sticky="ew", padx=2)
+
+        ttk.Label(controls, text="Profile").grid(row=1, column=0, sticky="e", pady=(8, 0))
+        ttk.Combobox(
+            controls,
+            textvariable=self.autonomy_profile_var,
+            values=AUTONOMY_PROFILE_OPTIONS,
+            state="readonly",
+        ).grid(row=1, column=1, sticky="ew", padx=(4, 6), pady=(8, 0))
+        ttk.Label(controls, text="Target Player").grid(row=1, column=2, sticky="e", pady=(8, 0))
+        tk.Spinbox(controls, from_=0, to=11, textvariable=self.autonomy_target_player_index_var, width=6).grid(
+            row=1, column=3, sticky="w", pady=(8, 0)
+        )
+
+        ttk.Label(controls, text="Sprawl x").grid(row=2, column=0, sticky="e", pady=(8, 0))
+        tk.Spinbox(
+            controls,
+            from_=0.5,
+            to=10.0,
+            increment=0.5,
+            textvariable=self.sprawl_multiplier_var,
+            width=8,
+        ).grid(row=2, column=1, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(controls, text="Polling", variable=self.poll_enabled).grid(row=2, column=2, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(controls, text="Use Streaming", variable=self.stream_enabled, command=self._toggle_streaming).grid(
+            row=2, column=3, sticky="w", pady=(8, 0)
+        )
+
+        ttk.Checkbutton(
+            controls,
+            text="Map Updates",
+            variable=self.map_updates_enabled,
+            command=self._on_map_updates_toggle,
+        ).grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(controls, text="Debug Inbound", variable=self.debug_inbound).grid(row=3, column=1, sticky="w", pady=(8, 0))
+        ttk.Label(controls, text="Default workflow: autonomous + sprawl_balanced").grid(
+            row=3, column=2, columnspan=2, sticky="w", pady=(8, 0)
+        )
+
+        actions = ttk.Frame(controls)
+        actions.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(12, 0))
+        for idx in range(5):
+            actions.grid_columnconfigure(idx, weight=1)
+        ttk.Button(actions, text="Start Autonomous", command=self._autonomy_go).grid(row=0, column=0, sticky="ew", padx=2)
+        ttk.Button(actions, text="Pause", command=self._autonomy_pause).grid(row=0, column=1, sticky="ew", padx=2)
+        ttk.Button(actions, text="Resume", command=self._autonomy_resume).grid(row=0, column=2, sticky="ew", padx=2)
+        ttk.Button(actions, text="Manual", command=self._autonomy_manual).grid(row=0, column=3, sticky="ew", padx=2)
+        ttk.Button(actions, text="Reset", command=self._autonomy_reset).grid(row=0, column=4, sticky="ew", padx=2)
 
     def _build_right_top_players(self, parent: ttk.Frame) -> None:
         players = ttk.LabelFrame(parent, text="Players", padding=8)
@@ -464,34 +566,6 @@ class BotUIApp:
             command=self._on_map_updates_toggle,
         ).grid(row=7, column=0, sticky="w")
         ttk.Checkbutton(actions, text="Debug Inbound", variable=self.debug_inbound).grid(row=7, column=1, sticky="w")
-
-        autonomy = ttk.LabelFrame(controls, text="Autonomy", padding=6)
-        autonomy.grid(row=3, column=0, sticky="ew", pady=(8, 0))
-        for i in range(4):
-            autonomy.grid_columnconfigure(i, weight=1)
-        ttk.Label(autonomy, textvariable=self.autonomy_status_var).grid(row=0, column=0, columnspan=4, sticky="w")
-        ttk.Label(autonomy, text="Profile").grid(row=1, column=0, sticky="e", pady=(6, 0))
-        ttk.Combobox(
-            autonomy,
-            textvariable=self.autonomy_profile_var,
-            values=("standard", "aggressive", "economic", "defensive", "tech", "sprawl", "builtin_passthrough"),
-            state="readonly",
-        ).grid(row=1, column=1, sticky="ew", padx=(4, 6), pady=(6, 0))
-        ttk.Button(autonomy, text="Configure", command=self._autonomy_configure).grid(row=1, column=2, sticky="ew", padx=2, pady=(6, 0))
-        ttk.Button(autonomy, text="Status", command=self._autonomy_status).grid(row=1, column=3, sticky="ew", padx=2, pady=(6, 0))
-        ttk.Label(autonomy, text="Sprawl x").grid(row=2, column=0, sticky="e", pady=(6, 0))
-        tk.Spinbox(
-            autonomy,
-            from_=0.5,
-            to=10.0,
-            increment=0.5,
-            textvariable=self.sprawl_multiplier_var,
-            width=8,
-        ).grid(row=2, column=1, sticky="w", pady=(6, 0))
-        ttk.Button(autonomy, text="Go Autonomous", command=self._autonomy_go).grid(row=3, column=0, sticky="ew", padx=2, pady=(6, 0))
-        ttk.Button(autonomy, text="Pause", command=self._autonomy_pause).grid(row=3, column=1, sticky="ew", padx=2, pady=(6, 0))
-        ttk.Button(autonomy, text="Resume", command=self._autonomy_resume).grid(row=3, column=2, sticky="ew", padx=2, pady=(6, 0))
-        ttk.Button(autonomy, text="Manual", command=self._autonomy_manual).grid(row=3, column=3, sticky="ew", padx=2, pady=(6, 0))
 
         cmd_row = ttk.LabelFrame(bottom, text="Command Input", padding=8)
         cmd_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -914,7 +988,7 @@ class BotUIApp:
             sprawl_multiplier = 1.0
         payload["sprawl_multiplier"] = max(0.5, min(10.0, sprawl_multiplier))
         try:
-            target = int(self.target_player_index_var.get())
+            target = int(self.autonomy_target_player_index_var.get())
         except Exception:  # noqa: BLE001
             target = -1
         if target >= 0:
@@ -933,16 +1007,25 @@ class BotUIApp:
     def _autonomy_status(self) -> None:
         self._send_session_command("Autonomy.Status", {}, quiet=False)
 
-    def _autonomy_go(self) -> None:
-        self.poll_enabled.set(False)
-        self._suspend_poll_until_monotonic = time.monotonic() + 10.0
-        self._autonomy_mode = "autonomous"
-        self.autonomy_status_var.set(f"Autonomy: autonomous ({self.autonomy_profile_var.get().strip() or 'standard'})")
+    def _autonomy_apply_selected_mode(self) -> None:
+        mode = self.autonomy_control_mode_var.get().strip() or "autonomous"
+        if mode == "manual":
+            self._autonomy_manual()
+            return
         payload = self._autonomy_config_payload()
         self._last_autonomy_config_signature = tuple(sorted(payload.items()))
+        if mode == "autonomous":
+            self.poll_enabled.set(False)
+            self._suspend_poll_until_monotonic = time.monotonic() + 10.0
+        self._autonomy_mode = mode
+        self.autonomy_status_var.set(f"Autonomy: {mode}/{payload.get('profile', 'standard')}")
         self._send_session_command("Autonomy.Configure", payload, quiet=True)
-        self._send_session_command("Autonomy.SetMode", {"mode": "autonomous"}, quiet=False)
+        self._send_session_command("Autonomy.SetMode", {"mode": mode}, quiet=False)
         self._send_session_command("Autonomy.Status", {}, quiet=True)
+
+    def _autonomy_go(self) -> None:
+        self.autonomy_control_mode_var.set("autonomous")
+        self._autonomy_apply_selected_mode()
 
     def _autonomy_pause(self) -> None:
         self._send_session_command("Autonomy.Pause", {}, quiet=False)
@@ -955,8 +1038,23 @@ class BotUIApp:
     def _autonomy_manual(self) -> None:
         self.poll_enabled.set(True)
         self._autonomy_mode = "manual"
-        self.autonomy_status_var.set("Autonomy: manual")
+        self.autonomy_control_mode_var.set("manual")
+        self.autonomy_status_var.set(f"Autonomy: manual/{self.autonomy_profile_var.get().strip() or 'standard'}")
         self._send_session_command("Autonomy.SetMode", {"mode": "manual"}, quiet=False)
+        self._send_session_command("Autonomy.Status", {}, quiet=True)
+
+    def _autonomy_reset(self) -> None:
+        self._autonomy_mode = "manual"
+        self.autonomy_control_mode_var.set("autonomous")
+        self.autonomy_profile_var.set("sprawl_balanced")
+        self.sprawl_multiplier_var.set(1.5)
+        self.autonomy_target_player_index_var.set(1)
+        self.poll_enabled.set(True)
+        self.autonomy_status_var.set("Autonomy: manual/sprawl_balanced")
+        self.autonomy_assets_var.set("Assets: units=- buildings=- workers=- money=-")
+        self.autonomy_zone_var.set("Zone: -")
+        self.autonomy_last_decision_var.set("Last decision: -")
+        self._send_session_command("Autonomy.Reset", {}, quiet=False)
         self._send_session_command("Autonomy.Status", {}, quiet=True)
 
     def _on_sprawl_multiplier_changed(self, *_args: object) -> None:
@@ -1062,6 +1160,7 @@ class BotUIApp:
                     path = self._next_poll_path()
                     if not path:
                         return
+                    meta_interval_sec = 3.0 if self._autonomy_mode == "autonomous" else 1.5
                     if path in ("game.players", "game.resources", "game.status", "game.grid_objects") and now < self._next_meta_poll_monotonic:
                         pass
                     else:
@@ -1074,7 +1173,7 @@ class BotUIApp:
                             self.store.selected_grid_cell = cell
                         self._query(path, args=query_args, quiet=True)
                         if path in ("game.players", "game.resources", "game.status", "game.grid_objects"):
-                            self._next_meta_poll_monotonic = now + 1.5
+                            self._next_meta_poll_monotonic = now + meta_interval_sec
         except Exception as exc:  # noqa: BLE001
             self._log(f"poll_loop error: {exc}")
         finally:
@@ -1255,6 +1354,12 @@ class BotUIApp:
             decision_command = last_decision.get("command", "")
             decision_reason = last_decision.get("reason", "")
             suffix = " paused" if paused else ""
+            self.autonomy_control_mode_var.set(mode)
+            if profile in AUTONOMY_PROFILE_OPTIONS:
+                self.autonomy_profile_var.set(profile)
+            target_player_index = payload.get("target_player_index")
+            if isinstance(target_player_index, int) and target_player_index >= 0:
+                self.autonomy_target_player_index_var.set(target_player_index)
             if isinstance(sprawl_multiplier, (int, float)):
                 remote_multiplier = float(sprawl_multiplier)
                 try:
@@ -1268,7 +1373,16 @@ class BotUIApp:
                     finally:
                         self._suppress_autonomy_control_updates = False
             self._last_autonomy_config_signature = self._autonomy_config_signature()
-            self.autonomy_status_var.set(f"Autonomy: {mode}/{profile} x{float(sprawl_multiplier) if isinstance(sprawl_multiplier, (int, float)) else 1.0:g}{suffix}")
+            multiplier_text = float(sprawl_multiplier) if isinstance(sprawl_multiplier, (int, float)) else 1.0
+            self.autonomy_status_var.set(f"Autonomy: {mode}/{profile} x{multiplier_text:g}{suffix}")
+            self.autonomy_assets_var.set(f"Assets: units={units} buildings={buildings} workers={workers} money={money}")
+            self.autonomy_zone_var.set(f"Zone: anchor={zone_anchor} main={zone_main} center=({zone_x},{zone_y})")
+            if decision_category or decision_command or decision_reason:
+                self.autonomy_last_decision_var.set(
+                    f"Last decision: {decision_category or '-'} / {decision_command or '-'} / {decision_reason or '-'}"
+                )
+            else:
+                self.autonomy_last_decision_var.set("Last decision: -")
             self._log(
                 f"{cmd} mode={mode} profile={profile} sprawl_multiplier={sprawl_multiplier} paused={paused} "
                 f"money={money} units={units} buildings={buildings} workers={workers} "
@@ -1509,9 +1623,12 @@ class BotUIApp:
         if not self.store.players:
             return "game.players"
         map_paths = {"game.grid", "game.grid_objects", "game.objects_map", "game.objects_all_map"}
+        autonomy_allowed_paths = {"game.players", "game.resources", "game.status"}
         for _ in range(len(self._poll_paths)):
             path = self._poll_paths[self._poll_path_index % len(self._poll_paths)]
             self._poll_path_index += 1
+            if self._autonomy_mode == "autonomous" and path not in autonomy_allowed_paths:
+                continue
             if not self.map_updates_enabled.get() and path in map_paths:
                 continue
             if path == "game.grid_objects" and not self.grid_cell_var.get().strip():
