@@ -87,6 +87,10 @@ class BotUIApp:
         self._request_queue: "queue.PriorityQueue[tuple[int, int, dict[str, Any], int | None]]" = queue.PriorityQueue()
         self._request_seq = 0
         self._request_worker_started = False
+        self._autonomy_mode = "manual"
+        self._autonomy_config_after_id: str | None = None
+        self._suppress_autonomy_control_updates = False
+        self._last_autonomy_config_signature: tuple[tuple[str, Any], ...] | None = None
         self._poll_paths = ["game.grid", "game.players", "game.status", "game.resources", "game.grid_objects"]
         self._poll_path_index = 0
         self._map_orientations = ["flip_y", "normal", "flip_x", "flip_xy"]
@@ -128,6 +132,10 @@ class BotUIApp:
         self.camera_zoom_var = tk.DoubleVar(value=1.0)
         self.camera_height_var = tk.DoubleVar(value=0.0)
         self.camera_zoom_limited_var = tk.BooleanVar(value=True)
+        self.autonomy_profile_var = tk.StringVar(value="sprawl")
+        self.autonomy_status_var = tk.StringVar(value="Autonomy: manual")
+        self.sprawl_multiplier_var = tk.DoubleVar(value=10.0)
+        self.sprawl_multiplier_var.trace_add("write", self._on_sprawl_multiplier_changed)
 
         self._build_ui()
         self._start_request_worker()
@@ -456,6 +464,34 @@ class BotUIApp:
             command=self._on_map_updates_toggle,
         ).grid(row=7, column=0, sticky="w")
         ttk.Checkbutton(actions, text="Debug Inbound", variable=self.debug_inbound).grid(row=7, column=1, sticky="w")
+
+        autonomy = ttk.LabelFrame(controls, text="Autonomy", padding=6)
+        autonomy.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        for i in range(4):
+            autonomy.grid_columnconfigure(i, weight=1)
+        ttk.Label(autonomy, textvariable=self.autonomy_status_var).grid(row=0, column=0, columnspan=4, sticky="w")
+        ttk.Label(autonomy, text="Profile").grid(row=1, column=0, sticky="e", pady=(6, 0))
+        ttk.Combobox(
+            autonomy,
+            textvariable=self.autonomy_profile_var,
+            values=("standard", "aggressive", "economic", "defensive", "tech", "sprawl", "builtin_passthrough"),
+            state="readonly",
+        ).grid(row=1, column=1, sticky="ew", padx=(4, 6), pady=(6, 0))
+        ttk.Button(autonomy, text="Configure", command=self._autonomy_configure).grid(row=1, column=2, sticky="ew", padx=2, pady=(6, 0))
+        ttk.Button(autonomy, text="Status", command=self._autonomy_status).grid(row=1, column=3, sticky="ew", padx=2, pady=(6, 0))
+        ttk.Label(autonomy, text="Sprawl x").grid(row=2, column=0, sticky="e", pady=(6, 0))
+        tk.Spinbox(
+            autonomy,
+            from_=0.5,
+            to=10.0,
+            increment=0.5,
+            textvariable=self.sprawl_multiplier_var,
+            width=8,
+        ).grid(row=2, column=1, sticky="w", pady=(6, 0))
+        ttk.Button(autonomy, text="Go Autonomous", command=self._autonomy_go).grid(row=3, column=0, sticky="ew", padx=2, pady=(6, 0))
+        ttk.Button(autonomy, text="Pause", command=self._autonomy_pause).grid(row=3, column=1, sticky="ew", padx=2, pady=(6, 0))
+        ttk.Button(autonomy, text="Resume", command=self._autonomy_resume).grid(row=3, column=2, sticky="ew", padx=2, pady=(6, 0))
+        ttk.Button(autonomy, text="Manual", command=self._autonomy_manual).grid(row=3, column=3, sticky="ew", padx=2, pady=(6, 0))
 
         cmd_row = ttk.LabelFrame(bottom, text="Command Input", padding=8)
         cmd_row.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -870,6 +906,83 @@ class BotUIApp:
             quiet=False,
         )
 
+    def _autonomy_config_payload(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {"profile": self.autonomy_profile_var.get().strip() or "standard"}
+        try:
+            sprawl_multiplier = float(self.sprawl_multiplier_var.get())
+        except Exception:  # noqa: BLE001
+            sprawl_multiplier = 1.0
+        payload["sprawl_multiplier"] = max(0.5, min(10.0, sprawl_multiplier))
+        try:
+            target = int(self.target_player_index_var.get())
+        except Exception:  # noqa: BLE001
+            target = -1
+        if target >= 0:
+            payload["target_player_index"] = target
+        return payload
+
+    def _autonomy_config_signature(self) -> tuple[tuple[str, Any], ...]:
+        payload = self._autonomy_config_payload()
+        return tuple(sorted(payload.items()))
+
+    def _autonomy_configure(self) -> None:
+        payload = self._autonomy_config_payload()
+        self._last_autonomy_config_signature = tuple(sorted(payload.items()))
+        self._send_session_command("Autonomy.Configure", payload, quiet=False)
+
+    def _autonomy_status(self) -> None:
+        self._send_session_command("Autonomy.Status", {}, quiet=False)
+
+    def _autonomy_go(self) -> None:
+        self.poll_enabled.set(False)
+        self._suspend_poll_until_monotonic = time.monotonic() + 10.0
+        self._autonomy_mode = "autonomous"
+        self.autonomy_status_var.set(f"Autonomy: autonomous ({self.autonomy_profile_var.get().strip() or 'standard'})")
+        payload = self._autonomy_config_payload()
+        self._last_autonomy_config_signature = tuple(sorted(payload.items()))
+        self._send_session_command("Autonomy.Configure", payload, quiet=True)
+        self._send_session_command("Autonomy.SetMode", {"mode": "autonomous"}, quiet=False)
+        self._send_session_command("Autonomy.Status", {}, quiet=True)
+
+    def _autonomy_pause(self) -> None:
+        self._send_session_command("Autonomy.Pause", {}, quiet=False)
+        self._send_session_command("Autonomy.Status", {}, quiet=True)
+
+    def _autonomy_resume(self) -> None:
+        self._send_session_command("Autonomy.Resume", {}, quiet=False)
+        self._send_session_command("Autonomy.Status", {}, quiet=True)
+
+    def _autonomy_manual(self) -> None:
+        self.poll_enabled.set(True)
+        self._autonomy_mode = "manual"
+        self.autonomy_status_var.set("Autonomy: manual")
+        self._send_session_command("Autonomy.SetMode", {"mode": "manual"}, quiet=False)
+        self._send_session_command("Autonomy.Status", {}, quiet=True)
+
+    def _on_sprawl_multiplier_changed(self, *_args: object) -> None:
+        if self._suppress_autonomy_control_updates:
+            return
+        if self._autonomy_mode not in ("autonomous", "hybrid"):
+            return
+        if self._autonomy_config_after_id is not None:
+            try:
+                self.root.after_cancel(self._autonomy_config_after_id)
+            except Exception:  # noqa: BLE001
+                pass
+        self._autonomy_config_after_id = self.root.after(250, self._send_live_autonomy_config)
+
+    def _send_live_autonomy_config(self) -> None:
+        self._autonomy_config_after_id = None
+        if self._autonomy_mode not in ("autonomous", "hybrid"):
+            return
+        payload = self._autonomy_config_payload()
+        signature = tuple(sorted(payload.items()))
+        if signature == self._last_autonomy_config_signature:
+            return
+        self._last_autonomy_config_signature = signature
+        self._send_session_command("Autonomy.Configure", payload, quiet=True)
+        self._send_session_command("Autonomy.Status", {}, quiet=True)
+
     def _send_session_command(self, cmd: str, args: dict[str, Any], quiet: bool = False) -> None:
         if not self._hello_ok:
             if not quiet:
@@ -1121,6 +1234,47 @@ class BotUIApp:
             if isinstance(zoom_limited, bool):
                 self.camera_zoom_limited_var.set(zoom_limited)
             self._log(f"{cmd} x={x} y={y} zoom={zoom} pitch={pitch} height={height} zoom_limited={zoom_limited}")
+        elif cmd == "Autonomy.Status" and isinstance(payload, dict):
+            mode = str(payload.get("mode", "manual"))
+            profile = str(payload.get("profile", "standard"))
+            paused = bool(payload.get("paused", False))
+            sprawl_multiplier = payload.get("sprawl_multiplier")
+            selected_zone = payload.get("selected_zone") if isinstance(payload.get("selected_zone"), dict) else {}
+            last_decision = payload.get("last_decision") if isinstance(payload.get("last_decision"), dict) else {}
+            self._autonomy_mode = mode
+            money = payload.get("money")
+            assets = payload.get("assets") if isinstance(payload.get("assets"), dict) else {}
+            units = assets.get("units", "-")
+            buildings = assets.get("buildings", "-")
+            workers = assets.get("workers", "-")
+            zone_anchor = selected_zone.get("anchor_id", "-")
+            zone_main = bool(selected_zone.get("is_main_base", False))
+            zone_x = selected_zone.get("center_x", "-")
+            zone_y = selected_zone.get("center_y", "-")
+            decision_category = last_decision.get("category", "")
+            decision_command = last_decision.get("command", "")
+            decision_reason = last_decision.get("reason", "")
+            suffix = " paused" if paused else ""
+            if isinstance(sprawl_multiplier, (int, float)):
+                remote_multiplier = float(sprawl_multiplier)
+                try:
+                    current_multiplier = float(self.sprawl_multiplier_var.get())
+                except Exception:  # noqa: BLE001
+                    current_multiplier = remote_multiplier
+                if abs(current_multiplier - remote_multiplier) > 1e-6:
+                    self._suppress_autonomy_control_updates = True
+                    try:
+                        self.sprawl_multiplier_var.set(remote_multiplier)
+                    finally:
+                        self._suppress_autonomy_control_updates = False
+            self._last_autonomy_config_signature = self._autonomy_config_signature()
+            self.autonomy_status_var.set(f"Autonomy: {mode}/{profile} x{float(sprawl_multiplier) if isinstance(sprawl_multiplier, (int, float)) else 1.0:g}{suffix}")
+            self._log(
+                f"{cmd} mode={mode} profile={profile} sprawl_multiplier={sprawl_multiplier} paused={paused} "
+                f"money={money} units={units} buildings={buildings} workers={workers} "
+                f"zone_anchor={zone_anchor} zone_main={zone_main} zone=({zone_x},{zone_y}) "
+                f"last_decision={decision_category}/{decision_command} reason={decision_reason}"
+            )
         elif isinstance(payload, dict):
             keys = ", ".join(sorted(payload.keys())[:8])
             self._log(f"{cmd} keys={keys}")

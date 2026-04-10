@@ -12,6 +12,42 @@
 			return h.find(n) != std::string::npos;
 		}
 
+		static bool equalsIgnoreCase(const std::string& lhs, const char* rhs)
+		{
+			if (rhs == nullptr)
+			{
+				return false;
+			}
+
+			std::string a = lhs;
+			std::string b = rhs;
+			std::transform(a.begin(), a.end(), a.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			std::transform(b.begin(), b.end(), b.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			return a == b;
+		}
+
+		static bool isPalaceTemplateName(const std::string& name)
+		{
+			return equalsIgnoreCase(name, "GLAPalace");
+		}
+
+		static bool isCompletedStructure(const Object* obj)
+		{
+			if (obj == nullptr || obj->isEffectivelyDead())
+			{
+				return false;
+			}
+			if (!obj->isKindOf(KINDOF_STRUCTURE))
+			{
+				return false;
+			}
+			if (obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+			{
+				return false;
+			}
+			return true;
+		}
+
 		static std::string trimAscii(const std::string& value)
 		{
 			std::string::size_type start = 0;
@@ -135,6 +171,10 @@
 			{
 				return;
 			}
+			if (obj->isKindOf(KINDOF_STRUCTURE) && obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+			{
+				return;
+			}
 			if (ctx->requireCommandCenter && !obj->isKindOf(KINDOF_COMMANDCENTER))
 			{
 				return;
@@ -228,6 +268,11 @@
 						reason = "producer_not_factory";
 						return nullptr;
 					}
+					if (producer->isKindOf(KINDOF_STRUCTURE) && producer->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+					{
+						reason = "producer_under_construction";
+						return nullptr;
+					}
 					return producer;
 				}
 			}
@@ -254,6 +299,10 @@
 				return;
 			}
 			if (obj->isEffectivelyDead())
+			{
+				return;
+			}
+			if (obj->isKindOf(KINDOF_STRUCTURE) && obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
 			{
 				return;
 			}
@@ -325,6 +374,11 @@
 						reason = "producer_not_factory";
 						return nullptr;
 					}
+					if (producer->isKindOf(KINDOF_STRUCTURE) && producer->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+					{
+						reason = "producer_under_construction";
+						return nullptr;
+					}
 					const ThingTemplate* tt = producer->getTemplate();
 					if (tt == nullptr)
 					{
@@ -365,7 +419,7 @@
 			const std::string name = tt->getName().str();
 			if (producerKind == "palace")
 			{
-				return containsIgnoreCase(name, "palace");
+				return isPalaceTemplateName(name);
 			}
 			if (producerKind == "black_market" || producerKind == "blackmarket" || producerKind == "market")
 			{
@@ -386,7 +440,7 @@
 			{
 				return;
 			}
-			if (!obj->isKindOf(KINDOF_STRUCTURE))
+			if (!isCompletedStructure(obj))
 			{
 				return;
 			}
@@ -423,7 +477,7 @@
 			{
 				return;
 			}
-			if (!obj->isKindOf(KINDOF_STRUCTURE))
+			if (!isCompletedStructure(obj))
 			{
 				return;
 			}
@@ -521,6 +575,11 @@
 						reason = "producer_not_factory";
 						return nullptr;
 					}
+					if (!isCompletedStructure(producer))
+					{
+						reason = "producer_under_construction";
+						return nullptr;
+					}
 					if (!matchesUpgradeProducerKind(producer->getTemplate(), producerKind))
 					{
 						reason = "producer_kind_mismatch";
@@ -570,6 +629,10 @@
 				return;
 			}
 			if (obj->isEffectivelyDead())
+			{
+				return;
+			}
+			if (obj->isKindOf(KINDOF_STRUCTURE) && obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
 			{
 				return;
 			}
@@ -743,7 +806,7 @@
 			{
 				return;
 			}
-			if (!obj->isKindOf(KINDOF_STRUCTURE))
+			if (!isCompletedStructure(obj))
 			{
 				return;
 			}
@@ -1357,6 +1420,10 @@
 			const std::string baseSide = player->getBaseSide().str();
 			if (containsIgnoreCase(side, "gla") || containsIgnoreCase(baseSide, "gla"))
 			{
+				if (TheThingFactory->findTemplate(AsciiString("GLAArmsDealer"), false) != nullptr)
+				{
+					return "GLAArmsDealer";
+				}
 				if (canBuildTemplate("GLAArmsDealer"))
 				{
 					return "GLAArmsDealer";
@@ -1379,7 +1446,7 @@
 				for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
 				{
 					const std::string name = tt->getName().str();
-					if (!containsIgnoreCase(name, "arms") && !containsIgnoreCase(name, "dealer"))
+					if (!containsIgnoreCase(name, "arms") || !containsIgnoreCase(name, "dealer"))
 					{
 						continue;
 					}
@@ -1445,7 +1512,7 @@
 				for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
 				{
 					const std::string name = tt->getName().str();
-					if (!containsIgnoreCase(name, "palace"))
+					if (!isPalaceTemplateName(name))
 					{
 						continue;
 					}
@@ -2184,6 +2251,23 @@
 
 			const Int templateId = buildingTemplate->getTemplateID();
 			const ObjectID workerId = worker->getID();
+			const Coord3D* workerPosBefore = worker->getPosition();
+			AIUpdateInterface* workerAiBefore = worker->getAI();
+			const bool workerIdleBefore = (workerAiBefore != nullptr && workerAiBefore->isIdle());
+			const bool workerBusyBefore = (workerAiBefore != nullptr && workerAiBefore->isBusy());
+			adapterLog(
+				"construct_issue_begin player=%d worker=%d template=%s template_id=%d worker_pos=(%.1f,%.1f) location=(%.1f,%.1f) angle=%.3f ai_idle=%d ai_busy=%d",
+				static_cast<int>(player->getPlayerIndex()),
+				static_cast<int>(workerId),
+				buildingTemplate->getName().str(),
+				static_cast<int>(templateId),
+				workerPosBefore != nullptr ? workerPosBefore->x : 0.0f,
+				workerPosBefore != nullptr ? workerPosBefore->y : 0.0f,
+				location.x,
+				location.y,
+				angle,
+				workerIdleBefore ? 1 : 0,
+				workerBusyBefore ? 1 : 0);
 			if (!executeScopedSelectionCommand(player, std::vector<ObjectID>(1, workerId), reason, [&]() -> bool
 			{
 				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DOZER_CONSTRUCT);
@@ -2198,6 +2282,64 @@
 				return true;
 			}))
 			{
+				return false;
+			}
+
+			Object* nearbySite = nullptr;
+			Real nearbySiteDistSq = 3.4e38f;
+			if (TheGameLogic != nullptr)
+			{
+				for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
+				{
+					if (obj->isEffectivelyDead() || !obj->isKindOf(KINDOF_STRUCTURE) || !obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+					{
+						continue;
+					}
+					if (obj->getControllingPlayer() != player)
+					{
+						continue;
+					}
+					const ThingTemplate* objTemplate = obj->getTemplate();
+					if (objTemplate == nullptr || objTemplate->getTemplateID() != templateId)
+					{
+						continue;
+					}
+					const Coord3D* objPos = obj->getPosition();
+					if (objPos == nullptr)
+					{
+						continue;
+					}
+					const Real dx = objPos->x - location.x;
+					const Real dy = objPos->y - location.y;
+					const Real distSq = dx * dx + dy * dy;
+					if (distSq < nearbySiteDistSq)
+					{
+						nearbySiteDistSq = distSq;
+						nearbySite = obj;
+					}
+				}
+			}
+
+			const Coord3D* workerPosAfter = worker->getPosition();
+			AIUpdateInterface* workerAiAfter = worker->getAI();
+			const bool workerIdleAfter = (workerAiAfter != nullptr && workerAiAfter->isIdle());
+			const bool workerBusyAfter = (workerAiAfter != nullptr && workerAiAfter->isBusy());
+			adapterLog(
+				"construct_issue_result player=%d worker=%d template=%s worker_pos=(%.1f,%.1f) ai_idle=%d ai_busy=%d site_found=%d site_id=%d site_dist=%.1f",
+				static_cast<int>(player->getPlayerIndex()),
+				static_cast<int>(workerId),
+				buildingTemplate->getName().str(),
+				workerPosAfter != nullptr ? workerPosAfter->x : 0.0f,
+				workerPosAfter != nullptr ? workerPosAfter->y : 0.0f,
+				workerIdleAfter ? 1 : 0,
+				workerBusyAfter ? 1 : 0,
+				nearbySite != nullptr ? 1 : 0,
+				nearbySite != nullptr ? static_cast<int>(nearbySite->getID()) : 0,
+				nearbySite != nullptr ? std::sqrt(nearbySiteDistSq) : -1.0f);
+
+			if (nearbySite == nullptr)
+			{
+				reason = "construct_site_not_created";
 				return false;
 			}
 
@@ -2947,11 +3089,36 @@
 				return std::string();
 			}
 
+			auto isPotentiallyQueueable = [&](const ThingTemplate* tt) -> bool
+			{
+				if (tt == nullptr)
+				{
+					return false;
+				}
+				const CanMakeType canMake = TheBuildAssistant->canMakeUnit(producer, tt);
+				return canMake == CANMAKE_OK ||
+					canMake == CANMAKE_NO_MONEY ||
+					canMake == CANMAKE_QUEUE_FULL ||
+					canMake == CANMAKE_PARKING_PLACES_FULL;
+			};
+
 			std::vector<std::string> candidates;
 			const std::string side = player->getSide().str();
 			const std::string baseSide = player->getBaseSide().str();
 			if (containsIgnoreCase(side, "gla") || containsIgnoreCase(baseSide, "gla"))
 			{
+				if (containsIgnoreCase(side, "slth") || containsIgnoreCase(side, "stealth"))
+				{
+					candidates.push_back("GC_Slth_GLAInfantryRebel");
+				}
+				if (containsIgnoreCase(side, "chem") || containsIgnoreCase(side, "toxin"))
+				{
+					candidates.push_back("GC_Chem_GLAInfantryRebel");
+				}
+				if (containsIgnoreCase(side, "demo"))
+				{
+					candidates.push_back("Demo_GLAInfantryRebel");
+				}
 				candidates.push_back("GLAInfantryRebel");
 			}
 			if (containsIgnoreCase(side, "china") || containsIgnoreCase(baseSide, "china"))
@@ -2973,7 +3140,7 @@
 				{
 					continue;
 				}
-				if (TheBuildAssistant->canMakeUnit(producer, tt) == CANMAKE_OK)
+				if (isPotentiallyQueueable(tt))
 				{
 					return name;
 				}
@@ -2999,16 +3166,35 @@
 					canMake == CANMAKE_QUEUE_FULL ||
 					canMake == CANMAKE_PARKING_PLACES_FULL;
 			};
-			const char* candidates[] = {
-				"GLAVehicleQuadCannon",
-				"GLAVehicleQuadcannon",
-				"GLAQuadCannon",
-				"GLAVehicleQuad",
-				"GLAQuad"
-			};
-			for (const char* name : candidates)
+
+			std::vector<std::string> candidates;
+			const Player* player = producer->getControllingPlayer();
+			const std::string side = player != nullptr ? player->getSide().str() : std::string();
+			const std::string baseSide = player != nullptr ? player->getBaseSide().str() : std::string();
+			if (containsIgnoreCase(side, "gla") || containsIgnoreCase(baseSide, "gla"))
 			{
-				const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(name), false);
+				if (containsIgnoreCase(side, "slth") || containsIgnoreCase(side, "stealth"))
+				{
+					candidates.push_back("GC_Slth_GLAVehicleQuadCannon");
+				}
+				if (containsIgnoreCase(side, "chem") || containsIgnoreCase(side, "toxin"))
+				{
+					candidates.push_back("GC_Chem_GLAVehicleQuadCannon");
+				}
+				if (containsIgnoreCase(side, "demo"))
+				{
+					candidates.push_back("Demo_GLAVehicleQuadCannon");
+				}
+			}
+			candidates.push_back("GLAVehicleQuadCannon");
+			candidates.push_back("GLAVehicleQuadcannon");
+			candidates.push_back("GLAQuadCannon");
+			candidates.push_back("GLAVehicleQuad");
+			candidates.push_back("GLAQuad");
+
+			for (const std::string& name : candidates)
+			{
+				const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(name.c_str()), false);
 				if (tt == nullptr)
 				{
 					continue;
@@ -3233,6 +3419,7 @@
 				const std::string unitTemplateName = inferSoldierTemplateForPlayer(player, producer);
 				if (unitTemplateName.empty())
 				{
+					lastReason = "soldier_template_not_found";
 					continue;
 				}
 				for (Int i = 0; i < count; ++i)

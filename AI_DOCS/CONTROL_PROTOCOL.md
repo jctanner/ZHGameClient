@@ -131,6 +131,12 @@ Supported `cmd` values (v1):
 45. `Game.Camera.LookAt`
 46. `Game.Camera.SetZoomLimited`
 47. `Game.Camera.Get`
+48. `Autonomy.SetMode`
+49. `Autonomy.Configure`
+50. `Autonomy.Status`
+51. `Autonomy.Pause`
+52. `Autonomy.Resume`
+53. `Autonomy.Reset`
 
 `Lobby.Join` args:
 
@@ -439,6 +445,35 @@ Supported `cmd` values (v1):
 
 1. Returns `QueryResult` with current camera `x,y,z,angle,pitch,zoom,height_above_ground,zoom_limited`.
 2. Also includes defaults/limits when available: `default_height`, `min_height`, `max_height`.
+
+`Autonomy.SetMode` args:
+
+1. `mode` (required string: `manual|hybrid|autonomous`)
+
+`Autonomy.Configure` args:
+
+1. `profile` (optional string: `standard|aggressive|economic|defensive|tech|sprawl|builtin_passthrough`)
+2. `player_index` (optional int; defaults to local player)
+3. `target_player_index` (optional int)
+4. `economy_bias` (optional number `0..1`)
+5. `aggression_bias` (optional number `0..1`)
+6. `defense_bias` (optional number `0..1`)
+7. `expansion_bias` (optional number `0..1`)
+8. `capture_tech` (optional bool)
+9. `allow_superweapons` (optional bool)
+10. `sprawl_multiplier` (optional number, default `1.0`, adapter-clamped; scales `sprawl` profile expansion caps)
+
+`Autonomy.Status`:
+
+1. Returns compact `QueryResult` with current autonomy mode, profile, bias values, active automation rules, local player summary, and asset counts.
+
+`Autonomy.Pause` / `Autonomy.Resume`:
+
+1. Pause or resume autonomous rule execution without discarding the configured profile/settings.
+
+`Autonomy.Reset`:
+
+1. Clear autonomy settings and return the adapter to `manual` mode defaults.
 
 ## In-Game Intent Batch
 

@@ -223,6 +223,12 @@
 						"automation_attack_rule",
 						"automation_capture_rule",
 						"automation_radar_van_rule",
+						"autonomy_mode",
+						"autonomy_configure",
+						"autonomy_status",
+						"autonomy_pause",
+						"autonomy_resume",
+						"autonomy_reset",
 						"adapter_log_configure",
 						"adapter_log_reset",
 						"game_camera_set",
@@ -584,6 +590,57 @@
 			if (cmd == "Automation.ClearRadarVanRule")
 			{
 				clearRadarVanAutomationRule();
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Autonomy.SetMode")
+			{
+				std::string reason;
+				if (!setAutonomyMode(message, reason))
+				{
+					sendActionAck(requestId, false, "bad_request", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Autonomy.Configure")
+			{
+				std::string reason;
+				if (!configureAutonomy(message, reason))
+				{
+					sendActionAck(requestId, false, "bad_request", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Autonomy.Status")
+			{
+				sendQueryResult(requestId, buildAutonomyStatus());
+				return;
+			}
+
+			if (cmd == "Autonomy.Pause")
+			{
+				pauseAutonomy();
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Autonomy.Resume")
+			{
+				resumeAutonomy();
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Autonomy.Reset")
+			{
+				resetAutonomy();
 				sendActionAck(requestId, true);
 				return;
 			}
