@@ -213,6 +213,13 @@ namespace
 		DWORD nextProductionTick;
 		DWORD nextTechTick;
 		DWORD nextGuardTick;
+		DWORD nextSupplyBuildTick;
+		DWORD nextBarracksBuildTick;
+		DWORD nextArmsBuildTick;
+		DWORD nextPalaceBuildTick;
+		DWORD nextMarketBuildTick;
+		DWORD nextTunnelBuildTick;
+		DWORD nextStingerBuildTick;
 		std::size_t nextZoneIndex;
 		bool hasLastZone;
 		UnsignedInt lastZoneAnchorId;
@@ -413,25 +420,32 @@ namespace
 		void resetAutonomyState()
 		{
 			m_autonomyState.mode = "manual";
-			m_autonomyState.profile = "standard";
+			m_autonomyState.profile = "sprawl_balanced";
 			m_autonomyState.paused = false;
 			m_autonomyState.captureTech = true;
-			m_autonomyState.allowSuperweapons = true;
+			m_autonomyState.allowSuperweapons = false;
 			m_autonomyState.hasExplicitPlayerIndex = false;
 			m_autonomyState.playerIndex = -1;
 			m_autonomyState.hasExplicitTargetPlayerIndex = false;
 			m_autonomyState.targetPlayerIndex = -1;
-			m_autonomyState.economyBias = 0.55f;
-			m_autonomyState.aggressionBias = 0.50f;
-			m_autonomyState.defenseBias = 0.50f;
-			m_autonomyState.expansionBias = 0.60f;
-			m_autonomyState.sprawlMultiplier = 1.0f;
+			m_autonomyState.economyBias = 0.65f;
+			m_autonomyState.aggressionBias = 0.35f;
+			m_autonomyState.defenseBias = 0.45f;
+			m_autonomyState.expansionBias = 0.55f;
+			m_autonomyState.sprawlMultiplier = 1.5f;
 			m_autonomyState.zoneRadius = 450.0f;
 			m_autonomyState.lastAppliedTick = 0u;
 			m_autonomyState.nextMacroTick = 0u;
 			m_autonomyState.nextProductionTick = 0u;
 			m_autonomyState.nextTechTick = 0u;
 			m_autonomyState.nextGuardTick = 0u;
+			m_autonomyState.nextSupplyBuildTick = 0u;
+			m_autonomyState.nextBarracksBuildTick = 0u;
+			m_autonomyState.nextArmsBuildTick = 0u;
+			m_autonomyState.nextPalaceBuildTick = 0u;
+			m_autonomyState.nextMarketBuildTick = 0u;
+			m_autonomyState.nextTunnelBuildTick = 0u;
+			m_autonomyState.nextStingerBuildTick = 0u;
 			m_autonomyState.nextZoneIndex = 0u;
 			m_autonomyState.hasLastZone = false;
 			m_autonomyState.lastZoneAnchorId = 0u;
@@ -481,6 +495,8 @@ namespace
 			}
 
 			const std::string profile = normalizeAsciiLower(m_autonomyState.profile);
+			const bool isBalancedSprawl = (profile == "sprawl_balanced");
+			const bool isSprawlStyle = (profile == "sprawl" || isBalancedSprawl);
 			const Real econ = clampUnitFloat(m_autonomyState.economyBias, 0.0f, 1.0f);
 			const Real aggro = clampUnitFloat(m_autonomyState.aggressionBias, 0.0f, 1.0f);
 			const Real defense = clampUnitFloat(m_autonomyState.defenseBias, 0.0f, 1.0f);
@@ -491,8 +507,8 @@ namespace
 			m_workerAutomationRule.playerIndex = m_autonomyState.playerIndex;
 			m_workerAutomationRule.hasExplicitProducerKind = true;
 			m_workerAutomationRule.producerKind = "command_center";
-			m_workerAutomationRule.minIdleWorkers = (econ >= 0.70f || profile == "economic" || profile == "sprawl") ? 2 : 1;
-			m_workerAutomationRule.queueCount = (econ >= 0.75f || profile == "economic" || profile == "sprawl") ? 2 : 1;
+			m_workerAutomationRule.minIdleWorkers = (econ >= 0.70f || profile == "economic" || isSprawlStyle) ? 2 : 1;
+			m_workerAutomationRule.queueCount = (econ >= 0.75f || profile == "economic" || isSprawlStyle) ? 2 : 1;
 			m_workerAutomationRule.cooldownMs = (profile == "aggressive") ? 1500u : 2500u;
 			m_workerAutomationRule.nextAllowedTick = 0u;
 			if (profile == "sprawl")
@@ -501,12 +517,18 @@ namespace
 				m_workerAutomationRule.queueCount = 1;
 				m_workerAutomationRule.cooldownMs = 2000u;
 			}
+			else if (isBalancedSprawl)
+			{
+				m_workerAutomationRule.minIdleWorkers = 2;
+				m_workerAutomationRule.queueCount = 1;
+				m_workerAutomationRule.cooldownMs = 2500u;
+			}
 
 			m_stashWorkerAutomationRule.enabled = profile != "builtin_passthrough";
 			m_stashWorkerAutomationRule.hasExplicitPlayerIndex = m_autonomyState.hasExplicitPlayerIndex;
 			m_stashWorkerAutomationRule.playerIndex = m_autonomyState.playerIndex;
 			m_stashWorkerAutomationRule.targetWorkersPerStash = 8;
-			if (profile == "economic" || profile == "sprawl" || econ >= 0.70f)
+			if (profile == "economic" || isSprawlStyle || econ >= 0.70f)
 			{
 				m_stashWorkerAutomationRule.targetWorkersPerStash = 10;
 			}
@@ -521,6 +543,11 @@ namespace
 			{
 				m_stashWorkerAutomationRule.targetWorkersPerStash = 3;
 				m_stashWorkerAutomationRule.cooldownMs = 12000u;
+			}
+			else if (isBalancedSprawl)
+			{
+				m_stashWorkerAutomationRule.targetWorkersPerStash = 6;
+				m_stashWorkerAutomationRule.cooldownMs = 8000u;
 			}
 
 			m_radarVanAutomationRule.enabled = (profile != "defensive" && profile != "builtin_passthrough");
@@ -567,6 +594,12 @@ namespace
 				m_attackAutomationRule.minUnits = 70;
 				m_attackAutomationRule.groupSize = 45;
 				m_attackAutomationRule.cooldownMs = 26000u;
+			}
+			else if (isBalancedSprawl)
+			{
+				m_attackAutomationRule.minUnits = 55;
+				m_attackAutomationRule.groupSize = 28;
+				m_attackAutomationRule.cooldownMs = 22000u;
 			}
 
 			m_captureAutomationRule.enabled = m_autonomyState.captureTech && profile != "builtin_passthrough";
@@ -811,13 +844,15 @@ namespace
 				Int barracksInProgress;
 				Int armsDealers;
 				Int armsDealersInProgress;
+				Int palaces;
+				Int palacesInProgress;
 				Int blackMarkets;
 				Int blackMarketsInProgress;
 				Int tunnels;
 				Int tunnelsInProgress;
 				Int stingers;
 				Int stingersInProgress;
-			} activeZoneCounts = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+			} activeZoneCounts = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 			if (hasActiveZone)
 			{
 				const Real zoneRadiusSq = std::max<Real>(160.0f, m_autonomyState.zoneRadius) * std::max<Real>(160.0f, m_autonomyState.zoneRadius);
@@ -860,6 +895,10 @@ namespace
 					{
 						incrementZoneStructureCount(activeZoneCounts.armsDealers, activeZoneCounts.armsDealersInProgress);
 					}
+					else if (containsIgnoreCase(name, "palace"))
+					{
+						incrementZoneStructureCount(activeZoneCounts.palaces, activeZoneCounts.palacesInProgress);
+					}
 					else if (containsIgnoreCase(name, "black") && containsIgnoreCase(name, "market"))
 					{
 						incrementZoneStructureCount(activeZoneCounts.blackMarkets, activeZoneCounts.blackMarketsInProgress);
@@ -885,6 +924,7 @@ namespace
 			const Int totalZoneSupplyStashes = activeZoneCounts.supplyStashes + activeZoneCounts.supplyStashesInProgress;
 			const Int totalZoneBarracks = activeZoneCounts.barracks + activeZoneCounts.barracksInProgress;
 			const Int totalZoneArmsDealers = activeZoneCounts.armsDealers + activeZoneCounts.armsDealersInProgress;
+			const Int totalZonePalaces = activeZoneCounts.palaces + activeZoneCounts.palacesInProgress;
 			const Int totalZoneTunnels = activeZoneCounts.tunnels + activeZoneCounts.tunnelsInProgress;
 			const Int totalZoneStingers = activeZoneCounts.stingers + activeZoneCounts.stingersInProgress;
 
@@ -1019,26 +1059,172 @@ namespace
 				return tryCommand(requestIdPrefix, cmd, args, outReason);
 			};
 
+			auto trySpecificZoneCommand = [&](const char* requestIdPrefix, const char* cmd, const AutonomyZone& zone, nlohmann::json args, std::string& outReason) -> bool
+			{
+				args["zone_center"] = nlohmann::json::object({
+					{"x", zone.center.x},
+					{"y", zone.center.y}
+				});
+				args["zone_radius"] = std::max<Real>(220.0f, m_autonomyState.zoneRadius * 1.35f);
+				args["strict_zone"] = false;
+				return tryCommand(requestIdPrefix, cmd, args, outReason);
+			};
+
+			auto isSettlingSensitiveBuild = [&](const char* cmd) -> bool
+			{
+				const std::string cmdString = cmd != nullptr ? cmd : "";
+				return cmdString == "Game.BuildSupplyStashSmart"
+					|| cmdString == "Game.BuildBarracksSmart"
+					|| cmdString == "Game.BuildArmsDealerSmart"
+					|| cmdString == "Game.BuildPalaceSmart";
+			};
+
+			auto tryMacroBuildWithFallback = [&](const char* cmd, bool preferZone, std::string& outReason) -> bool
+			{
+				bool ok = preferZone
+					? tryZoneCommand("auto_macro", cmd, nlohmann::json::object(), outReason)
+					: tryCommand("auto_macro", cmd, nlohmann::json::object(), outReason);
+				if (ok || outReason != "construct_site_not_created")
+				{
+					return ok;
+				}
+				if (isSettlingSensitiveBuild(cmd))
+				{
+					return false;
+				}
+
+				if (!preferZone && hasActiveZone)
+				{
+					return tryZoneCommand("auto_macro", cmd, nlohmann::json::object(), outReason);
+				}
+				if (preferZone)
+				{
+					return tryCommand("auto_macro", cmd, nlohmann::json::object(), outReason);
+				}
+				return false;
+			};
+
+			auto getBuildCooldownTick = [&](const char* cmd) -> DWORD*
+			{
+				const std::string cmdString = cmd != nullptr ? cmd : "";
+				if (cmdString == "Game.BuildSupplyStashSmart")
+				{
+					return &m_autonomyState.nextSupplyBuildTick;
+				}
+				if (cmdString == "Game.BuildBarracksSmart")
+				{
+					return &m_autonomyState.nextBarracksBuildTick;
+				}
+				if (cmdString == "Game.BuildArmsDealerSmart")
+				{
+					return &m_autonomyState.nextArmsBuildTick;
+				}
+				if (cmdString == "Game.BuildPalaceSmart")
+				{
+					return &m_autonomyState.nextPalaceBuildTick;
+				}
+				if (cmdString == "Game.BuildBlackMarketSmart")
+				{
+					return &m_autonomyState.nextMarketBuildTick;
+				}
+				if (cmdString == "Game.BuildTunnelNetwork")
+				{
+					return &m_autonomyState.nextTunnelBuildTick;
+				}
+				if (cmdString == "Game.BuildStingerSite")
+				{
+					return &m_autonomyState.nextStingerBuildTick;
+				}
+				return nullptr;
+			};
+
+			auto isBuildAttemptReady = [&](const char* cmd, Int inProgressCount) -> bool
+			{
+				if (inProgressCount > 0)
+				{
+					return false;
+				}
+				DWORD* nextAllowedTick = getBuildCooldownTick(cmd);
+				return nextAllowedTick == nullptr || static_cast<LONG>(*nextAllowedTick - now) <= 0;
+			};
+
+			auto recordBuildAttempt = [&](const char* cmd, bool success, const std::string& outReason)
+			{
+				DWORD* nextAllowedTick = getBuildCooldownTick(cmd);
+				if (nextAllowedTick == nullptr)
+				{
+					return;
+				}
+
+				DWORD delayMs = success ? 9000u : 4000u;
+				const bool settlingSensitiveBuild = isSettlingSensitiveBuild(cmd);
+				if (outReason == "idle_worker_not_found")
+				{
+					delayMs = settlingSensitiveBuild ? 2500u : 1500u;
+				}
+				else if (outReason == "construct_site_not_created")
+				{
+					delayMs = settlingSensitiveBuild ? 7000u : 5000u;
+				}
+				else if (!success && settlingSensitiveBuild)
+				{
+					delayMs = std::max<DWORD>(delayMs, 5000u);
+				}
+				if (std::strcmp(cmd, "Game.BuildSupplyStashSmart") == 0)
+				{
+					delayMs = success ? 10000u : std::max<DWORD>(delayMs, 3500u);
+					if (outReason == "construct_site_not_created")
+					{
+						delayMs = 4500u;
+					}
+				}
+				else if (std::strcmp(cmd, "Game.BuildBarracksSmart") == 0)
+				{
+					delayMs = success ? 12000u : std::max<DWORD>(delayMs, 6000u);
+				}
+				else if (std::strcmp(cmd, "Game.BuildArmsDealerSmart") == 0)
+				{
+					delayMs = success ? 12000u : std::max<DWORD>(delayMs, 6000u);
+				}
+				if (std::strcmp(cmd, "Game.BuildPalaceSmart") == 0)
+				{
+					delayMs = success ? 15000u : std::max<DWORD>(delayMs, 8000u);
+				}
+				*nextAllowedTick = now + delayMs;
+			};
+
 			if (static_cast<LONG>(m_autonomyState.nextMacroTick - now) <= 0)
 			{
 				std::string reason;
 				bool issued = false;
 				const std::string profile = normalizeAsciiLower(m_autonomyState.profile);
+				const bool isBalancedSprawl = (profile == "sprawl_balanced");
+				const bool isSprawlStyle = (profile == "sprawl" || isBalancedSprawl);
 				const Real sprawlMultiplier = std::max<Real>(0.5f, std::min<Real>(10.0f, m_autonomyState.sprawlMultiplier));
-				const Int sprawlSupplyCap = std::max<Int>(1, static_cast<Int>(std::floor(4.0f * sprawlMultiplier)));
-				const Int sprawlBarracksCap = std::max<Int>(1, static_cast<Int>(std::floor(2.0f * sprawlMultiplier)));
-				const Int sprawlArmsCap = std::max<Int>(1, static_cast<Int>(std::floor(3.0f * sprawlMultiplier)));
-				const Int sprawlMarketCap = std::max<Int>(1, static_cast<Int>(std::floor(8.0f * sprawlMultiplier)));
-				const Int sprawlTunnelCap = std::max<Int>(1, static_cast<Int>(std::floor(8.0f * sprawlMultiplier)));
-				const Int sprawlStingerCap = std::max<Int>(1, static_cast<Int>(std::floor(6.0f * sprawlMultiplier)));
+				const Int sprawlSupplyCap = std::max<Int>(1, static_cast<Int>(std::floor((isBalancedSprawl ? 3.0f : 4.0f) * sprawlMultiplier)));
+				const Int sprawlBarracksCap = std::max<Int>(1, static_cast<Int>(std::floor((isBalancedSprawl ? 1.5f : 2.0f) * sprawlMultiplier)));
+				const Int sprawlArmsCap = std::max<Int>(1, static_cast<Int>(std::floor((isBalancedSprawl ? 2.0f : 3.0f) * sprawlMultiplier)));
+				const Int sprawlMarketCap = std::max<Int>(1, static_cast<Int>(std::floor((isBalancedSprawl ? 6.0f : 8.0f) * sprawlMultiplier)));
+				const Int sprawlTunnelCap = std::max<Int>(1, static_cast<Int>(std::floor((isBalancedSprawl ? 5.0f : 8.0f) * sprawlMultiplier)));
+				const Int sprawlStingerCap = std::max<Int>(1, static_cast<Int>(std::floor((isBalancedSprawl ? 4.0f : 6.0f) * sprawlMultiplier)));
+				const UnsignedInt reserveCash = isBalancedSprawl ? 10000u : 5000u;
+				const UnsignedInt blackMarketCost = 2500u;
+				const bool openingInfrastructureReady = counts.supplyStashes >= 1 && counts.barracks >= 1 && counts.armsDealers >= 1;
+				const bool openingEconomyReady = counts.supplyStashes >= 2 || counts.blackMarkets >= 1;
+				const bool openingNeedsSupplyStash = counts.supplyStashes < 1;
+				const bool openingNeedsBarracks = !openingNeedsSupplyStash && counts.barracks < 1;
+				const bool openingNeedsArmsDealer = !openingNeedsSupplyStash && !openingNeedsBarracks && counts.armsDealers < 1;
+				const bool canScaleMilitaryProduction = !isBalancedSprawl || (openingInfrastructureReady && openingEconomyReady);
+				const Int effectiveBarracksCap = isBalancedSprawl ? (canScaleMilitaryProduction ? sprawlBarracksCap : 1) : sprawlBarracksCap;
+				const Int effectiveArmsCap = isBalancedSprawl ? (canScaleMilitaryProduction ? sprawlArmsCap : 1) : sprawlArmsCap;
 				const Int sprawlDesiredMarketCount =
 					std::max<Int>(
-						1,
+						isBalancedSprawl ? 2 : 1,
 						std::min<Int>(
 							sprawlMarketCap,
 							std::max<Int>(
-								totalSupplyStashes / 2,
-								(totalBarracks + totalArmsDealers) / 4)));
+								isBalancedSprawl ? totalSupplyStashes : (totalSupplyStashes / 2),
+								isBalancedSprawl ? ((totalBarracks + totalArmsDealers + 1) / 2) : ((totalBarracks + totalArmsDealers) / 4))));
 				const bool remoteZoneHasStash = hasActiveZone && !activeZone.isMainBase && totalZoneSupplyStashes > 0;
 				const bool remoteZoneNeedsFollowup =
 					remoteZoneHasStash
@@ -1051,120 +1237,261 @@ namespace
 					&& totalZoneSupplyStashes > 0
 					&& (totalZoneBarracks + totalZoneArmsDealers + totalZoneTunnels + totalZoneStingers) >= 3;
 				const bool shouldThrottleExtraStashGrowth =
-					profile == "sprawl"
+					isSprawlStyle
 					&& totalPalaces > 0
-					&& totalBlackMarkets < std::max<Int>(1, totalSupplyStashes / 2)
+					&& totalBlackMarkets < std::max<Int>(isBalancedSprawl ? 2 : 1, isBalancedSprawl ? totalSupplyStashes : (totalSupplyStashes / 2))
 					&& activeZoneIsDeveloped;
 				const bool shouldPrioritizeMarketGrowth =
-					profile == "sprawl"
+					isSprawlStyle
 					&& totalPalaces > 0
-					&& money >= 2500u
+					&& money >= (isBalancedSprawl ? (reserveCash + blackMarketCost) : blackMarketCost)
+					&& (!isBalancedSprawl || counts.blackMarketsInProgress < 1)
 					&& totalBlackMarkets < sprawlDesiredMarketCount;
+				const bool shouldPreserveReserve =
+					isBalancedSprawl
+					&& (money < reserveCash || counts.blackMarketsInProgress > 0)
+					&& totalPalaces > 0
+					&& totalBlackMarkets > 0;
+				const bool shouldForceEcoRecovery =
+					isBalancedSprawl
+					&& money < reserveCash
+					&& totalSupplyStashes > 0;
+				const bool balancedZoneCanAddBarracks = !isBalancedSprawl || !hasActiveZone || totalZoneBarracks < 1;
+				const bool balancedZoneCanAddArmsDealer = !isBalancedSprawl || !hasActiveZone || totalZoneArmsDealers < 1;
+				const bool balancedZoneCanAddPalace = !isBalancedSprawl || !hasActiveZone || totalZonePalaces < 1;
 				std::string chosenCommand = "none";
-				if (counts.supplyStashes < 1)
+				if (openingNeedsSupplyStash)
 				{
-					if (totalSupplyStashes < 1 && money >= 1200u)
+					if (counts.supplyStashes < 1
+						&& counts.supplyStashesInProgress < 1
+						&& isBuildAttemptReady("Game.BuildSupplyStashSmart", counts.supplyStashesInProgress)
+						&& money >= 1200u)
 					{
 						chosenCommand = "Game.BuildSupplyStashSmart";
-						issued = tryCommand("auto_macro", "Game.BuildSupplyStashSmart", nlohmann::json::object(), reason);
+						issued = tryMacroBuildWithFallback("Game.BuildSupplyStashSmart", false, reason);
+						recordBuildAttempt("Game.BuildSupplyStashSmart", issued, reason);
 					}
 				}
-				else if (counts.barracks < 1)
+				else if (openingNeedsBarracks)
 				{
-					if (totalBarracks < 1 && money >= 600u)
+					if (counts.supplyStashes >= 1
+						&& counts.barracks < 1
+						&& counts.barracksInProgress < 1
+						&& isBuildAttemptReady("Game.BuildBarracksSmart", counts.barracksInProgress)
+						&& money >= 600u)
 					{
 						chosenCommand = "Game.BuildBarracksSmart";
-						issued = tryCommand("auto_macro", "Game.BuildBarracksSmart", nlohmann::json::object(), reason);
+						issued = tryMacroBuildWithFallback("Game.BuildBarracksSmart", false, reason);
+						recordBuildAttempt("Game.BuildBarracksSmart", issued, reason);
 					}
 				}
-				else if (counts.armsDealers < 1)
+				else if (openingNeedsArmsDealer)
 				{
-					if (totalArmsDealers < 1 && money >= 2500u)
+					if (counts.supplyStashes >= 1
+						&& counts.barracks >= 1
+						&& counts.armsDealers < 1
+						&& counts.armsDealersInProgress < 1
+						&& isBuildAttemptReady("Game.BuildArmsDealerSmart", counts.armsDealersInProgress)
+						&& money >= 2500u)
 					{
 						chosenCommand = "Game.BuildArmsDealerSmart";
-						issued = tryCommand("auto_macro", "Game.BuildArmsDealerSmart", nlohmann::json::object(), reason);
+						issued = tryMacroBuildWithFallback("Game.BuildArmsDealerSmart", false, reason);
+						recordBuildAttempt("Game.BuildArmsDealerSmart", issued, reason);
 					}
 				}
-				else if (counts.supplyStashes < 2 && (profile == "economic" || profile == "sprawl" || m_autonomyState.expansionBias >= 0.70f))
+				else if (totalSupplyStashes < 2 && (profile == "economic" || isSprawlStyle || m_autonomyState.expansionBias >= 0.70f))
 				{
-					if (totalSupplyStashes < 2 && money >= 1600u)
+					if (totalSupplyStashes < 2
+						&& counts.supplyStashesInProgress < 1
+						&& isBuildAttemptReady("Game.BuildSupplyStashSmart", counts.supplyStashesInProgress)
+						&& money >= 1600u)
 					{
 						chosenCommand = "Game.BuildSupplyStashSmart";
-						issued = tryCommand("auto_macro", "Game.BuildSupplyStashSmart", nlohmann::json::object(), reason);
+						issued = tryMacroBuildWithFallback("Game.BuildSupplyStashSmart", false, reason);
+						recordBuildAttempt("Game.BuildSupplyStashSmart", issued, reason);
 					}
 				}
-				else if (counts.palaces < 1)
+				else if (totalPalaces < 1)
 				{
-					if (totalPalaces < 1 && money >= 5000u)
+					if (openingInfrastructureReady
+						&& counts.workers >= 8
+						&& totalPalaces < 1
+						&& balancedZoneCanAddPalace
+						&& counts.palacesInProgress < 1
+						&& isBuildAttemptReady("Game.BuildPalaceSmart", counts.palacesInProgress)
+						&& money >= 5000u)
 					{
 						chosenCommand = "Game.BuildPalaceSmart";
-						issued = tryCommand("auto_macro", "Game.BuildPalaceSmart", nlohmann::json::object(), reason);
+						issued = tryMacroBuildWithFallback("Game.BuildPalaceSmart", false, reason);
+						recordBuildAttempt("Game.BuildPalaceSmart", issued, reason);
 					}
 				}
-				else if (profile == "sprawl" && remoteZoneNeedsFollowup && totalZoneTunnels < 1 && money >= 900u)
-				{
-					chosenCommand = "Game.BuildTunnelNetwork";
-					issued = tryZoneCommand("auto_macro", "Game.BuildTunnelNetwork", nlohmann::json::object(), reason);
-				}
-				else if (profile == "sprawl" && remoteZoneNeedsFollowup && totalZoneBarracks < 1 && money >= 800u)
-				{
-					chosenCommand = "Game.BuildBarracksSmart";
-					issued = tryZoneCommand("auto_macro", "Game.BuildBarracksSmart", nlohmann::json::object(), reason);
-				}
-				else if (profile == "sprawl" && remoteZoneNeedsFollowup && totalZoneArmsDealers < 1 && money >= 2600u)
-				{
-					chosenCommand = "Game.BuildArmsDealerSmart";
-					issued = tryZoneCommand("auto_macro", "Game.BuildArmsDealerSmart", nlohmann::json::object(), reason);
-				}
-				else if (profile == "sprawl" && remoteZoneNeedsFollowup && totalZoneStingers < 1 && money >= 1200u)
-				{
-					chosenCommand = "Game.BuildStingerSite";
-					issued = tryZoneCommand("auto_macro", "Game.BuildStingerSite", nlohmann::json::object(), reason);
-				}
-				else if (profile == "sprawl" && totalPalaces > 0 && totalBlackMarkets < 1 && money >= 2500u)
+				else if (shouldForceEcoRecovery
+					&& totalPalaces > 0
+					&& totalBlackMarkets < sprawlDesiredMarketCount
+					&& counts.blackMarketsInProgress < 1
+					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", counts.blackMarketsInProgress)
+					&& money >= blackMarketCost)
 				{
 					chosenCommand = "Game.BuildBlackMarketSmart";
-					issued = tryCommand("auto_macro", "Game.BuildBlackMarketSmart", nlohmann::json::object(), reason);
+					issued = tryMacroBuildWithFallback("Game.BuildBlackMarketSmart", hasActiveZone, reason);
+					recordBuildAttempt("Game.BuildBlackMarketSmart", issued, reason);
 				}
-				else if (shouldPrioritizeMarketGrowth)
-				{
-					chosenCommand = "Game.BuildBlackMarketSmart";
-					issued = tryCommand("auto_macro", "Game.BuildBlackMarketSmart", nlohmann::json::object(), reason);
-				}
-				else if (profile == "sprawl" && totalBarracks < sprawlBarracksCap && money >= 800u)
-				{
-					chosenCommand = "Game.BuildBarracksSmart";
-					issued = tryZoneCommand("auto_macro", "Game.BuildBarracksSmart", nlohmann::json::object(), reason);
-				}
-				else if (profile == "sprawl" && totalArmsDealers < sprawlArmsCap && money >= 2600u)
-				{
-					chosenCommand = "Game.BuildArmsDealerSmart";
-					issued = tryZoneCommand("auto_macro", "Game.BuildArmsDealerSmart", nlohmann::json::object(), reason);
-				}
-				else if (totalPalaces > 0 && totalBlackMarkets < ((profile == "economic" || profile == "tech") ? 2 : 1) && money >= 2500u)
-				{
-					chosenCommand = "Game.BuildBlackMarketSmart";
-					issued = tryCommand("auto_macro", "Game.BuildBlackMarketSmart", nlohmann::json::object(), reason);
-				}
-				else if (profile == "sprawl" && totalPalaces > 0 && totalBlackMarkets < sprawlMarketCap && money >= 2500u)
-				{
-					chosenCommand = "Game.BuildBlackMarketSmart";
-					issued = tryZoneCommand("auto_macro", "Game.BuildBlackMarketSmart", nlohmann::json::object(), reason);
-				}
-				else if (profile == "sprawl" && totalTunnels < sprawlTunnelCap && money >= 900u)
-				{
-					chosenCommand = "Game.BuildTunnelNetwork";
-					issued = tryZoneCommand("auto_macro", "Game.BuildTunnelNetwork", nlohmann::json::object(), reason);
-				}
-				else if (profile == "sprawl" && totalStingers < sprawlStingerCap && money >= 1200u)
-				{
-					chosenCommand = "Game.BuildStingerSite";
-					issued = tryZoneCommand("auto_macro", "Game.BuildStingerSite", nlohmann::json::object(), reason);
-				}
-				else if (profile == "sprawl" && !shouldThrottleExtraStashGrowth && totalSupplyStashes < sprawlSupplyCap && money >= 1800u)
+				else if (shouldForceEcoRecovery
+					&& !shouldThrottleExtraStashGrowth
+					&& totalSupplyStashes < sprawlSupplyCap
+					&& counts.supplyStashesInProgress < 1
+					&& isBuildAttemptReady("Game.BuildSupplyStashSmart", counts.supplyStashesInProgress)
+					&& money >= 1800u)
 				{
 					chosenCommand = "Game.BuildSupplyStashSmart";
-					issued = tryCommand("auto_macro", "Game.BuildSupplyStashSmart", nlohmann::json::object(), reason);
+					issued = tryMacroBuildWithFallback("Game.BuildSupplyStashSmart", false, reason);
+					recordBuildAttempt("Game.BuildSupplyStashSmart", issued, reason);
+				}
+				else if (isSprawlStyle
+					&& remoteZoneNeedsFollowup
+					&& totalZoneTunnels < 1
+					&& activeZoneCounts.tunnelsInProgress < 1
+					&& isBuildAttemptReady("Game.BuildTunnelNetwork", activeZoneCounts.tunnelsInProgress)
+					&& money >= 900u)
+				{
+					chosenCommand = "Game.BuildTunnelNetwork";
+					issued = tryMacroBuildWithFallback("Game.BuildTunnelNetwork", true, reason);
+					recordBuildAttempt("Game.BuildTunnelNetwork", issued, reason);
+				}
+				else if (canScaleMilitaryProduction
+					&& isSprawlStyle
+					&& remoteZoneNeedsFollowup
+					&& totalZoneBarracks < 1
+					&& activeZoneCounts.barracksInProgress < 1
+					&& isBuildAttemptReady("Game.BuildBarracksSmart", activeZoneCounts.barracksInProgress)
+					&& money >= (isBalancedSprawl ? reserveCash : 800u))
+				{
+					chosenCommand = "Game.BuildBarracksSmart";
+					issued = tryMacroBuildWithFallback("Game.BuildBarracksSmart", true, reason);
+					recordBuildAttempt("Game.BuildBarracksSmart", issued, reason);
+				}
+				else if (canScaleMilitaryProduction
+					&& isSprawlStyle
+					&& remoteZoneNeedsFollowup
+					&& totalZoneArmsDealers < 1
+					&& activeZoneCounts.armsDealersInProgress < 1
+					&& isBuildAttemptReady("Game.BuildArmsDealerSmart", activeZoneCounts.armsDealersInProgress)
+					&& money >= (isBalancedSprawl ? reserveCash : 2600u))
+				{
+					chosenCommand = "Game.BuildArmsDealerSmart";
+					issued = tryMacroBuildWithFallback("Game.BuildArmsDealerSmart", true, reason);
+					recordBuildAttempt("Game.BuildArmsDealerSmart", issued, reason);
+				}
+				else if (isSprawlStyle
+					&& remoteZoneNeedsFollowup
+					&& totalZoneStingers < 1
+					&& activeZoneCounts.stingersInProgress < 1
+					&& isBuildAttemptReady("Game.BuildStingerSite", activeZoneCounts.stingersInProgress)
+					&& money >= (isBalancedSprawl ? 1800u : 1200u))
+				{
+					chosenCommand = "Game.BuildStingerSite";
+					issued = tryMacroBuildWithFallback("Game.BuildStingerSite", true, reason);
+					recordBuildAttempt("Game.BuildStingerSite", issued, reason);
+				}
+				else if (isSprawlStyle
+					&& totalPalaces > 0
+					&& totalBlackMarkets < 1
+					&& money >= (isBalancedSprawl ? (reserveCash + blackMarketCost) : blackMarketCost)
+					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", counts.blackMarketsInProgress)
+					&& (!isBalancedSprawl || counts.blackMarketsInProgress < 1))
+				{
+					chosenCommand = "Game.BuildBlackMarketSmart";
+					issued = tryMacroBuildWithFallback("Game.BuildBlackMarketSmart", false, reason);
+					recordBuildAttempt("Game.BuildBlackMarketSmart", issued, reason);
+				}
+				else if (shouldPrioritizeMarketGrowth
+					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", counts.blackMarketsInProgress))
+				{
+					chosenCommand = "Game.BuildBlackMarketSmart";
+					issued = tryMacroBuildWithFallback("Game.BuildBlackMarketSmart", false, reason);
+					recordBuildAttempt("Game.BuildBlackMarketSmart", issued, reason);
+				}
+				else if (!shouldPreserveReserve
+					&& canScaleMilitaryProduction
+					&& isSprawlStyle
+					&& totalBarracks < effectiveBarracksCap
+					&& balancedZoneCanAddBarracks
+					&& counts.barracksInProgress < 1
+					&& isBuildAttemptReady("Game.BuildBarracksSmart", counts.barracksInProgress)
+					&& money >= (isBalancedSprawl ? reserveCash : 800u))
+				{
+					chosenCommand = "Game.BuildBarracksSmart";
+					issued = tryMacroBuildWithFallback("Game.BuildBarracksSmart", true, reason);
+					recordBuildAttempt("Game.BuildBarracksSmart", issued, reason);
+				}
+				else if (!shouldPreserveReserve
+					&& canScaleMilitaryProduction
+					&& isSprawlStyle
+					&& totalArmsDealers < effectiveArmsCap
+					&& balancedZoneCanAddArmsDealer
+					&& counts.armsDealersInProgress < 1
+					&& isBuildAttemptReady("Game.BuildArmsDealerSmart", counts.armsDealersInProgress)
+					&& money >= (isBalancedSprawl ? reserveCash : 2600u))
+				{
+					chosenCommand = "Game.BuildArmsDealerSmart";
+					issued = tryMacroBuildWithFallback("Game.BuildArmsDealerSmart", true, reason);
+					recordBuildAttempt("Game.BuildArmsDealerSmart", issued, reason);
+				}
+				else if (totalPalaces > 0
+					&& totalBlackMarkets < ((profile == "economic" || profile == "tech") ? 2 : 1)
+					&& money >= (isBalancedSprawl ? (reserveCash + blackMarketCost) : blackMarketCost)
+					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", counts.blackMarketsInProgress)
+					&& (!isBalancedSprawl || counts.blackMarketsInProgress < 1))
+				{
+					chosenCommand = "Game.BuildBlackMarketSmart";
+					issued = tryMacroBuildWithFallback("Game.BuildBlackMarketSmart", false, reason);
+					recordBuildAttempt("Game.BuildBlackMarketSmart", issued, reason);
+				}
+				else if (isSprawlStyle
+					&& totalPalaces > 0
+					&& totalBlackMarkets < sprawlMarketCap
+					&& money >= (isBalancedSprawl ? (reserveCash + blackMarketCost) : blackMarketCost)
+					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", counts.blackMarketsInProgress)
+					&& (!isBalancedSprawl || counts.blackMarketsInProgress < 1))
+				{
+					chosenCommand = "Game.BuildBlackMarketSmart";
+					issued = tryMacroBuildWithFallback("Game.BuildBlackMarketSmart", true, reason);
+					recordBuildAttempt("Game.BuildBlackMarketSmart", issued, reason);
+				}
+				else if (!shouldPreserveReserve
+					&& isSprawlStyle
+					&& totalTunnels < sprawlTunnelCap
+					&& counts.tunnelsInProgress < 1
+					&& isBuildAttemptReady("Game.BuildTunnelNetwork", counts.tunnelsInProgress)
+					&& money >= (isBalancedSprawl ? 1400u : 900u))
+				{
+					chosenCommand = "Game.BuildTunnelNetwork";
+					issued = tryMacroBuildWithFallback("Game.BuildTunnelNetwork", true, reason);
+					recordBuildAttempt("Game.BuildTunnelNetwork", issued, reason);
+				}
+				else if (!shouldPreserveReserve
+					&& isSprawlStyle
+					&& totalStingers < sprawlStingerCap
+					&& counts.stingersInProgress < 1
+					&& isBuildAttemptReady("Game.BuildStingerSite", counts.stingersInProgress)
+					&& money >= (isBalancedSprawl ? 1800u : 1200u))
+				{
+					chosenCommand = "Game.BuildStingerSite";
+					issued = tryMacroBuildWithFallback("Game.BuildStingerSite", true, reason);
+					recordBuildAttempt("Game.BuildStingerSite", issued, reason);
+				}
+				else if (!shouldPreserveReserve
+					&& isSprawlStyle
+					&& !shouldThrottleExtraStashGrowth
+					&& totalSupplyStashes < sprawlSupplyCap
+					&& counts.supplyStashesInProgress < 1
+					&& isBuildAttemptReady("Game.BuildSupplyStashSmart", counts.supplyStashesInProgress)
+					&& money >= (isBalancedSprawl ? 2200u : 1800u))
+				{
+					chosenCommand = "Game.BuildSupplyStashSmart";
+					issued = tryMacroBuildWithFallback("Game.BuildSupplyStashSmart", false, reason);
+					recordBuildAttempt("Game.BuildSupplyStashSmart", issued, reason);
 				}
 
 				m_autonomyState.lastDecisionCategory = "macro";
@@ -1204,7 +1531,7 @@ namespace
 					issued ? 1 : 0,
 					(issued ? "ok" : reason.c_str()));
 
-				if (profile == "sprawl" && hasActiveZone && !zones.empty())
+				if (isSprawlStyle && hasActiveZone && !zones.empty())
 				{
 					m_autonomyState.nextZoneIndex = (m_autonomyState.nextZoneIndex + 1u) % zones.size();
 				}
@@ -1216,23 +1543,178 @@ namespace
 				std::string reason;
 				bool issued = false;
 				const std::string profile = normalizeAsciiLower(m_autonomyState.profile);
+				const bool isBalancedSprawl = (profile == "sprawl_balanced");
+				const Int armyCap = isBalancedSprawl ? 100 : 9999;
+				const Int combatCount = counts.soldiers + counts.rpg + counts.quads + counts.scorpions + counts.scudLaunchers;
+				const UnsignedInt reserveCash = isBalancedSprawl ? 10000u : 0u;
+				const bool openingInfrastructureReady = totalSupplyStashes >= 1 && totalBarracks >= 1 && totalArmsDealers >= 1;
+				const bool shouldPauseCombatProduction =
+					isBalancedSprawl
+					&& (!openingInfrastructureReady
+						|| money < reserveCash
+						|| ((counts.blackMarketsInProgress > 0 || counts.supplyStashesInProgress > 0)
+							&& money < (reserveCash + 2000u)));
+				const Real zoneRadiusSq = std::max<Real>(160.0f, m_autonomyState.zoneRadius) * std::max<Real>(160.0f, m_autonomyState.zoneRadius);
 				std::string chosenCommand = "none";
-				if (counts.barracks > 0 && money >= 300u)
+
+				auto queueAtPreferredZoneProducer = [&](bool wantBarracks, const std::string& unitTemplateName, const char* cmdName, std::string& outReason) -> bool
+				{
+					if (!hasActiveZone || unitTemplateName.empty())
+					{
+						outReason = "no_zone_producer";
+						return false;
+					}
+
+					std::vector<Object*> candidates;
+					for (Object* obj = TheGameLogic != nullptr ? TheGameLogic->getFirstObject() : nullptr; obj != nullptr; obj = obj->getNextObject())
+					{
+						if (obj->isEffectivelyDead() || obj->getControllingPlayer() != player || !obj->isKindOf(KINDOF_STRUCTURE) || obj->getPosition() == nullptr)
+						{
+							continue;
+						}
+						if (obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+						{
+							continue;
+						}
+						const Real dx = obj->getPosition()->x - activeZone.center.x;
+						const Real dy = obj->getPosition()->y - activeZone.center.y;
+						if ((dx * dx) + (dy * dy) > zoneRadiusSq)
+						{
+							continue;
+						}
+						const ThingTemplate* tt = obj->getTemplate();
+						const std::string name = tt != nullptr ? tt->getName().str() : "";
+						if (wantBarracks)
+						{
+							if (!containsIgnoreCase(name, "barracks"))
+							{
+								continue;
+							}
+						}
+						else
+						{
+							if (!(containsIgnoreCase(name, "warfactory") || containsIgnoreCase(name, "armsdealer")))
+							{
+								continue;
+							}
+						}
+						candidates.push_back(obj);
+					}
+
+					if (candidates.empty())
+					{
+						outReason = "no_zone_producer";
+						return false;
+					}
+
+					std::sort(candidates.begin(), candidates.end(), [&](Object* lhs, Object* rhs) -> bool
+					{
+						const Real ldx = lhs->getPosition()->x - activeZone.center.x;
+						const Real ldy = lhs->getPosition()->y - activeZone.center.y;
+						const Real rdx = rhs->getPosition()->x - activeZone.center.x;
+						const Real rdy = rhs->getPosition()->y - activeZone.center.y;
+						return (ldx * ldx) + (ldy * ldy) < (rdx * rdx) + (rdy * rdy);
+					});
+
+					nlohmann::json queuedMessage = {
+						{"type", "SessionCommand"},
+						{"request_id", std::string(cmdName)},
+						{"cmd", "Game.QueueUnit"},
+						{"args", nlohmann::json::object({
+							{"producer_kind", "any"},
+							{"unit_template", unitTemplateName}
+						})}
+					};
+					if (m_autonomyState.hasExplicitPlayerIndex)
+					{
+						queuedMessage["args"]["player_index"] = m_autonomyState.playerIndex;
+					}
+
+					for (Object* producer : candidates)
+					{
+						queuedMessage["args"]["producer_object_id"] = static_cast<Int>(producer->getID());
+						std::string queueReason;
+						if (executeGameQueueUnit(queuedMessage, queueReason))
+						{
+							return true;
+						}
+						outReason = queueReason;
+						if (queueReason == "no_money")
+						{
+							break;
+						}
+					}
+					return false;
+				};
+
+				if (shouldPauseCombatProduction)
+				{
+					reason = openingInfrastructureReady ? "reserve_cash_recovery" : "opening_not_ready";
+				}
+				else if (isBalancedSprawl && combatCount >= armyCap)
+				{
+					reason = "army_cap_reached";
+				}
+				else if (counts.barracks > 0 && money >= 300u)
 				{
 					if (profile == "aggressive" || counts.rpg < counts.soldiers)
 					{
 						chosenCommand = "Game.QueueRpgTroopersAllBarracks";
-						issued = tryCommand("auto_prod", "Game.QueueRpgTroopersAllBarracks", nlohmann::json::object({ {"count", 1} }), reason);
+						if (isBalancedSprawl)
+						{
+							Object* referenceBarracks = nullptr;
+							for (Object* obj = TheGameLogic != nullptr ? TheGameLogic->getFirstObject() : nullptr; obj != nullptr; obj = obj->getNextObject())
+							{
+								if (obj->isEffectivelyDead() || obj->getControllingPlayer() != player || !obj->isKindOf(KINDOF_STRUCTURE))
+								{
+									continue;
+								}
+								const ThingTemplate* tt = obj->getTemplate();
+								const std::string name = tt != nullptr ? tt->getName().str() : "";
+								if (containsIgnoreCase(name, "barracks"))
+								{
+									referenceBarracks = obj;
+									break;
+								}
+							}
+							issued = queueAtPreferredZoneProducer(true, inferRpgTemplateForProducer(referenceBarracks), "auto_prod_zone_rpg", reason);
+						}
+						if (!issued)
+						{
+							issued = tryCommand("auto_prod", "Game.QueueRpgTroopersAllBarracks", nlohmann::json::object({ {"count", 1} }), reason);
+						}
 					}
 					else
 					{
 						chosenCommand = "Game.QueueSoldiersAllBarracks";
-						issued = tryCommand("auto_prod", "Game.QueueSoldiersAllBarracks", nlohmann::json::object({ {"count", 1} }), reason);
+						if (isBalancedSprawl)
+						{
+							Object* referenceBarracks = nullptr;
+							for (Object* obj = TheGameLogic != nullptr ? TheGameLogic->getFirstObject() : nullptr; obj != nullptr; obj = obj->getNextObject())
+							{
+								if (obj->isEffectivelyDead() || obj->getControllingPlayer() != player || !obj->isKindOf(KINDOF_STRUCTURE))
+								{
+									continue;
+								}
+								const ThingTemplate* tt = obj->getTemplate();
+								const std::string name = tt != nullptr ? tt->getName().str() : "";
+								if (containsIgnoreCase(name, "barracks"))
+								{
+									referenceBarracks = obj;
+									break;
+								}
+							}
+							issued = queueAtPreferredZoneProducer(true, inferSoldierTemplateForPlayer(player, referenceBarracks), "auto_prod_zone_soldier", reason);
+						}
+						if (!issued)
+						{
+							issued = tryCommand("auto_prod", "Game.QueueSoldiersAllBarracks", nlohmann::json::object({ {"count", 1} }), reason);
+						}
 					}
 				}
-				if (!issued && counts.armsDealers > 0 && money >= 700u)
+				else if (!issued && counts.armsDealers > 0 && money >= 700u)
 				{
-					if ((profile == "tech" || profile == "sprawl")
+					if ((profile == "tech" || profile == "sprawl" || isBalancedSprawl)
 						&& counts.palaces > 0
 						&& counts.scudLaunchers < std::max<Int>(1, (counts.quads + counts.scorpions) / 10)
 						&& money >= 1200u)
@@ -1243,12 +1725,56 @@ namespace
 					if (!issued && (profile == "aggressive" || counts.quads <= counts.scorpions))
 					{
 						chosenCommand = "Game.QueueQuadsAllWarFactories";
-						issued = tryCommand("auto_prod", "Game.QueueQuadsAllWarFactories", nlohmann::json::object({ {"count", 1} }), reason);
+						if (isBalancedSprawl)
+						{
+							Object* referenceFactory = nullptr;
+							for (Object* obj = TheGameLogic != nullptr ? TheGameLogic->getFirstObject() : nullptr; obj != nullptr; obj = obj->getNextObject())
+							{
+								if (obj->isEffectivelyDead() || obj->getControllingPlayer() != player || !obj->isKindOf(KINDOF_STRUCTURE))
+								{
+									continue;
+								}
+								const ThingTemplate* tt = obj->getTemplate();
+								const std::string name = tt != nullptr ? tt->getName().str() : "";
+								if (containsIgnoreCase(name, "warfactory") || containsIgnoreCase(name, "armsdealer"))
+								{
+									referenceFactory = obj;
+									break;
+								}
+							}
+							issued = queueAtPreferredZoneProducer(false, inferQuadTemplateForProducer(referenceFactory), "auto_prod_zone_quad", reason);
+						}
+						if (!issued)
+						{
+							issued = tryCommand("auto_prod", "Game.QueueQuadsAllWarFactories", nlohmann::json::object({ {"count", 1} }), reason);
+						}
 					}
 					else if (!issued)
 					{
 						chosenCommand = "Game.QueueScorpionsAllWarFactories";
-						issued = tryCommand("auto_prod", "Game.QueueScorpionsAllWarFactories", nlohmann::json::object({ {"count", 1} }), reason);
+						if (isBalancedSprawl)
+						{
+							Object* referenceFactory = nullptr;
+							for (Object* obj = TheGameLogic != nullptr ? TheGameLogic->getFirstObject() : nullptr; obj != nullptr; obj = obj->getNextObject())
+							{
+								if (obj->isEffectivelyDead() || obj->getControllingPlayer() != player || !obj->isKindOf(KINDOF_STRUCTURE))
+								{
+									continue;
+								}
+								const ThingTemplate* tt = obj->getTemplate();
+								const std::string name = tt != nullptr ? tt->getName().str() : "";
+								if (containsIgnoreCase(name, "warfactory") || containsIgnoreCase(name, "armsdealer"))
+								{
+									referenceFactory = obj;
+									break;
+								}
+							}
+							issued = queueAtPreferredZoneProducer(false, inferScorpionTemplateForProducer(referenceFactory), "auto_prod_zone_scorpion", reason);
+						}
+						if (!issued)
+						{
+							issued = tryCommand("auto_prod", "Game.QueueScorpionsAllWarFactories", nlohmann::json::object({ {"count", 1} }), reason);
+						}
 					}
 				}
 				m_autonomyState.lastDecisionCategory = "production";
@@ -1273,24 +1799,35 @@ namespace
 			if (static_cast<LONG>(m_autonomyState.nextTechTick - now) <= 0)
 			{
 				const std::string profile = normalizeAsciiLower(m_autonomyState.profile);
-				if (profile == "sprawl" || profile == "tech")
+				if (profile == "sprawl" || profile == "sprawl_balanced" || profile == "tech")
 				{
 					bool issued = false;
 					std::string reason;
+					const bool hasScienceEconomy = totalSupplyStashes >= 2;
+					const bool hasScienceAdvanced = totalPalaces > 0;
 
 					if (money >= 1000u)
 					{
 						for (int i = 0; i < static_cast<int>(sizeof(kAutonomySciencePlan) / sizeof(kAutonomySciencePlan[0])); ++i)
 						{
+							const std::string scienceName = kAutonomySciencePlan[i];
+							if (scienceName == "SCIENCE_ScudLauncher" && !hasScienceAdvanced)
+							{
+								continue;
+							}
+							if (scienceName.find("SCIENCE_CashBounty") == 0 && !hasScienceEconomy)
+							{
+								continue;
+							}
 							nlohmann::json args = nlohmann::json::object({
-								{"science_name", std::string(kAutonomySciencePlan[i])}
+								{"science_name", scienceName}
 							});
 							if (tryCommand("auto_tech", "Game.PurchaseScience", args, reason))
 							{
 								issued = true;
 								m_autonomyState.lastDecisionCategory = "tech";
 								m_autonomyState.lastDecisionCommand = "Game.PurchaseScience";
-								m_autonomyState.lastDecisionReason = std::string("ok:") + kAutonomySciencePlan[i];
+								m_autonomyState.lastDecisionReason = std::string("ok:") + scienceName;
 								break;
 							}
 						}
@@ -1300,8 +1837,21 @@ namespace
 					{
 						for (int i = 0; i < static_cast<int>(sizeof(kAutonomyUpgradePlan) / sizeof(kAutonomyUpgradePlan[0])); ++i)
 						{
+							const std::string producerKind = kAutonomyUpgradePlan[i].producerKind;
+							if (producerKind == "black_market" && totalBlackMarkets < 1)
+							{
+								continue;
+							}
+							if (producerKind == "palace" && totalPalaces < 1)
+							{
+								continue;
+							}
+							if (producerKind == "any" && totalBarracks < 1 && totalArmsDealers < 1 && totalPalaces < 1)
+							{
+								continue;
+							}
 							nlohmann::json args = nlohmann::json::object({
-								{"producer_kind", std::string(kAutonomyUpgradePlan[i].producerKind)},
+								{"producer_kind", producerKind},
 								{"upgrade_name", std::string(kAutonomyUpgradePlan[i].upgradeName)}
 							});
 							if (tryCommand("auto_tech", "Game.QueueUpgrade", args, reason))
@@ -1319,10 +1869,10 @@ namespace
 					{
 						m_autonomyState.lastDecisionCategory = "tech";
 						m_autonomyState.lastDecisionCommand = "none";
-						m_autonomyState.lastDecisionReason = reason;
+						m_autonomyState.lastDecisionReason = reason.empty() ? "tech_prereq_missing" : reason;
 					}
 
-					m_autonomyState.nextTechTick = now + (issued ? 6000u : 4000u);
+					m_autonomyState.nextTechTick = now + (issued ? 6000u : 8000u);
 				}
 				else
 				{
@@ -1334,7 +1884,7 @@ namespace
 			{
 				const std::string profile = normalizeAsciiLower(m_autonomyState.profile);
 				const Int combatCount = counts.soldiers + counts.rpg + counts.quads + counts.scorpions;
-				const DWORD cadenceMs = (profile == "aggressive") ? 5000u : ((profile == "sprawl" || profile == "defensive") ? 7000u : 6000u);
+				const DWORD cadenceMs = (profile == "aggressive") ? 5000u : (((profile == "sprawl" || profile == "sprawl_balanced" || profile == "defensive")) ? 7000u : 6000u);
 				if (combatCount > 0)
 				{
 					std::string reason;
@@ -1390,7 +1940,8 @@ namespace
 					&& profile != "defensive"
 					&& profile != "tech"
 					&& profile != "builtin_passthrough"
-					&& profile != "sprawl")
+					&& profile != "sprawl"
+					&& profile != "sprawl_balanced")
 				{
 					reason = "invalid_profile";
 					return false;

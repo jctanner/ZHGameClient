@@ -452,7 +452,7 @@ Supported `cmd` values (v1):
 
 `Autonomy.Configure` args:
 
-1. `profile` (optional string: `standard|aggressive|economic|defensive|tech|sprawl|builtin_passthrough`)
+1. `profile` (optional string: `sprawl_balanced|standard|aggressive|economic|defensive|tech|sprawl|builtin_passthrough`)
 2. `player_index` (optional int; defaults to local player)
 3. `target_player_index` (optional int)
 4. `economy_bias` (optional number `0..1`)
@@ -462,6 +462,13 @@ Supported `cmd` values (v1):
 8. `capture_tech` (optional bool)
 9. `allow_superweapons` (optional bool)
 10. `sprawl_multiplier` (optional number, default `1.0`, adapter-clamped; scales `sprawl` profile expansion caps)
+
+`sprawl_balanced` notes:
+
+1. Intended for normal `$50K` starts rather than debug-max cash.
+2. Applies lower structure caps than `sprawl`, favors earlier market growth, and preserves a larger cash reserve before extra perimeter production.
+3. Sustains combat production up to a soft army cap of about `100` combat units and then replaces losses instead of expanding indefinitely.
+4. Prefers production from the currently selected active zone/perimeter producer when available, then falls back to global producer queueing.
 
 `Autonomy.Status`:
 
