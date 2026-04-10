@@ -2,6 +2,7 @@
 		{
 			AIControlAdapterState* self;
 			std::vector<Object*> availableIdleDozers;
+			std::vector<Object*> availableFallbackDozers;
 			Object* firstDozer;
 		};
 
@@ -133,6 +134,31 @@
 			return true;
 		}
 
+		bool isWorkerFallbackAvailableForNewBuild(Object* worker, bool checkReservation = true)
+		{
+			if (worker == nullptr || worker->isEffectivelyDead())
+			{
+				return false;
+			}
+			if (!worker->isKindOf(KINDOF_DOZER))
+			{
+				return false;
+			}
+			if (worker->testStatus(OBJECT_STATUS_IS_USING_ABILITY))
+			{
+				return false;
+			}
+			if (isWorkerAssignedToActiveConstruction(worker))
+			{
+				return false;
+			}
+			if (checkReservation && isWorkerTemporarilyReserved(worker))
+			{
+				return false;
+			}
+			return true;
+		}
+
 		static void findWorkerCallback(Object* obj, void* userData)
 		{
 			if (obj == nullptr || userData == nullptr)
@@ -156,6 +182,11 @@
 			if (ctx->self != nullptr && ctx->self->isWorkerAvailableForNewBuild(obj))
 			{
 				ctx->availableIdleDozers.push_back(obj);
+				return;
+			}
+			if (ctx->self != nullptr && ctx->self->isWorkerFallbackAvailableForNewBuild(obj))
+			{
+				ctx->availableFallbackDozers.push_back(obj);
 			}
 		}
 
@@ -213,7 +244,8 @@
 						// Explicit worker selections honor temporary reservation by default.
 						// Internal multi-step flows can set allow_reserved_worker=true when they
 						// intentionally pass the same worker id across a chained request.
-						if (!isWorkerAvailableForNewBuild(worker, !allowReservedWorker))
+						if (!isWorkerAvailableForNewBuild(worker, !allowReservedWorker)
+							&& !isWorkerFallbackAvailableForNewBuild(worker, !allowReservedWorker))
 						{
 							reason = "worker_not_idle";
 							return nullptr;
@@ -223,30 +255,35 @@
 				}
 			}
 
-			WorkerSearchContext ctx = { this, std::vector<Object*>(), nullptr };
+			WorkerSearchContext ctx = { this, std::vector<Object*>(), std::vector<Object*>(), nullptr };
 			player->iterateObjects(findWorkerCallback, &ctx);
 			if (requireIdle)
 			{
-				if (ctx.availableIdleDozers.empty())
+				std::vector<Object*>* candidates = &ctx.availableIdleDozers;
+				if (candidates->empty() && !ctx.availableFallbackDozers.empty())
+				{
+					candidates = &ctx.availableFallbackDozers;
+				}
+				if (candidates->empty())
 				{
 					reason = "idle_worker_not_found";
 					return nullptr;
 				}
 
-				Object* selected = ctx.availableIdleDozers.front();
+				Object* selected = candidates->front();
 				const Int playerIndex = player->getPlayerIndex();
 				const auto lastIt = m_lastSelectedWorkerByPlayer.find(playerIndex);
-				if (lastIt != m_lastSelectedWorkerByPlayer.end() && ctx.availableIdleDozers.size() > 1u)
+				if (lastIt != m_lastSelectedWorkerByPlayer.end() && candidates->size() > 1u)
 				{
 					const ObjectID lastId = lastIt->second;
-					for (std::size_t i = 0; i < ctx.availableIdleDozers.size(); ++i)
+					for (std::size_t i = 0; i < candidates->size(); ++i)
 					{
-						if (ctx.availableIdleDozers[i] == nullptr || ctx.availableIdleDozers[i]->getID() != lastId)
+						if ((*candidates)[i] == nullptr || (*candidates)[i]->getID() != lastId)
 						{
 							continue;
 						}
-						const std::size_t nextIndex = (i + 1u) % ctx.availableIdleDozers.size();
-						selected = ctx.availableIdleDozers[nextIndex];
+						const std::size_t nextIndex = (i + 1u) % candidates->size();
+						selected = (*candidates)[nextIndex];
 						break;
 					}
 				}

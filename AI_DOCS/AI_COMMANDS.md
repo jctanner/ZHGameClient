@@ -31,6 +31,12 @@ Catalog candidate adapter commands based on existing in-engine command surfaces 
 23. `Game.BuildBuildingMix`
 24. `Game.ScudStormAtPosition`
 25. `Game.ScudStormAtPlayer`
+26. `Autonomy.SetMode`
+27. `Autonomy.Configure`
+28. `Autonomy.Status`
+29. `Autonomy.Pause`
+30. `Autonomy.Resume`
+31. `Autonomy.Reset`
 
 ## Implemented Query Primitives (Orchestration-Critical)
 
