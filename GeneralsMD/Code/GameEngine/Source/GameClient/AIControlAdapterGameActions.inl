@@ -1161,7 +1161,7 @@
 			}
 
 			const Real placeAngle = buildingTemplate->getPlacementViewAngle();
-			const Real baseRadius = supplySource->getGeometryInfo().getBoundingCircleRadius() + 12.0f;
+			const Real baseRadius = supplySource->getGeometryInfo().getBoundingCircleRadius() + 6.0f;
 			const UnsignedInt legalOpts =
 				BuildAssistant::TERRAIN_RESTRICTIONS |
 				BuildAssistant::CLEAR_PATH |
@@ -1201,11 +1201,11 @@
 			Coord3D best = *supplyPos;
 			best.z = 0.0f;
 
-			static const Real ringLimits[] = { 90.0f, 150.0f, 220.0f, 320.0f };
+			static const Real ringLimits[] = { 60.0f, 110.0f, 170.0f, 250.0f };
 			for (Int pass = 0; pass < static_cast<Int>(sizeof(ringLimits) / sizeof(ringLimits[0])) && !found; ++pass)
 			{
 				const Real maxRing = baseRadius + ringLimits[pass];
-				const bool preferReferenceSideOnly = hasReferenceDir && pass < 2;
+				const bool preferReferenceSideOnly = hasReferenceDir && pass < 3;
 				for (Real ring = baseRadius; ring <= maxRing; ring += 12.0f)
 				{
 					for (Int i = 0; i < 72; ++i)
@@ -1245,12 +1245,20 @@
 								sidePenalty = 1.0f - sideAlignment;
 							}
 						}
-						if (preferReferenceSideOnly && sideAlignment < 0.35f)
+						if (preferReferenceSideOnly && sideAlignment < 0.65f)
 						{
 							continue;
 						}
 
 						const Real distSq = workerPos != nullptr ? distanceSq2D(&candidate, workerPos) : 0.0f;
+						if (workerPos != nullptr)
+						{
+							const Real workerDist = std::sqrt(std::max<Real>(0.0f, distSq));
+							if (pass < 2 && workerDist > (ring * 3.0f))
+							{
+								continue;
+							}
+						}
 						if (!found ||
 							pass < bestPass ||
 							(pass == bestPass && ring < bestRing) ||
@@ -1949,6 +1957,16 @@
 				target != nullptr ? target->x : 0.0f,
 				target != nullptr ? target->y : 0.0f,
 				angle);
+			const bool isAutonomyRequest =
+				requestId.rfind("auto_", 0) == 0
+				|| requestId.rfind("auto_macro_", 0) == 0
+				|| requestId.rfind("auto_prod_", 0) == 0
+				|| requestId.rfind("auto_tech_", 0) == 0;
+			if (isAutonomyRequest && kind != nullptr && phase != nullptr && target != nullptr)
+			{
+				const std::string label = std::string("build_") + kind + "_" + phase;
+				recordAutonomyTelemetryEvent("build", label, source != nullptr ? source : "", target);
+			}
 		}
 
 		static bool canIssuePlayerScopedMessage(Player* player, std::string& reason)

@@ -198,7 +198,7 @@
 				reason = "no_valid_objects";
 				return false;
 			}
-			return executeScopedSelectionCommand(player, selectedIds, reason, [&]() -> bool
+			const bool ok = executeScopedSelectionCommand(player, selectedIds, reason, [&]() -> bool
 			{
 				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_ATTACKMOVETO);
 				if (msg == nullptr)
@@ -209,6 +209,11 @@
 				msg->appendLocationArgument(target);
 				return true;
 			});
+			if (ok)
+			{
+				recordAutonomyTelemetryEvent("attack", "Game.AttackMove.RaidSmart", "ok", &target);
+			}
+			return ok;
 		}
 
 		bool executeGameCaptureBuilding(const nlohmann::json& message, std::string& reason)

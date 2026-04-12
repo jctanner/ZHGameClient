@@ -199,6 +199,10 @@
 					location.x,
 					location.y,
 					angle);
+				if (requestId.rfind("auto_", 0) == 0)
+				{
+					recordAutonomyTelemetryEvent("build", "build_supply_stash_construct", "supply_zone", &location);
+				}
 				return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
 			}
 
@@ -245,6 +249,10 @@
 				target.x,
 				target.y,
 				buildingTemplateName.c_str());
+			if (requestId.rfind("auto_", 0) == 0)
+			{
+				recordAutonomyTelemetryEvent("build", "build_supply_stash_move", "supply_zone", &target);
+			}
 			return moveWorkerToPosition(worker, &target, reason);
 		}
 

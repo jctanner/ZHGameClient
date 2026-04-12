@@ -1,6 +1,7 @@
 #include "PreRTS.h"
 
 #include "GameClient/AIControlAdapter.h"
+#include "GameClient/AIControlAdapterPolicy.h"
 
 #include "Common/NameKeyGenerator.h"
 #include "Common/ActionManager.h"
@@ -229,6 +230,8 @@ namespace
 		std::string lastDecisionCategory;
 		std::string lastDecisionCommand;
 		std::string lastDecisionReason;
+		nlohmann::json telemetryZones;
+		nlohmann::json telemetryEvents;
 	};
 
 	class AIControlAdapterState
@@ -290,6 +293,7 @@ namespace
 			char buffer[32];
 			sprintf_s(buffer, "%08X%08X", static_cast<unsigned int>(::GetCurrentProcessId()), static_cast<unsigned int>(::GetTickCount()));
 			m_sessionId = buffer;
+			resetAdapterLogFile(true);
 			adapterLog("adapter_start pid=%lu session=%s", static_cast<unsigned long>(::GetCurrentProcessId()), m_sessionId.c_str());
 		}
 
@@ -455,6 +459,8 @@ namespace
 			m_autonomyState.lastDecisionCategory.clear();
 			m_autonomyState.lastDecisionCommand.clear();
 			m_autonomyState.lastDecisionReason.clear();
+			m_autonomyState.telemetryZones = nlohmann::json::array();
+			m_autonomyState.telemetryEvents = nlohmann::json::array();
 		}
 
 		bool isAutonomyModeActive() const
@@ -482,6 +488,40 @@ namespace
 			clearAttackAutomationRule();
 			clearCaptureAutomationRule();
 			clearRadarVanAutomationRule();
+		}
+
+		void recordAutonomyTelemetryEvent(
+			const char* kind,
+			const std::string& label,
+			const std::string& reason,
+			const Coord3D* position = nullptr)
+		{
+			if (kind == nullptr || kind[0] == '\0')
+			{
+				return;
+			}
+
+			nlohmann::json event = nlohmann::json::object({
+				{"kind", kind},
+				{"label", label},
+				{"reason", reason},
+				{"tick", static_cast<UnsignedInt>(::GetTickCount())}
+			});
+			if (position != nullptr)
+			{
+				event["x"] = position->x;
+				event["y"] = position->y;
+			}
+
+			if (!m_autonomyState.telemetryEvents.is_array())
+			{
+				m_autonomyState.telemetryEvents = nlohmann::json::array();
+			}
+			m_autonomyState.telemetryEvents.push_back(event);
+			while (m_autonomyState.telemetryEvents.size() > 12u)
+			{
+				m_autonomyState.telemetryEvents.erase(m_autonomyState.telemetryEvents.begin());
+			}
 		}
 
 		void applyAutonomyRules()
@@ -630,6 +670,58 @@ namespace
 				m_autonomyState.hasExplicitTargetPlayerIndex ? m_autonomyState.targetPlayerIndex : -1);
 		}
 
+		void kickAutonomyEvaluation()
+		{
+			if (!isAutonomyModeActive())
+			{
+				return;
+			}
+
+			m_autonomyState.nextMacroTick = 0u;
+			m_autonomyState.nextProductionTick = 0u;
+			m_autonomyState.nextTechTick = 0u;
+			m_autonomyState.nextGuardTick = 0u;
+			Player* player = resolveAutonomyPlayer();
+			const DWORD now = ::GetTickCount();
+			Int playerIndex = -1;
+			UnsignedInt money = 0u;
+			Int ownedUnits = -1;
+			Int ownedBuildings = -1;
+			Int idleWorkers = -1;
+			if (player != nullptr)
+			{
+				playerIndex = player->getPlayerIndex();
+				const Money* wallet = player->getMoney();
+				if (wallet != nullptr)
+				{
+					money = wallet->countMoney();
+				}
+				refreshOwnedObjectCache(player);
+				ownedUnits = m_ownedCacheUnitsTotal;
+				ownedBuildings = m_ownedCacheBuildingsTotal;
+				idleWorkers = m_ownedCacheIdleWorkersTotal;
+			}
+			adapterLog(
+				"autonomy_kickoff mode=%s profile=%s player=%d now=%lu timers[macro=%lu prod=%lu tech=%lu guard=%lu] ready[macro=%d prod=%d tech=%d guard=%d] assets[units=%d buildings=%d idle_workers=%d money=%lu]",
+				m_autonomyState.mode.c_str(),
+				m_autonomyState.profile.c_str(),
+				playerIndex,
+				static_cast<unsigned long>(now),
+				static_cast<unsigned long>(m_autonomyState.nextMacroTick),
+				static_cast<unsigned long>(m_autonomyState.nextProductionTick),
+				static_cast<unsigned long>(m_autonomyState.nextTechTick),
+				static_cast<unsigned long>(m_autonomyState.nextGuardTick),
+				AIControlAdapterHasTickElapsed(m_autonomyState.nextMacroTick, now) ? 1 : 0,
+				AIControlAdapterHasTickElapsed(m_autonomyState.nextProductionTick, now) ? 1 : 0,
+				AIControlAdapterHasTickElapsed(m_autonomyState.nextTechTick, now) ? 1 : 0,
+				AIControlAdapterHasTickElapsed(m_autonomyState.nextGuardTick, now) ? 1 : 0,
+				ownedUnits,
+				ownedBuildings,
+				idleWorkers,
+				static_cast<unsigned long>(money));
+			evaluateAutomationRules();
+		}
+
 		void evaluateAutonomyMacro()
 		{
 			if (!isAutonomyModeActive())
@@ -640,10 +732,19 @@ namespace
 			Player* player = resolveAutonomyPlayer();
 			if (player == nullptr)
 			{
+				adapterLog("autonomy_macro_blocked reason=player_not_found");
 				return;
 			}
 
 			const DWORD now = ::GetTickCount();
+			adapterLog(
+				"autonomy_macro_enter player=%d now=%lu timers[macro=%lu prod=%lu tech=%lu guard=%lu]",
+				player->getPlayerIndex(),
+				static_cast<unsigned long>(now),
+				static_cast<unsigned long>(m_autonomyState.nextMacroTick),
+				static_cast<unsigned long>(m_autonomyState.nextProductionTick),
+				static_cast<unsigned long>(m_autonomyState.nextTechTick),
+				static_cast<unsigned long>(m_autonomyState.nextGuardTick));
 			UnsignedInt money = 0u;
 			const Money* wallet = player->getMoney();
 			if (wallet != nullptr)
@@ -768,6 +869,13 @@ namespace
 					++counts->scudLaunchers;
 				}
 			}, &counts);
+			adapterLog(
+				"autonomy_macro_phase phase=counts player=%d supply=%d barracks=%d arms=%d workers=%d",
+				player->getPlayerIndex(),
+				counts.supplyStashes + counts.supplyStashesInProgress,
+				counts.barracks + counts.barracksInProgress,
+				counts.armsDealers + counts.armsDealersInProgress,
+				counts.workers);
 
 			auto pushZone = [&](Object* anchor, bool isMainBase) -> void
 			{
@@ -824,12 +932,19 @@ namespace
 
 			AutonomyZone activeZone = {};
 			bool hasActiveZone = false;
+			Int activeZoneIndex = -1;
 			if (!zones.empty())
 			{
 				m_autonomyState.nextZoneIndex = zones.empty() ? 0u : (m_autonomyState.nextZoneIndex % zones.size());
 				activeZone = zones[m_autonomyState.nextZoneIndex];
 				hasActiveZone = true;
+				activeZoneIndex = static_cast<Int>(m_autonomyState.nextZoneIndex);
 			}
+			adapterLog(
+				"autonomy_macro_phase phase=zones player=%d zones=%d has_active=%d",
+				player->getPlayerIndex(),
+				static_cast<int>(zones.size()),
+				hasActiveZone ? 1 : 0);
 			m_autonomyState.hasLastZone = hasActiveZone;
 			m_autonomyState.lastZoneAnchorId = hasActiveZone ? static_cast<UnsignedInt>(activeZone.anchorId) : 0u;
 			m_autonomyState.lastZoneIsMainBase = hasActiveZone && activeZone.isMainBase;
@@ -852,8 +967,9 @@ namespace
 				Int tunnelsInProgress;
 				Int stingers;
 				Int stingersInProgress;
-			} activeZoneCounts = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-			if (hasActiveZone)
+			};
+			std::vector<AutonomyZoneCounts> zoneCounts(zones.size(), AutonomyZoneCounts{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+			if (!zones.empty())
 			{
 				const Real zoneRadiusSq = std::max<Real>(160.0f, m_autonomyState.zoneRadius) * std::max<Real>(160.0f, m_autonomyState.zoneRadius);
 				for (Object* obj = TheGameLogic != nullptr ? TheGameLogic->getFirstObject() : nullptr; obj != nullptr; obj = obj->getNextObject())
@@ -862,57 +978,103 @@ namespace
 					{
 						continue;
 					}
-					const Real dx = obj->getPosition()->x - activeZone.center.x;
-					const Real dy = obj->getPosition()->y - activeZone.center.y;
-					if ((dx * dx) + (dy * dy) > zoneRadiusSq)
-					{
-						continue;
-					}
 					const ThingTemplate* tt = obj->getTemplate();
 					const std::string name = tt != nullptr ? tt->getName().str() : "";
 					const bool underConstruction = obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION);
 					const bool countAsInProgress = underConstruction && static_cast<Int>(obj->getBuilderID()) > 0;
-					auto incrementZoneStructureCount = [&](Int& completeCount, Int& inProgressCount) -> void
+					auto incrementZoneStructureCount = [&](AutonomyZoneCounts& counts, Int AutonomyZoneCounts::* completeField, Int AutonomyZoneCounts::* inProgressField) -> void
 					{
 						if (countAsInProgress)
 						{
-							++inProgressCount;
+							++(counts.*inProgressField);
 						}
 						else
 						{
-							++completeCount;
+							++(counts.*completeField);
 						}
 					};
-					if (containsIgnoreCase(name, "supplystash") || containsIgnoreCase(name, "supplycenter"))
+					for (std::size_t zoneIdx = 0; zoneIdx < zones.size(); ++zoneIdx)
 					{
-						incrementZoneStructureCount(activeZoneCounts.supplyStashes, activeZoneCounts.supplyStashesInProgress);
-					}
-					else if (containsIgnoreCase(name, "barracks"))
-					{
-						incrementZoneStructureCount(activeZoneCounts.barracks, activeZoneCounts.barracksInProgress);
-					}
-					else if (containsIgnoreCase(name, "armsdealer"))
-					{
-						incrementZoneStructureCount(activeZoneCounts.armsDealers, activeZoneCounts.armsDealersInProgress);
-					}
-					else if (containsIgnoreCase(name, "palace"))
-					{
-						incrementZoneStructureCount(activeZoneCounts.palaces, activeZoneCounts.palacesInProgress);
-					}
-					else if (containsIgnoreCase(name, "black") && containsIgnoreCase(name, "market"))
-					{
-						incrementZoneStructureCount(activeZoneCounts.blackMarkets, activeZoneCounts.blackMarketsInProgress);
-					}
-					else if (containsIgnoreCase(name, "tunnelnetwork"))
-					{
-						incrementZoneStructureCount(activeZoneCounts.tunnels, activeZoneCounts.tunnelsInProgress);
-					}
-					else if (containsIgnoreCase(name, "stingersite"))
-					{
-						incrementZoneStructureCount(activeZoneCounts.stingers, activeZoneCounts.stingersInProgress);
+						const Real dx = obj->getPosition()->x - zones[zoneIdx].center.x;
+						const Real dy = obj->getPosition()->y - zones[zoneIdx].center.y;
+						if ((dx * dx) + (dy * dy) > zoneRadiusSq)
+						{
+							continue;
+						}
+						if (containsIgnoreCase(name, "supplystash") || containsIgnoreCase(name, "supplycenter"))
+						{
+							incrementZoneStructureCount(zoneCounts[zoneIdx], &AutonomyZoneCounts::supplyStashes, &AutonomyZoneCounts::supplyStashesInProgress);
+						}
+						else if (containsIgnoreCase(name, "barracks"))
+						{
+							incrementZoneStructureCount(zoneCounts[zoneIdx], &AutonomyZoneCounts::barracks, &AutonomyZoneCounts::barracksInProgress);
+						}
+						else if (containsIgnoreCase(name, "armsdealer"))
+						{
+							incrementZoneStructureCount(zoneCounts[zoneIdx], &AutonomyZoneCounts::armsDealers, &AutonomyZoneCounts::armsDealersInProgress);
+						}
+						else if (containsIgnoreCase(name, "palace"))
+						{
+							incrementZoneStructureCount(zoneCounts[zoneIdx], &AutonomyZoneCounts::palaces, &AutonomyZoneCounts::palacesInProgress);
+						}
+						else if (containsIgnoreCase(name, "black") && containsIgnoreCase(name, "market"))
+						{
+							incrementZoneStructureCount(zoneCounts[zoneIdx], &AutonomyZoneCounts::blackMarkets, &AutonomyZoneCounts::blackMarketsInProgress);
+						}
+						else if (containsIgnoreCase(name, "tunnelnetwork"))
+						{
+							incrementZoneStructureCount(zoneCounts[zoneIdx], &AutonomyZoneCounts::tunnels, &AutonomyZoneCounts::tunnelsInProgress);
+						}
+						else if (containsIgnoreCase(name, "stingersite"))
+						{
+							incrementZoneStructureCount(zoneCounts[zoneIdx], &AutonomyZoneCounts::stingers, &AutonomyZoneCounts::stingersInProgress);
+						}
 					}
 				}
 			}
+			AutonomyZoneCounts activeZoneCounts = (activeZoneIndex >= 0 && activeZoneIndex < static_cast<Int>(zoneCounts.size()))
+				? zoneCounts[static_cast<std::size_t>(activeZoneIndex)]
+				: AutonomyZoneCounts{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+			m_autonomyState.telemetryZones = nlohmann::json::array();
+			for (std::size_t i = 0; i < zones.size(); ++i)
+			{
+				const Int zoneSupply = zoneCounts[i].supplyStashes + zoneCounts[i].supplyStashesInProgress;
+				const Int zoneBarracks = zoneCounts[i].barracks + zoneCounts[i].barracksInProgress;
+				const Int zoneArms = zoneCounts[i].armsDealers + zoneCounts[i].armsDealersInProgress;
+				const Int zonePalaces = zoneCounts[i].palaces + zoneCounts[i].palacesInProgress;
+				const Int zoneMarkets = zoneCounts[i].blackMarkets + zoneCounts[i].blackMarketsInProgress;
+				const Int zoneTunnels = zoneCounts[i].tunnels + zoneCounts[i].tunnelsInProgress;
+				const Int zoneStingers = zoneCounts[i].stingers + zoneCounts[i].stingersInProgress;
+				const bool isActiveZone = hasActiveZone && static_cast<Int>(i) == activeZoneIndex;
+				const bool zoneNeedsFollowup =
+					zoneSupply > 0
+					&& (zoneTunnels < 1 || zoneBarracks < 1 || zoneArms < 1 || zoneStingers < 1);
+				const bool zoneDeveloped =
+					zoneSupply > 0
+					&& (zoneBarracks + zoneArms + zoneTunnels + zoneStingers) >= 3;
+				m_autonomyState.telemetryZones.push_back(nlohmann::json::object({
+					{"anchor_id", static_cast<UnsignedInt>(zones[i].anchorId)},
+					{"is_main_base", zones[i].isMainBase},
+					{"active", isActiveZone},
+					{"center_x", zones[i].center.x},
+					{"center_y", zones[i].center.y},
+					{"supply_stashes", zoneSupply},
+					{"barracks", zoneBarracks},
+					{"arms_dealers", zoneArms},
+					{"palaces", zonePalaces},
+					{"black_markets", zoneMarkets},
+					{"tunnels", zoneTunnels},
+					{"stingers", zoneStingers},
+					{"developed", zoneDeveloped},
+					{"needs_followup", zoneNeedsFollowup}
+				}));
+			}
+			adapterLog(
+				"autonomy_macro_phase phase=zone_counts player=%d zone_supply=%d zone_barracks=%d zone_arms=%d",
+				player->getPlayerIndex(),
+				activeZoneCounts.supplyStashes + activeZoneCounts.supplyStashesInProgress,
+				activeZoneCounts.barracks + activeZoneCounts.barracksInProgress,
+				activeZoneCounts.armsDealers + activeZoneCounts.armsDealersInProgress);
 
 			const Int totalSupplyStashes = counts.supplyStashes + counts.supplyStashesInProgress;
 			const Int totalBarracks = counts.barracks + counts.barracksInProgress;
@@ -927,6 +1089,14 @@ namespace
 			const Int totalZonePalaces = activeZoneCounts.palaces + activeZoneCounts.palacesInProgress;
 			const Int totalZoneTunnels = activeZoneCounts.tunnels + activeZoneCounts.tunnelsInProgress;
 			const Int totalZoneStingers = activeZoneCounts.stingers + activeZoneCounts.stingersInProgress;
+			adapterLog(
+				"autonomy_macro_phase phase=totals player=%d total_supply=%d total_barracks=%d total_arms=%d total_palaces=%d total_markets=%d",
+				player->getPlayerIndex(),
+				totalSupplyStashes,
+				totalBarracks,
+				totalArmsDealers,
+				totalPalaces,
+				totalBlackMarkets);
 
 			auto tryCommand = [&](const char* requestIdPrefix, const char* cmd, const nlohmann::json& args, std::string& outReason) -> bool
 			{
@@ -1072,11 +1242,7 @@ namespace
 
 			auto isSettlingSensitiveBuild = [&](const char* cmd) -> bool
 			{
-				const std::string cmdString = cmd != nullptr ? cmd : "";
-				return cmdString == "Game.BuildSupplyStashSmart"
-					|| cmdString == "Game.BuildBarracksSmart"
-					|| cmdString == "Game.BuildArmsDealerSmart"
-					|| cmdString == "Game.BuildPalaceSmart";
+				return AIControlAdapterIsSettlingSensitiveBuild(cmd);
 			};
 
 			auto tryMacroBuildWithFallback = [&](const char* cmd, bool preferZone, std::string& outReason) -> bool
@@ -1145,7 +1311,7 @@ namespace
 					return false;
 				}
 				DWORD* nextAllowedTick = getBuildCooldownTick(cmd);
-				return nextAllowedTick == nullptr || static_cast<LONG>(*nextAllowedTick - now) <= 0;
+				return nextAllowedTick == nullptr || AIControlAdapterHasTickElapsed(*nextAllowedTick, now);
 			};
 
 			auto recordBuildAttempt = [&](const char* cmd, bool success, const std::string& outReason)
@@ -1155,45 +1321,11 @@ namespace
 				{
 					return;
 				}
-
-				DWORD delayMs = success ? 9000u : 4000u;
-				const bool settlingSensitiveBuild = isSettlingSensitiveBuild(cmd);
-				if (outReason == "idle_worker_not_found")
-				{
-					delayMs = settlingSensitiveBuild ? 2500u : 1500u;
-				}
-				else if (outReason == "construct_site_not_created")
-				{
-					delayMs = settlingSensitiveBuild ? 7000u : 5000u;
-				}
-				else if (!success && settlingSensitiveBuild)
-				{
-					delayMs = std::max<DWORD>(delayMs, 5000u);
-				}
-				if (std::strcmp(cmd, "Game.BuildSupplyStashSmart") == 0)
-				{
-					delayMs = success ? 10000u : std::max<DWORD>(delayMs, 3500u);
-					if (outReason == "construct_site_not_created")
-					{
-						delayMs = 4500u;
-					}
-				}
-				else if (std::strcmp(cmd, "Game.BuildBarracksSmart") == 0)
-				{
-					delayMs = success ? 12000u : std::max<DWORD>(delayMs, 6000u);
-				}
-				else if (std::strcmp(cmd, "Game.BuildArmsDealerSmart") == 0)
-				{
-					delayMs = success ? 12000u : std::max<DWORD>(delayMs, 6000u);
-				}
-				if (std::strcmp(cmd, "Game.BuildPalaceSmart") == 0)
-				{
-					delayMs = success ? 15000u : std::max<DWORD>(delayMs, 8000u);
-				}
+				const DWORD delayMs = AIControlAdapterGetBuildRetryDelayMs(cmd, success, outReason.c_str());
 				*nextAllowedTick = now + delayMs;
 			};
 
-			if (static_cast<LONG>(m_autonomyState.nextMacroTick - now) <= 0)
+			if (AIControlAdapterHasTickElapsed(m_autonomyState.nextMacroTick, now))
 			{
 				std::string reason;
 				bool issued = false;
@@ -1211,9 +1343,6 @@ namespace
 				const UnsignedInt blackMarketCost = 2500u;
 				const bool openingInfrastructureReady = counts.supplyStashes >= 1 && counts.barracks >= 1 && counts.armsDealers >= 1;
 				const bool openingEconomyReady = counts.supplyStashes >= 2 || counts.blackMarkets >= 1;
-				const bool openingNeedsSupplyStash = counts.supplyStashes < 1;
-				const bool openingNeedsBarracks = !openingNeedsSupplyStash && counts.barracks < 1;
-				const bool openingNeedsArmsDealer = !openingNeedsSupplyStash && !openingNeedsBarracks && counts.armsDealers < 1;
 				const bool canScaleMilitaryProduction = !isBalancedSprawl || (openingInfrastructureReady && openingEconomyReady);
 				const Int effectiveBarracksCap = isBalancedSprawl ? (canScaleMilitaryProduction ? sprawlBarracksCap : 1) : sprawlBarracksCap;
 				const Int effectiveArmsCap = isBalancedSprawl ? (canScaleMilitaryProduction ? sprawlArmsCap : 1) : sprawlArmsCap;
@@ -1256,47 +1385,81 @@ namespace
 					isBalancedSprawl
 					&& money < reserveCash
 					&& totalSupplyStashes > 0;
+				const char* requiredOpeningBuild = AIControlAdapterGetRequiredOpeningBuild({
+					counts.supplyStashes,
+					counts.barracks,
+					counts.armsDealers
+				});
+				const bool canAttemptBlackMarketNow = AIControlAdapterCanAttemptBlackMarket({
+					totalPalaces > 0,
+					isBalancedSprawl,
+					money,
+					reserveCash,
+					counts.blackMarketsInProgress
+				});
+				const char* ecoRecoveryBuild = AIControlAdapterGetEcoRecoveryBuild({
+					isBalancedSprawl,
+					totalSupplyStashes,
+					totalPalaces,
+					totalBlackMarkets,
+					sprawlDesiredMarketCount,
+					shouldThrottleExtraStashGrowth,
+					canAttemptBlackMarketNow
+				});
 				const bool balancedZoneCanAddBarracks = !isBalancedSprawl || !hasActiveZone || totalZoneBarracks < 1;
 				const bool balancedZoneCanAddArmsDealer = !isBalancedSprawl || !hasActiveZone || totalZoneArmsDealers < 1;
 				const bool balancedZoneCanAddPalace = !isBalancedSprawl || !hasActiveZone || totalZonePalaces < 1;
 				std::string chosenCommand = "none";
-				if (openingNeedsSupplyStash)
+				if (requiredOpeningBuild != nullptr)
 				{
-					if (counts.supplyStashes < 1
-						&& counts.supplyStashesInProgress < 1
-						&& isBuildAttemptReady("Game.BuildSupplyStashSmart", counts.supplyStashesInProgress)
-						&& money >= 1200u)
+					chosenCommand = requiredOpeningBuild;
+					if (std::strcmp(requiredOpeningBuild, "Game.BuildSupplyStashSmart") == 0)
 					{
-						chosenCommand = "Game.BuildSupplyStashSmart";
-						issued = tryMacroBuildWithFallback("Game.BuildSupplyStashSmart", false, reason);
-						recordBuildAttempt("Game.BuildSupplyStashSmart", issued, reason);
+						if (counts.supplyStashesInProgress > 0)
+						{
+							reason = "opening_wait_supply_stash";
+						}
+						else if (isBuildAttemptReady(requiredOpeningBuild, counts.supplyStashesInProgress) && money >= 1200u)
+						{
+							issued = tryMacroBuildWithFallback(requiredOpeningBuild, false, reason);
+							recordBuildAttempt(requiredOpeningBuild, issued, reason);
+						}
+						else
+						{
+							reason = money < 1200u ? "opening_wait_money" : "opening_wait_supply_stash";
+						}
 					}
-				}
-				else if (openingNeedsBarracks)
-				{
-					if (counts.supplyStashes >= 1
-						&& counts.barracks < 1
-						&& counts.barracksInProgress < 1
-						&& isBuildAttemptReady("Game.BuildBarracksSmart", counts.barracksInProgress)
-						&& money >= 600u)
+					else if (std::strcmp(requiredOpeningBuild, "Game.BuildBarracksSmart") == 0)
 					{
-						chosenCommand = "Game.BuildBarracksSmart";
-						issued = tryMacroBuildWithFallback("Game.BuildBarracksSmart", false, reason);
-						recordBuildAttempt("Game.BuildBarracksSmart", issued, reason);
+						if (counts.barracksInProgress > 0)
+						{
+							reason = "opening_wait_barracks";
+						}
+						else if (isBuildAttemptReady(requiredOpeningBuild, counts.barracksInProgress) && money >= 600u)
+						{
+							issued = tryMacroBuildWithFallback(requiredOpeningBuild, false, reason);
+							recordBuildAttempt(requiredOpeningBuild, issued, reason);
+						}
+						else
+						{
+							reason = money < 600u ? "opening_wait_money" : "opening_wait_barracks";
+						}
 					}
-				}
-				else if (openingNeedsArmsDealer)
-				{
-					if (counts.supplyStashes >= 1
-						&& counts.barracks >= 1
-						&& counts.armsDealers < 1
-						&& counts.armsDealersInProgress < 1
-						&& isBuildAttemptReady("Game.BuildArmsDealerSmart", counts.armsDealersInProgress)
-						&& money >= 2500u)
+					else if (std::strcmp(requiredOpeningBuild, "Game.BuildArmsDealerSmart") == 0)
 					{
-						chosenCommand = "Game.BuildArmsDealerSmart";
-						issued = tryMacroBuildWithFallback("Game.BuildArmsDealerSmart", false, reason);
-						recordBuildAttempt("Game.BuildArmsDealerSmart", issued, reason);
+						if (counts.armsDealersInProgress > 0)
+						{
+							reason = "opening_wait_arms_dealer";
+						}
+						else if (isBuildAttemptReady(requiredOpeningBuild, counts.armsDealersInProgress) && money >= 2500u)
+						{
+							issued = tryMacroBuildWithFallback(requiredOpeningBuild, false, reason);
+							recordBuildAttempt(requiredOpeningBuild, issued, reason);
+						}
+						else
+						{
+							reason = money < 2500u ? "opening_wait_money" : "opening_wait_arms_dealer";
+						}
 					}
 				}
 				else if (totalSupplyStashes < 2 && (profile == "economic" || isSprawlStyle || m_autonomyState.expansionBias >= 0.70f))
@@ -1326,27 +1489,41 @@ namespace
 						recordBuildAttempt("Game.BuildPalaceSmart", issued, reason);
 					}
 				}
-				else if (shouldForceEcoRecovery
-					&& totalPalaces > 0
-					&& totalBlackMarkets < sprawlDesiredMarketCount
-					&& counts.blackMarketsInProgress < 1
-					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", counts.blackMarketsInProgress)
-					&& money >= blackMarketCost)
+				else if (shouldForceEcoRecovery && ecoRecoveryBuild != nullptr)
 				{
-					chosenCommand = "Game.BuildBlackMarketSmart";
-					issued = tryMacroBuildWithFallback("Game.BuildBlackMarketSmart", hasActiveZone, reason);
-					recordBuildAttempt("Game.BuildBlackMarketSmart", issued, reason);
-				}
-				else if (shouldForceEcoRecovery
-					&& !shouldThrottleExtraStashGrowth
-					&& totalSupplyStashes < sprawlSupplyCap
-					&& counts.supplyStashesInProgress < 1
-					&& isBuildAttemptReady("Game.BuildSupplyStashSmart", counts.supplyStashesInProgress)
-					&& money >= 1800u)
-				{
-					chosenCommand = "Game.BuildSupplyStashSmart";
-					issued = tryMacroBuildWithFallback("Game.BuildSupplyStashSmart", false, reason);
-					recordBuildAttempt("Game.BuildSupplyStashSmart", issued, reason);
+					chosenCommand = ecoRecoveryBuild;
+					if (std::strcmp(ecoRecoveryBuild, "Game.BuildBlackMarketSmart") == 0)
+					{
+						if (counts.blackMarketsInProgress > 0)
+						{
+							reason = "eco_recovery_wait_market";
+						}
+						else if (isBuildAttemptReady(ecoRecoveryBuild, counts.blackMarketsInProgress) && canAttemptBlackMarketNow)
+						{
+							issued = tryMacroBuildWithFallback(ecoRecoveryBuild, hasActiveZone, reason);
+							recordBuildAttempt(ecoRecoveryBuild, issued, reason);
+						}
+						else
+						{
+							reason = "eco_recovery_wait_market";
+						}
+					}
+					else if (std::strcmp(ecoRecoveryBuild, "Game.BuildSupplyStashSmart") == 0)
+					{
+						if (counts.supplyStashesInProgress > 0)
+						{
+							reason = "eco_recovery_wait_supply";
+						}
+						else if (isBuildAttemptReady(ecoRecoveryBuild, counts.supplyStashesInProgress) && money >= 1800u)
+						{
+							issued = tryMacroBuildWithFallback(ecoRecoveryBuild, false, reason);
+							recordBuildAttempt(ecoRecoveryBuild, issued, reason);
+						}
+						else
+						{
+							reason = money < 1800u ? "eco_recovery_wait_money" : "eco_recovery_wait_supply";
+						}
+					}
 				}
 				else if (isSprawlStyle
 					&& remoteZoneNeedsFollowup
@@ -1395,18 +1572,17 @@ namespace
 					recordBuildAttempt("Game.BuildStingerSite", issued, reason);
 				}
 				else if (isSprawlStyle
-					&& totalPalaces > 0
 					&& totalBlackMarkets < 1
-					&& money >= (isBalancedSprawl ? (reserveCash + blackMarketCost) : blackMarketCost)
 					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", counts.blackMarketsInProgress)
-					&& (!isBalancedSprawl || counts.blackMarketsInProgress < 1))
+					&& canAttemptBlackMarketNow)
 				{
 					chosenCommand = "Game.BuildBlackMarketSmart";
 					issued = tryMacroBuildWithFallback("Game.BuildBlackMarketSmart", false, reason);
 					recordBuildAttempt("Game.BuildBlackMarketSmart", issued, reason);
 				}
 				else if (shouldPrioritizeMarketGrowth
-					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", counts.blackMarketsInProgress))
+					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", counts.blackMarketsInProgress)
+					&& canAttemptBlackMarketNow)
 				{
 					chosenCommand = "Game.BuildBlackMarketSmart";
 					issued = tryMacroBuildWithFallback("Game.BuildBlackMarketSmart", false, reason);
@@ -1440,20 +1616,17 @@ namespace
 				}
 				else if (totalPalaces > 0
 					&& totalBlackMarkets < ((profile == "economic" || profile == "tech") ? 2 : 1)
-					&& money >= (isBalancedSprawl ? (reserveCash + blackMarketCost) : blackMarketCost)
 					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", counts.blackMarketsInProgress)
-					&& (!isBalancedSprawl || counts.blackMarketsInProgress < 1))
+					&& canAttemptBlackMarketNow)
 				{
 					chosenCommand = "Game.BuildBlackMarketSmart";
 					issued = tryMacroBuildWithFallback("Game.BuildBlackMarketSmart", false, reason);
 					recordBuildAttempt("Game.BuildBlackMarketSmart", issued, reason);
 				}
 				else if (isSprawlStyle
-					&& totalPalaces > 0
 					&& totalBlackMarkets < sprawlMarketCap
-					&& money >= (isBalancedSprawl ? (reserveCash + blackMarketCost) : blackMarketCost)
 					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", counts.blackMarketsInProgress)
-					&& (!isBalancedSprawl || counts.blackMarketsInProgress < 1))
+					&& canAttemptBlackMarketNow)
 				{
 					chosenCommand = "Game.BuildBlackMarketSmart";
 					issued = tryMacroBuildWithFallback("Game.BuildBlackMarketSmart", true, reason);
@@ -1497,6 +1670,14 @@ namespace
 				m_autonomyState.lastDecisionCategory = "macro";
 				m_autonomyState.lastDecisionCommand = chosenCommand;
 				m_autonomyState.lastDecisionReason = issued ? "ok" : reason;
+				if (!chosenCommand.empty())
+				{
+					recordAutonomyTelemetryEvent(
+						"macro",
+						chosenCommand,
+						issued ? "ok" : reason,
+						hasActiveZone ? &activeZone.center : nullptr);
+				}
 				adapterLog(
 					"autonomy_tick category=macro profile=%s money=%lu selected_zone=%lu zone_main=%d zone_center=(%.1f,%.1f) "
 					"global[supply=%d barracks=%d arms=%d palace=%d markets=%d tunnels=%d stingers=%d workers=%d radar=%d soldiers=%d rpg=%d quads=%d scorpions=%d scuds=%d] "
@@ -1538,7 +1719,7 @@ namespace
 				m_autonomyState.nextMacroTick = now + (issued ? 3000u : 2000u);
 			}
 
-			if (static_cast<LONG>(m_autonomyState.nextProductionTick - now) <= 0)
+			if (AIControlAdapterHasTickElapsed(m_autonomyState.nextProductionTick, now))
 			{
 				std::string reason;
 				bool issued = false;
@@ -1548,12 +1729,28 @@ namespace
 				const Int combatCount = counts.soldiers + counts.rpg + counts.quads + counts.scorpions + counts.scudLaunchers;
 				const UnsignedInt reserveCash = isBalancedSprawl ? 10000u : 0u;
 				const bool openingInfrastructureReady = totalSupplyStashes >= 1 && totalBarracks >= 1 && totalArmsDealers >= 1;
-				const bool shouldPauseCombatProduction =
-					isBalancedSprawl
-					&& (!openingInfrastructureReady
-						|| money < reserveCash
-						|| ((counts.blackMarketsInProgress > 0 || counts.supplyStashesInProgress > 0)
-							&& money < (reserveCash + 2000u)));
+				const bool openingEconomyReady = totalSupplyStashes >= 2 || totalBlackMarkets >= 1;
+				const bool wasRecoveringFromReserve =
+					(m_autonomyState.lastDecisionCategory == "production" && m_autonomyState.lastDecisionReason == "reserve_cash_recovery");
+				const bool shouldPauseCombatProduction = AIControlAdapterShouldPauseCombatProduction({
+					isBalancedSprawl,
+					openingInfrastructureReady,
+					openingEconomyReady,
+					wasRecoveringFromReserve,
+					money,
+					reserveCash,
+					counts.blackMarketsInProgress,
+					counts.supplyStashesInProgress
+				});
+				const bool wasArmyCapReached =
+					(m_autonomyState.lastDecisionCategory == "production" && m_autonomyState.lastDecisionReason == "army_cap_reached");
+				const bool shouldHoldArmyCap = AIControlAdapterShouldHoldArmyCap({
+					shouldPauseCombatProduction,
+					isBalancedSprawl,
+					wasArmyCapReached,
+					combatCount,
+					armyCap
+				});
 				const Real zoneRadiusSq = std::max<Real>(160.0f, m_autonomyState.zoneRadius) * std::max<Real>(160.0f, m_autonomyState.zoneRadius);
 				std::string chosenCommand = "none";
 
@@ -1647,82 +1844,21 @@ namespace
 					return false;
 				};
 
-				if (shouldPauseCombatProduction)
+				auto tryChosenProduction = [&](const char* preferredCommand) -> bool
 				{
-					reason = openingInfrastructureReady ? "reserve_cash_recovery" : "opening_not_ready";
-				}
-				else if (isBalancedSprawl && combatCount >= armyCap)
-				{
-					reason = "army_cap_reached";
-				}
-				else if (counts.barracks > 0 && money >= 300u)
-				{
-					if (profile == "aggressive" || counts.rpg < counts.soldiers)
+					if (preferredCommand == nullptr || *preferredCommand == '\0')
 					{
-						chosenCommand = "Game.QueueRpgTroopersAllBarracks";
-						if (isBalancedSprawl)
-						{
-							Object* referenceBarracks = nullptr;
-							for (Object* obj = TheGameLogic != nullptr ? TheGameLogic->getFirstObject() : nullptr; obj != nullptr; obj = obj->getNextObject())
-							{
-								if (obj->isEffectivelyDead() || obj->getControllingPlayer() != player || !obj->isKindOf(KINDOF_STRUCTURE))
-								{
-									continue;
-								}
-								const ThingTemplate* tt = obj->getTemplate();
-								const std::string name = tt != nullptr ? tt->getName().str() : "";
-								if (containsIgnoreCase(name, "barracks"))
-								{
-									referenceBarracks = obj;
-									break;
-								}
-							}
-							issued = queueAtPreferredZoneProducer(true, inferRpgTemplateForProducer(referenceBarracks), "auto_prod_zone_rpg", reason);
-						}
-						if (!issued)
-						{
-							issued = tryCommand("auto_prod", "Game.QueueRpgTroopersAllBarracks", nlohmann::json::object({ {"count", 1} }), reason);
-						}
+						return false;
 					}
-					else
-					{
-						chosenCommand = "Game.QueueSoldiersAllBarracks";
-						if (isBalancedSprawl)
-						{
-							Object* referenceBarracks = nullptr;
-							for (Object* obj = TheGameLogic != nullptr ? TheGameLogic->getFirstObject() : nullptr; obj != nullptr; obj = obj->getNextObject())
-							{
-								if (obj->isEffectivelyDead() || obj->getControllingPlayer() != player || !obj->isKindOf(KINDOF_STRUCTURE))
-								{
-									continue;
-								}
-								const ThingTemplate* tt = obj->getTemplate();
-								const std::string name = tt != nullptr ? tt->getName().str() : "";
-								if (containsIgnoreCase(name, "barracks"))
-								{
-									referenceBarracks = obj;
-									break;
-								}
-							}
-							issued = queueAtPreferredZoneProducer(true, inferSoldierTemplateForPlayer(player, referenceBarracks), "auto_prod_zone_soldier", reason);
-						}
-						if (!issued)
-						{
-							issued = tryCommand("auto_prod", "Game.QueueSoldiersAllBarracks", nlohmann::json::object({ {"count", 1} }), reason);
-						}
-					}
-				}
-				else if (!issued && counts.armsDealers > 0 && money >= 700u)
-				{
-					if ((profile == "tech" || profile == "sprawl" || isBalancedSprawl)
-						&& counts.palaces > 0
-						&& counts.scudLaunchers < std::max<Int>(1, (counts.quads + counts.scorpions) / 10)
-						&& money >= 1200u)
+
+					if (std::strcmp(preferredCommand, "Game.QueueScudLauncher") == 0)
 					{
 						chosenCommand = "Game.QueueScudLauncher";
 						issued = tryCommand("auto_prod", "Game.QueueScudLauncher", nlohmann::json::object({ {"count", 1} }), reason);
+						return issued;
 					}
-					if (!issued && (profile == "aggressive" || counts.quads <= counts.scorpions))
+
+					if (std::strcmp(preferredCommand, "Game.QueueQuadsAllWarFactories") == 0)
 					{
 						chosenCommand = "Game.QueueQuadsAllWarFactories";
 						if (isBalancedSprawl)
@@ -1748,8 +1884,10 @@ namespace
 						{
 							issued = tryCommand("auto_prod", "Game.QueueQuadsAllWarFactories", nlohmann::json::object({ {"count", 1} }), reason);
 						}
+						return issued;
 					}
-					else if (!issued)
+
+					if (std::strcmp(preferredCommand, "Game.QueueScorpionsAllWarFactories") == 0)
 					{
 						chosenCommand = "Game.QueueScorpionsAllWarFactories";
 						if (isBalancedSprawl)
@@ -1775,11 +1913,120 @@ namespace
 						{
 							issued = tryCommand("auto_prod", "Game.QueueScorpionsAllWarFactories", nlohmann::json::object({ {"count", 1} }), reason);
 						}
+						return issued;
+					}
+
+					if (std::strcmp(preferredCommand, "Game.QueueRpgTroopersAllBarracks") == 0)
+					{
+						chosenCommand = "Game.QueueRpgTroopersAllBarracks";
+						if (isBalancedSprawl)
+						{
+							Object* referenceBarracks = nullptr;
+							for (Object* obj = TheGameLogic != nullptr ? TheGameLogic->getFirstObject() : nullptr; obj != nullptr; obj = obj->getNextObject())
+							{
+								if (obj->isEffectivelyDead() || obj->getControllingPlayer() != player || !obj->isKindOf(KINDOF_STRUCTURE))
+								{
+									continue;
+								}
+								const ThingTemplate* tt = obj->getTemplate();
+								const std::string name = tt != nullptr ? tt->getName().str() : "";
+								if (containsIgnoreCase(name, "barracks"))
+								{
+									referenceBarracks = obj;
+									break;
+								}
+							}
+							issued = queueAtPreferredZoneProducer(true, inferRpgTemplateForProducer(referenceBarracks), "auto_prod_zone_rpg", reason);
+						}
+						if (!issued)
+						{
+							issued = tryCommand("auto_prod", "Game.QueueRpgTroopersAllBarracks", nlohmann::json::object({ {"count", 1} }), reason);
+						}
+						return issued;
+					}
+
+					if (std::strcmp(preferredCommand, "Game.QueueSoldiersAllBarracks") == 0)
+					{
+						chosenCommand = "Game.QueueSoldiersAllBarracks";
+						if (isBalancedSprawl)
+						{
+							Object* referenceBarracks = nullptr;
+							for (Object* obj = TheGameLogic != nullptr ? TheGameLogic->getFirstObject() : nullptr; obj != nullptr; obj = obj->getNextObject())
+							{
+								if (obj->isEffectivelyDead() || obj->getControllingPlayer() != player || !obj->isKindOf(KINDOF_STRUCTURE))
+								{
+									continue;
+								}
+								const ThingTemplate* tt = obj->getTemplate();
+								const std::string name = tt != nullptr ? tt->getName().str() : "";
+								if (containsIgnoreCase(name, "barracks"))
+								{
+									referenceBarracks = obj;
+									break;
+								}
+							}
+							issued = queueAtPreferredZoneProducer(true, inferSoldierTemplateForPlayer(player, referenceBarracks), "auto_prod_zone_soldier", reason);
+						}
+						if (!issued)
+						{
+							issued = tryCommand("auto_prod", "Game.QueueSoldiersAllBarracks", nlohmann::json::object({ {"count", 1} }), reason);
+						}
+						return issued;
+					}
+					return issued;
+				};
+				const char* pauseReason = openingInfrastructureReady ? "reserve_cash_recovery" : "opening_not_ready";
+				const AIControlAdapterProductionChoiceResult preferredProduction = AIControlAdapterChoosePreferredProductionCommand({
+					shouldPauseCombatProduction,
+					pauseReason,
+					shouldHoldArmyCap,
+					isBalancedSprawl,
+					profile.c_str(),
+					money,
+					counts.barracks,
+					counts.armsDealers,
+					counts.palaces,
+					counts.soldiers,
+					counts.rpg,
+					counts.quads,
+					counts.scorpions,
+					counts.scudLaunchers
+				});
+
+				if (shouldPauseCombatProduction)
+				{
+					reason = preferredProduction.reason != nullptr ? preferredProduction.reason : pauseReason;
+				}
+				else if (shouldHoldArmyCap)
+				{
+					reason = preferredProduction.reason != nullptr ? preferredProduction.reason : "army_cap_reached";
+				}
+				else if (preferredProduction.command != nullptr)
+				{
+					tryChosenProduction(preferredProduction.command);
+					if (!issued
+						&& reason == "queue_full"
+						&& (std::strcmp(preferredProduction.command, "Game.QueueRpgTroopersAllBarracks") == 0
+							|| std::strcmp(preferredProduction.command, "Game.QueueSoldiersAllBarracks") == 0))
+					{
+						tryChosenProduction("Game.QueueQuadsAllWarFactories");
 					}
 				}
 				m_autonomyState.lastDecisionCategory = "production";
 				m_autonomyState.lastDecisionCommand = chosenCommand;
 				m_autonomyState.lastDecisionReason = issued ? "ok" : reason;
+				if (!chosenCommand.empty())
+				{
+					Coord3D zoneCenter = {};
+					zoneCenter.x = m_autonomyState.lastZoneCenterX;
+					zoneCenter.y = m_autonomyState.lastZoneCenterY;
+					zoneCenter.z = 0.0f;
+					recordAutonomyTelemetryEvent(
+						"production",
+						chosenCommand,
+						issued ? "ok" : reason,
+						m_autonomyState.hasLastZone ? &zoneCenter : nullptr);
+				}
 				adapterLog(
 					"autonomy_tick category=production profile=%s money=%lu action=%s issued=%d reason=%s units[soldiers=%d rpg=%d quads=%d scorpions=%d scuds=%d radar=%d]",
 					profile.c_str(),
@@ -1796,7 +2043,7 @@ namespace
 				m_autonomyState.nextProductionTick = now + (issued ? 2200u : 1500u);
 			}
 
-			if (static_cast<LONG>(m_autonomyState.nextTechTick - now) <= 0)
+			if (AIControlAdapterHasTickElapsed(m_autonomyState.nextTechTick, now))
 			{
 				const std::string profile = normalizeAsciiLower(m_autonomyState.profile);
 				if (profile == "sprawl" || profile == "sprawl_balanced" || profile == "tech")
@@ -1828,6 +2075,19 @@ namespace
 								m_autonomyState.lastDecisionCategory = "tech";
 								m_autonomyState.lastDecisionCommand = "Game.PurchaseScience";
 								m_autonomyState.lastDecisionReason = std::string("ok:") + scienceName;
+								Coord3D zoneCenter = {};
+								zoneCenter.x = m_autonomyState.lastZoneCenterX;
+								zoneCenter.y = m_autonomyState.lastZoneCenterY;
+								zoneCenter.z = 0.0f;
+								recordAutonomyTelemetryEvent(
+									"tech",
+									"Game.PurchaseScience",
+									m_autonomyState.lastDecisionReason,
+									m_autonomyState.hasLastZone ? &zoneCenter : nullptr);
+								break;
+							}
+							if (AIControlAdapterShouldAbortSciencePlanForTick(reason.c_str()))
+							{
 								break;
 							}
 						}
@@ -1860,6 +2120,19 @@ namespace
 								m_autonomyState.lastDecisionCategory = "tech";
 								m_autonomyState.lastDecisionCommand = "Game.QueueUpgrade";
 								m_autonomyState.lastDecisionReason = std::string("ok:") + kAutonomyUpgradePlan[i].upgradeName;
+								Coord3D zoneCenter = {};
+								zoneCenter.x = m_autonomyState.lastZoneCenterX;
+								zoneCenter.y = m_autonomyState.lastZoneCenterY;
+								zoneCenter.z = 0.0f;
+								recordAutonomyTelemetryEvent(
+									"tech",
+									"Game.QueueUpgrade",
+									m_autonomyState.lastDecisionReason,
+									m_autonomyState.hasLastZone ? &zoneCenter : nullptr);
+								break;
+							}
+							if (AIControlAdapterShouldAbortUpgradePlanForTick(reason.c_str()))
+							{
 								break;
 							}
 						}
@@ -1872,7 +2145,7 @@ namespace
 						m_autonomyState.lastDecisionReason = reason.empty() ? "tech_prereq_missing" : reason;
 					}
 
-					m_autonomyState.nextTechTick = now + (issued ? 6000u : 8000u);
+					m_autonomyState.nextTechTick = now + AIControlAdapterGetTechRetryDelayMs(issued, m_autonomyState.lastDecisionReason.c_str());
 				}
 				else
 				{
@@ -1880,7 +2153,7 @@ namespace
 				}
 			}
 
-			if (static_cast<LONG>(m_autonomyState.nextGuardTick - now) <= 0)
+			if (AIControlAdapterHasTickElapsed(m_autonomyState.nextGuardTick, now))
 			{
 				const std::string profile = normalizeAsciiLower(m_autonomyState.profile);
 				const Int combatCount = counts.soldiers + counts.rpg + counts.quads + counts.scorpions;
@@ -2043,6 +2316,7 @@ namespace
 			if (isAutonomyModeActive())
 			{
 				applyAutonomyRules();
+				kickAutonomyEvaluation();
 			}
 			return true;
 		}
@@ -2065,6 +2339,7 @@ namespace
 			m_autonomyState.mode = mode;
 			m_autonomyState.paused = false;
 			applyAutonomyRules();
+			kickAutonomyEvaluation();
 			return true;
 		}
 
@@ -2078,6 +2353,7 @@ namespace
 		{
 			m_autonomyState.paused = false;
 			applyAutonomyRules();
+			kickAutonomyEvaluation();
 		}
 
 		void resetAutonomy()
@@ -2247,6 +2523,15 @@ namespace
 			return result;
 		}
 
+		nlohmann::json buildAutonomyTelemetry()
+		{
+			nlohmann::json result = buildAutonomyStatus();
+			result["telemetry_tick"] = static_cast<UnsignedInt>(::GetTickCount());
+			result["zones"] = m_autonomyState.telemetryZones.is_array() ? m_autonomyState.telemetryZones : nlohmann::json::array();
+			result["recent_events"] = m_autonomyState.telemetryEvents.is_array() ? m_autonomyState.telemetryEvents : nlohmann::json::array();
+			return result;
+		}
+
 		#include "AIControlAdapterTransport.inl"
 
 		#include "AIControlAdapterProtocol.inl"
@@ -2346,7 +2631,7 @@ namespace
 				return false;
 			}
 			const DWORD now = ::GetTickCount();
-			return static_cast<LONG>(it->second - now) > 0;
+			return AIControlAdapterIsTickInFuture(it->second, now);
 		}
 
 		void collectCaptureSourcesForPlayer(Player* player, bool preferIdle, std::vector<Object*>& outSources) const
@@ -2440,7 +2725,7 @@ namespace
 			const DWORD now = ::GetTickCount();
 			for (auto it = m_captureAutomationRule.pendingTargetsUntilTick.begin(); it != m_captureAutomationRule.pendingTargetsUntilTick.end(); )
 			{
-				if (static_cast<LONG>(it->second - now) <= 0)
+				if (AIControlAdapterHasTickElapsed(it->second, now))
 				{
 					it = m_captureAutomationRule.pendingTargetsUntilTick.erase(it);
 				}
@@ -2451,7 +2736,7 @@ namespace
 			}
 			for (auto it = m_captureAutomationRule.pendingSourcesUntilTick.begin(); it != m_captureAutomationRule.pendingSourcesUntilTick.end(); )
 			{
-				if (static_cast<LONG>(it->second - now) <= 0)
+				if (AIControlAdapterHasTickElapsed(it->second, now))
 				{
 					it = m_captureAutomationRule.pendingSourcesUntilTick.erase(it);
 				}
@@ -2470,7 +2755,7 @@ namespace
 			}
 
 			const DWORD now = ::GetTickCount();
-			if (static_cast<LONG>(m_workerAutomationRule.nextAllowedTick - now) > 0)
+			if (AIControlAdapterIsTickInFuture(m_workerAutomationRule.nextAllowedTick, now))
 			{
 				return;
 			}
@@ -2552,7 +2837,7 @@ namespace
 			}
 
 			const DWORD now = ::GetTickCount();
-			if (static_cast<LONG>(m_stashWorkerAutomationRule.nextAllowedTick - now) > 0)
+			if (AIControlAdapterIsTickInFuture(m_stashWorkerAutomationRule.nextAllowedTick, now))
 			{
 				return;
 			}
@@ -2674,7 +2959,7 @@ namespace
 			}
 
 			const DWORD now = ::GetTickCount();
-			if (static_cast<LONG>(m_attackAutomationRule.nextAllowedTick - now) > 0)
+			if (AIControlAdapterIsTickInFuture(m_attackAutomationRule.nextAllowedTick, now))
 			{
 				return;
 			}
@@ -2751,7 +3036,7 @@ namespace
 			}
 
 			const DWORD now = ::GetTickCount();
-			if (static_cast<LONG>(m_radarVanAutomationRule.nextAllowedTick - now) > 0)
+			if (AIControlAdapterIsTickInFuture(m_radarVanAutomationRule.nextAllowedTick, now))
 			{
 				return;
 			}
@@ -2776,6 +3061,7 @@ namespace
 			{
 				Int armsCount;
 				Int radarVanCount;
+				Int combatVehicleCount;
 			} counts = { 0, 0 };
 			player->iterateObjects([](Object* obj, void* userData)
 			{
@@ -2798,11 +3084,23 @@ namespace
 				{
 					++counts->radarVanCount;
 				}
+				if (containsIgnoreCase(name, "quad")
+					|| containsIgnoreCase(name, "scorpion")
+					|| containsIgnoreCase(name, "scudlauncher"))
+				{
+					++counts->combatVehicleCount;
+				}
 			}, &counts);
 			const Int armsCount = counts.armsCount;
 			const Int radarVanCount = counts.radarVanCount;
+			const Int combatVehicleCount = counts.combatVehicleCount;
 
-			if (armsCount <= 0 || radarVanCount >= m_radarVanAutomationRule.minCount)
+			if (!AIControlAdapterShouldQueueRadarVan({
+				armsCount,
+				radarVanCount,
+				combatVehicleCount,
+				m_radarVanAutomationRule.minCount
+			}))
 			{
 				return;
 			}
@@ -2865,7 +3163,7 @@ namespace
 
 			const DWORD now = ::GetTickCount();
 			pruneCaptureAutomationPendingTargets();
-			if (static_cast<LONG>(m_captureAutomationRule.nextAllowedTick - now) > 0)
+			if (AIControlAdapterIsTickInFuture(m_captureAutomationRule.nextAllowedTick, now))
 			{
 				return;
 			}
@@ -3036,6 +3334,11 @@ namespace
 				{
 					continue;
 				}
+				recordAutonomyTelemetryEvent(
+					"capture",
+					"Game.CaptureBuilding",
+					"ok",
+					target->getPosition());
 
 				++sentOk;
 				--assignmentsRemaining;
