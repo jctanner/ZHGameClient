@@ -226,6 +226,7 @@
 						"autonomy_mode",
 						"autonomy_configure",
 						"autonomy_status",
+						"autonomy_telemetry",
 						"autonomy_pause",
 						"autonomy_resume",
 						"autonomy_reset",
@@ -621,6 +622,12 @@
 			if (cmd == "Autonomy.Status")
 			{
 				sendQueryResult(requestId, buildAutonomyStatus());
+				return;
+			}
+
+			if (cmd == "Autonomy.Telemetry")
+			{
+				sendQueryResult(requestId, buildAutonomyTelemetry());
 				return;
 			}
 

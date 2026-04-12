@@ -142,6 +142,35 @@ class GridCellSummary:
 
 
 @dataclass
+class AutonomyZoneOverlay:
+    anchor_id: int
+    center_x: float
+    center_y: float
+    radius: float
+    is_main_base: bool = False
+    active: bool = False
+    supply_stashes: int = 0
+    barracks: int = 0
+    arms_dealers: int = 0
+    palaces: int = 0
+    black_markets: int = 0
+    tunnels: int = 0
+    stingers: int = 0
+    developed: bool = False
+    needs_followup: bool = False
+
+
+@dataclass
+class AutonomyEventOverlay:
+    kind: str
+    label: str
+    reason: str
+    tick: int = 0
+    x: float | None = None
+    y: float | None = None
+
+
+@dataclass
 class UIStore:
     owned_objects: dict[int, WorldObject] = field(default_factory=dict)
     visible_enemies: dict[int, WorldObject] = field(default_factory=dict)
@@ -160,6 +189,9 @@ class UIStore:
     grid_objects: dict[int, WorldObject] = field(default_factory=dict)
     selected_grid_cell: str = ""
     grid_objects_total: int = 0
+    autonomy_zone_radius: float = 0.0
+    autonomy_zones: list[AutonomyZoneOverlay] = field(default_factory=list)
+    autonomy_events: list[AutonomyEventOverlay] = field(default_factory=list)
 
     def update_grid_summary(self, payload: Any) -> None:
         if not isinstance(payload, dict):
@@ -529,6 +561,66 @@ class UIStore:
             x, y = _extract_xy(raw)
             updated.append((x, y))
         self.supply_sources = updated
+
+    def update_autonomy_telemetry(self, payload: Any) -> None:
+        if not isinstance(payload, dict):
+            return
+        radius = payload.get("zone_radius")
+        if isinstance(radius, (int, float)):
+            self.autonomy_zone_radius = float(radius)
+
+        zones_payload = payload.get("zones")
+        parsed_zones: list[AutonomyZoneOverlay] = []
+        if isinstance(zones_payload, list):
+            for raw in zones_payload:
+                if not isinstance(raw, dict):
+                    continue
+                anchor_id = raw.get("anchor_id")
+                center_x = raw.get("center_x")
+                center_y = raw.get("center_y")
+                if not isinstance(anchor_id, int) or not isinstance(center_x, (int, float)) or not isinstance(center_y, (int, float)):
+                    continue
+                parsed_zones.append(
+                    AutonomyZoneOverlay(
+                        anchor_id=anchor_id,
+                        center_x=float(center_x),
+                        center_y=float(center_y),
+                        radius=self.autonomy_zone_radius,
+                        is_main_base=bool(raw.get("is_main_base", False)),
+                        active=bool(raw.get("active", False)),
+                        supply_stashes=int(raw.get("supply_stashes", 0)) if isinstance(raw.get("supply_stashes"), int) else 0,
+                        barracks=int(raw.get("barracks", 0)) if isinstance(raw.get("barracks"), int) else 0,
+                        arms_dealers=int(raw.get("arms_dealers", 0)) if isinstance(raw.get("arms_dealers"), int) else 0,
+                        palaces=int(raw.get("palaces", 0)) if isinstance(raw.get("palaces"), int) else 0,
+                        black_markets=int(raw.get("black_markets", 0)) if isinstance(raw.get("black_markets"), int) else 0,
+                        tunnels=int(raw.get("tunnels", 0)) if isinstance(raw.get("tunnels"), int) else 0,
+                        stingers=int(raw.get("stingers", 0)) if isinstance(raw.get("stingers"), int) else 0,
+                        developed=bool(raw.get("developed", False)),
+                        needs_followup=bool(raw.get("needs_followup", False)),
+                    )
+                )
+        self.autonomy_zones = parsed_zones
+
+        events_payload = payload.get("recent_events")
+        parsed_events: list[AutonomyEventOverlay] = []
+        if isinstance(events_payload, list):
+            for raw in events_payload:
+                if not isinstance(raw, dict):
+                    continue
+                tick = raw.get("tick", 0)
+                x = raw.get("x")
+                y = raw.get("y")
+                parsed_events.append(
+                    AutonomyEventOverlay(
+                        kind=str(raw.get("kind", "")),
+                        label=str(raw.get("label", "")),
+                        reason=str(raw.get("reason", "")),
+                        tick=int(tick) if isinstance(tick, int) else 0,
+                        x=float(x) if isinstance(x, (int, float)) else None,
+                        y=float(y) if isinstance(y, (int, float)) else None,
+                    )
+                )
+        self.autonomy_events = parsed_events
 
     def _recompute_player_aggregates(self) -> None:
         source_objects = self.all_objects if self.all_objects else self.owned_objects

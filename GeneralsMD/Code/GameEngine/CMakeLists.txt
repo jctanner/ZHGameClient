@@ -139,6 +139,7 @@ set(GAMEENGINE_SRC
 #    Include/Common/XferSave.h
     Include/GameClient/Anim2D.h
     Include/GameClient/AIControlAdapter.h
+    Include/GameClient/AIControlAdapterPolicy.h
     Include/GameClient/AnimateWindowManager.h
     Include/GameClient/CampaignManager.h
 #    Include/GameClient/ChallengeGenerals.h
@@ -687,6 +688,7 @@ set(GAMEENGINE_SRC
 #    Source/GameClient/Color.cpp
 #    Source/GameClient/Credits.cpp
     Source/GameClient/AIControlAdapter.cpp
+    Source/GameClient/AIControlAdapterPolicy.cpp
     Source/GameClient/Display.cpp
 #    Source/GameClient/DisplayString.cpp
 #    Source/GameClient/DisplayStringManager.cpp
@@ -1253,3 +1255,15 @@ target_precompile_headers(z_gameengine PRIVATE
 
 add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 add_compile_definitions(GENERALS_ONLINE)
+
+if(BUILD_TESTING)
+    add_executable(z_gameengine_adapter_tests
+        Tests/AIControlAdapterPolicyTests.cpp
+    )
+
+    target_link_libraries(z_gameengine_adapter_tests PRIVATE
+        z_gameengine
+    )
+
+    add_test(NAME z_gameengine_adapter_tests COMMAND z_gameengine_adapter_tests)
+endif()

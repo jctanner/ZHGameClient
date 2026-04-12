@@ -4,7 +4,7 @@ import time
 import tkinter as tk
 from typing import Iterable
 
-from state.store import UIStore, WorldObject
+from state.store import AutonomyEventOverlay, AutonomyZoneOverlay, UIStore, WorldObject
 
 
 class MapRenderer:
@@ -33,6 +33,8 @@ class MapRenderer:
         enemies = list(store.visible_enemies.values())
         points = list(store.interesting_points)
         supply_sources = list(store.supply_sources)
+        telemetry_points = [(zone.center_x, zone.center_y) for zone in store.autonomy_zones]
+        telemetry_points.extend((event.x, event.y) for event in store.autonomy_events if event.x is not None and event.y is not None)
         player_positions = [(meta.player_index, meta.map_position) for meta in store.players.values() if meta.map_position is not None]
         active_map: dict[tuple[int | None, int], WorldObject] = {}
         for obj in all_objects:
@@ -44,15 +46,17 @@ class MapRenderer:
         for obj in store.grid_objects.values():
             active_map[(obj.owner_player_index, obj.object_id)] = obj
         active_objects = list(active_map.values())
-        bounds = self._resolve_bounds(store, active_objects, [], points + supply_sources, player_positions)
+        bounds = self._resolve_bounds(store, active_objects, [], points + supply_sources + telemetry_points, player_positions)
         self._draw_map_bounds(width, height, bounds, store.map_width, store.map_height)
         self._draw_grid_overlay(store, width, height, bounds)
+        self._draw_autonomy_zones(store.autonomy_zones, width, height, bounds)
         self._draw_objects(active_objects, width, height, bounds, store, friendly=True)
         self._draw_supply_sources(supply_sources, width, height, bounds)
         self._draw_interesting_points(points, width, height, bounds)
+        self._draw_autonomy_events(store.autonomy_events, width, height, bounds)
         self._draw_player_positions(player_positions, width, height, bounds, store)
         self._draw_counts(active_objects, width)
-        if not active_objects and not points and not supply_sources and not player_positions and not store.grid_cells:
+        if not active_objects and not points and not supply_sources and not player_positions and not store.grid_cells and not store.autonomy_zones and not store.autonomy_events:
             self.canvas.create_text(
                 width * 0.5,
                 height * 0.5,
@@ -225,6 +229,98 @@ class MapRenderer:
         for x, y in points:
             cx, cy = self._world_to_canvas(x, y, canvas_w, canvas_h, bounds)
             self.canvas.create_oval(cx - 10, cy - 10, cx + 10, cy + 10, outline="#f4f7fb", width=2)
+
+    def _draw_autonomy_zones(
+        self,
+        zones: Iterable[AutonomyZoneOverlay],
+        canvas_w: int,
+        canvas_h: int,
+        bounds: tuple[float, float, float, float],
+    ) -> None:
+        for idx, zone in enumerate(zones):
+            cx, cy = self._world_to_canvas(zone.center_x, zone.center_y, canvas_w, canvas_h, bounds)
+            edge_x, _ = self._world_to_canvas(zone.center_x + max(zone.radius, 1.0), zone.center_y, canvas_w, canvas_h, bounds)
+            radius_px = max(10.0, abs(edge_x - cx))
+            outline = "#ffd166" if zone.active else ("#4be68f" if zone.is_main_base else "#6ec8ff")
+            dash = () if zone.active else (6, 4)
+            self.canvas.create_oval(
+                cx - radius_px,
+                cy - radius_px,
+                cx + radius_px,
+                cy + radius_px,
+                outline=outline,
+                width=2 if zone.active else 1,
+                dash=dash,
+            )
+            if zone.active:
+                self.canvas.create_oval(
+                    cx - 4,
+                    cy - 4,
+                    cx + 4,
+                    cy + 4,
+                    outline=outline,
+                    fill=outline,
+                )
+                self.canvas.create_oval(
+                    cx - 8,
+                    cy - 8,
+                    cx + 8,
+                    cy + 8,
+                    outline=outline,
+                    width=1,
+                )
+            if zone.active and zone.is_main_base:
+                label = "ACTIVE MAIN"
+            elif zone.active:
+                label = "ACTIVE EXPANSION"
+            elif zone.is_main_base:
+                label = "MAIN"
+            else:
+                label = "EXPANSION"
+            if zone.developed:
+                status = "developed"
+            elif zone.needs_followup:
+                status = "followup"
+            else:
+                status = "early"
+            counts_text = f"S{zone.supply_stashes} B{zone.barracks} A{zone.arms_dealers} T{zone.tunnels} G{zone.stingers}"
+            self.canvas.create_text(
+                cx + 8,
+                cy - 10,
+                text=f"Z{idx + 1} {label}\n{status}  {counts_text}",
+                anchor="sw",
+                fill=outline,
+                font=("Segoe UI", 8, "bold" if zone.active else "normal"),
+            )
+
+    def _draw_autonomy_events(
+        self,
+        events: Iterable[AutonomyEventOverlay],
+        canvas_w: int,
+        canvas_h: int,
+        bounds: tuple[float, float, float, float],
+    ) -> None:
+        palette = {
+            "macro": "#ff9f43",
+            "production": "#7bed9f",
+            "tech": "#70a1ff",
+            "attack": "#ff6b81",
+            "capture": "#c56cf0",
+        }
+        for event in events:
+            if event.x is None or event.y is None:
+                continue
+            cx, cy = self._world_to_canvas(event.x, event.y, canvas_w, canvas_h, bounds)
+            color = palette.get(event.kind, "#f5f6fa")
+            self.canvas.create_rectangle(cx - 4, cy - 4, cx + 4, cy + 4, outline=color, fill=self._darken_hex(color, 0.45))
+            self.canvas.create_text(
+                cx + 7,
+                cy + 2,
+                text=event.kind[:4].upper(),
+                anchor="w",
+                fill=color,
+                font=("Segoe UI", 7),
+            )
 
     def _draw_player_positions(
         self,
