@@ -106,6 +106,7 @@
 						"menu_set_text",
 						"chat_send",
 						"game_query",
+						"game_query_skirmish_setup",
 						"game_queue_unit",
 						"game_queue_upgrade",
 						"game_purchase_science",
@@ -148,7 +149,14 @@
 						"game_camera_reset",
 						"game_camera_set_zoom_limited",
 						"game_camera_lookat",
-						"game_camera_get"
+						"game_camera_get",
+						"skirmish_set_slot",
+						"skirmish_set_map",
+						"skirmish_set_starting_cash",
+						"skirmish_set_superweapon_restriction",
+						"skirmish_set_seed",
+						"skirmish_start",
+						"skirmish_configure"
 					})}
 				};
 				sendJsonLine(reply);
@@ -888,6 +896,90 @@
 			{
 				std::string reason;
 				if (!executeGameCameraLookAt(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Skirmish.SetSlot")
+			{
+				std::string reason;
+				if (!executeSkirmishSetSlot(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Skirmish.SetMap")
+			{
+				std::string reason;
+				if (!executeSkirmishSetMap(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Skirmish.SetStartingCash")
+			{
+				std::string reason;
+				if (!executeSkirmishSetStartingCash(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Skirmish.SetSuperweaponRestriction")
+			{
+				std::string reason;
+				if (!executeSkirmishSetSuperweaponRestriction(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Skirmish.SetSeed")
+			{
+				std::string reason;
+				if (!executeSkirmishSetSeed(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Skirmish.Start")
+			{
+				std::string reason;
+				if (!executeSkirmishStart(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Skirmish.Configure")
+			{
+				std::string reason;
+				if (!executeSkirmishConfigure(message, reason))
 				{
 					sendActionAck(requestId, false, "invalid_state", reason.c_str());
 					return;
