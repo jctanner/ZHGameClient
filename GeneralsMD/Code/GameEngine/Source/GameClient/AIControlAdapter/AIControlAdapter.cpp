@@ -1,7 +1,7 @@
 #include "PreRTS.h"
 
-#include "GameClient/AIControlAdapter.h"
-#include "GameClient/AIControlAdapterPolicy.h"
+#include "GameClient/AIControlAdapter/AIControlAdapter.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterPolicy.h"
 
 #include "Common/NameKeyGenerator.h"
 #include "Common/ActionManager.h"
@@ -124,6 +124,18 @@ namespace
 		return "GLAVehicleScudLauncher";
 	}
 
+	static Real clampUnitFloat(Real value, Real minimumValue, Real maximumValue)
+	{
+		return std::max(minimumValue, std::min(maximumValue, value));
+	}
+
+	static std::string normalizeAsciiLower(const std::string& value)
+	{
+		std::string out = value;
+		std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		return out;
+	}
+
 	struct PendingBuildLocationReservation
 	{
 		Int playerIndex;
@@ -197,6 +209,8 @@ namespace
 		std::string mode;
 		std::string profile;
 		bool paused;
+		bool hasAttackAutomationEnabledOverride;
+		bool attackAutomationEnabled;
 		bool captureTech;
 		bool allowSuperweapons;
 		bool hasExplicitPlayerIndex;
@@ -234,249 +248,153 @@ namespace
 		nlohmann::json telemetryEvents;
 	};
 
+	#include "AIControlAdapterLog.inl"
+
+	#include "AIControlAdapterTransport.inl"
+
+	#include "AIControlAdapterObjectCache.inl"
+
+	#include "AIControlAdapterWorkersState.inl"
+
+	#include "AIControlAdapterAutomation.inl"
+
+	#include "AIControlAdapterAutonomy.inl"
+
 	class AIControlAdapterState
 	{
 	public:
 		AIControlAdapterState() :
-			m_pipe(INVALID_HANDLE_VALUE),
-			m_hasClient(false),
-			m_adapterLog(nullptr),
-			m_adapterLogPath("D:\\logs\\adapter.log"),
-			m_ownedCacheValid(false),
-			m_ownedCachePlayerIndex(-1),
-			m_ownedCacheUnitsTotal(0),
-			m_ownedCacheBuildingsTotal(0),
-			m_ownedCacheIdleWorkersTotal(0),
-			m_ownedCacheVersion(0),
-			m_ownedCacheLastRefreshTick(0u)
+			m_transport(&m_log)
 		{
-			m_workerAutomationRule.enabled = false;
-			m_workerAutomationRule.hasExplicitPlayerIndex = false;
-			m_workerAutomationRule.hasExplicitProducerKind = false;
-			m_workerAutomationRule.playerIndex = -1;
-			m_workerAutomationRule.minIdleWorkers = 0;
-			m_workerAutomationRule.queueCount = 1;
-			m_workerAutomationRule.producerKind.clear();
-			m_workerAutomationRule.cooldownMs = 3000u;
-			m_workerAutomationRule.nextAllowedTick = 0u;
-			m_attackAutomationRule.enabled = false;
-			m_attackAutomationRule.hasExplicitPlayerIndex = false;
-			m_attackAutomationRule.playerIndex = -1;
-			m_attackAutomationRule.minUnits = 40;
-			m_attackAutomationRule.groupSize = 30;
-			m_attackAutomationRule.distance = 3000.0f;
-			m_attackAutomationRule.cooldownMs = 15000u;
-			m_attackAutomationRule.nextAllowedTick = 0u;
-			m_captureAutomationRule.enabled = false;
-			m_captureAutomationRule.hasExplicitPlayerIndex = false;
-			m_captureAutomationRule.preferIdle = true;
-			m_captureAutomationRule.playerIndex = -1;
-			m_captureAutomationRule.maxConcurrent = 3;
-			m_captureAutomationRule.cooldownMs = 4000u;
-			m_captureAutomationRule.nextAllowedTick = 0u;
-			m_captureAutomationRule.pendingTargetsUntilTick.clear();
-			m_captureAutomationRule.pendingSourcesUntilTick.clear();
-			m_radarVanAutomationRule.enabled = false;
-			m_radarVanAutomationRule.hasExplicitPlayerIndex = false;
-			m_radarVanAutomationRule.playerIndex = -1;
-			m_radarVanAutomationRule.minCount = 1;
-			m_radarVanAutomationRule.cooldownMs = 12000u;
-			m_radarVanAutomationRule.nextAllowedTick = 0u;
-			m_stashWorkerAutomationRule.enabled = false;
-			m_stashWorkerAutomationRule.hasExplicitPlayerIndex = false;
-			m_stashWorkerAutomationRule.playerIndex = -1;
-			m_stashWorkerAutomationRule.targetWorkersPerStash = 9;
-			m_stashWorkerAutomationRule.cooldownMs = 4000u;
-			m_stashWorkerAutomationRule.nextAllowedTick = 0u;
-			m_stashWorkerAutomationRule.servicedStashIds.clear();
-			resetAutonomyState();
-			char buffer[32];
-			sprintf_s(buffer, "%08X%08X", static_cast<unsigned int>(::GetCurrentProcessId()), static_cast<unsigned int>(::GetTickCount()));
-			m_sessionId = buffer;
-			resetAdapterLogFile(true);
-			adapterLog("adapter_start pid=%lu session=%s", static_cast<unsigned long>(::GetCurrentProcessId()), m_sessionId.c_str());
+			m_transport.setMessageHandler(&AIControlAdapterState::onMessage, this);
+			m_log.resetFile(true);
+			adapterLog("adapter_start pid=%lu session=%s", static_cast<unsigned long>(::GetCurrentProcessId()), m_log.sessionId().c_str());
 		}
 
 		~AIControlAdapterState()
 		{
-			closePipe();
-			closeAdapterLog();
 		}
 
 		void reset()
 		{
-			m_lineBuffer.clear();
+			m_transport.clearLineBuffer();
 			m_lastAutoSupplySourceByPlayer.clear();
 			m_reservedBuildLocations.clear();
 			m_buildExpansionRadiusByKey.clear();
-			m_ownedCacheValid = false;
-			m_ownedCachePlayerIndex = -1;
-			m_ownedCacheUnitsTotal = 0;
-			m_ownedCacheBuildingsTotal = 0;
-			m_ownedCacheIdleWorkersTotal = 0;
-			m_ownedCacheUnits = nlohmann::json::array();
-			m_ownedCacheBuildings = nlohmann::json::array();
-			m_ownedCacheIdleWorkers = nlohmann::json::array();
-			m_workerAutomationRule.enabled = false;
-			m_workerAutomationRule.hasExplicitPlayerIndex = false;
-			m_workerAutomationRule.hasExplicitProducerKind = false;
-			m_workerAutomationRule.playerIndex = -1;
-			m_workerAutomationRule.minIdleWorkers = 0;
-			m_workerAutomationRule.queueCount = 1;
-			m_workerAutomationRule.producerKind.clear();
-			m_workerAutomationRule.cooldownMs = 3000u;
-			m_workerAutomationRule.nextAllowedTick = 0u;
-			m_attackAutomationRule.enabled = false;
-			m_attackAutomationRule.hasExplicitPlayerIndex = false;
-			m_attackAutomationRule.playerIndex = -1;
-			m_attackAutomationRule.minUnits = 40;
-			m_attackAutomationRule.groupSize = 30;
-			m_attackAutomationRule.distance = 3000.0f;
-			m_attackAutomationRule.cooldownMs = 15000u;
-			m_attackAutomationRule.nextAllowedTick = 0u;
-			m_captureAutomationRule.enabled = false;
-			m_captureAutomationRule.hasExplicitPlayerIndex = false;
-			m_captureAutomationRule.preferIdle = true;
-			m_captureAutomationRule.playerIndex = -1;
-			m_captureAutomationRule.maxConcurrent = 3;
-			m_captureAutomationRule.cooldownMs = 4000u;
-			m_captureAutomationRule.nextAllowedTick = 0u;
-			m_captureAutomationRule.pendingTargetsUntilTick.clear();
-			m_captureAutomationRule.pendingSourcesUntilTick.clear();
-			m_radarVanAutomationRule.enabled = false;
-			m_radarVanAutomationRule.hasExplicitPlayerIndex = false;
-			m_radarVanAutomationRule.playerIndex = -1;
-			m_radarVanAutomationRule.minCount = 1;
-			m_radarVanAutomationRule.cooldownMs = 12000u;
-			m_radarVanAutomationRule.nextAllowedTick = 0u;
-			m_stashWorkerAutomationRule.enabled = false;
-			m_stashWorkerAutomationRule.hasExplicitPlayerIndex = false;
-			m_stashWorkerAutomationRule.playerIndex = -1;
-			m_stashWorkerAutomationRule.targetWorkersPerStash = 9;
-			m_stashWorkerAutomationRule.cooldownMs = 4000u;
-			m_stashWorkerAutomationRule.nextAllowedTick = 0u;
-			m_stashWorkerAutomationRule.servicedStashIds.clear();
+			m_cache.reset();
+			m_automation.reset();
 			resetAutonomyState();
-			resetClientConnection();
+			m_transport.resetClientConnection();
 		}
 
 		void update()
 		{
-			ensurePipeCreated();
-			if (m_pipe == INVALID_HANDLE_VALUE)
+			m_transport.ensurePipeCreated();
+			if (m_transport.pipe() == INVALID_HANDLE_VALUE)
 			{
 				return;
 			}
 
-			acceptClientIfAvailable();
-			if (!m_hasClient)
+			m_transport.acceptClientIfAvailable();
+			if (!m_transport.hasClient())
 			{
 				return;
 			}
 
-			readIncomingData();
+			m_transport.readIncomingData();
 			evaluateAutomationRules();
 		}
 
 	private:
-		static const DWORD PIPE_BUFFER_SIZE = 8192;
+		AdapterLog m_log;
+		AdapterTransport m_transport;
 
-		HANDLE m_pipe;
-		bool m_hasClient;
-		FILE* m_adapterLog;
-		std::string m_adapterLogPath;
-		std::string m_lineBuffer;
-		std::string m_sessionId;
+		static void onMessage(void* context, const std::string& line)
+		{
+			static_cast<AIControlAdapterState*>(context)->handleMessage(line);
+		}
+
+		void adapterLog(const char* format, ...)
+		{
+			va_list args;
+			va_start(args, format);
+			char buf[4096];
+			vsnprintf(buf, sizeof(buf), format, args);
+			va_end(args);
+			m_log.log("%s", buf);
+		}
+
+		void sendJsonLine(const nlohmann::json& payload) { m_transport.sendJsonLine(payload); }
+		void sendProtocolError(const std::string& requestId, const char* code, const char* reason) { m_transport.sendProtocolError(requestId, code, reason); }
+		void sendActionAck(const std::string& requestId, bool ok, const char* code = nullptr, const char* reason = nullptr) { m_transport.sendActionAck(requestId, ok, code, reason); }
+		void sendQueryResult(const std::string& requestId, const nlohmann::json& result) { m_transport.sendQueryResult(requestId, result); }
+		void sendQueryError(const std::string& requestId, const char* code, const char* reason) { m_transport.sendQueryError(requestId, code, reason); }
 		std::unordered_map<Int, Int> m_lastAutoSupplySourceByPlayer;
-		std::unordered_map<Int, ObjectID> m_lastSelectedWorkerByPlayer;
-		std::unordered_map<ObjectID, DWORD> m_reservedWorkersUntilTick;
+		AdapterWorkersState m_workers;
 		std::vector<PendingBuildLocationReservation> m_reservedBuildLocations;
 		std::unordered_map<std::string, Real> m_buildExpansionRadiusByKey;
-		bool m_ownedCacheValid;
-		Int m_ownedCachePlayerIndex;
-		Int m_ownedCacheUnitsTotal;
-		Int m_ownedCacheBuildingsTotal;
-		Int m_ownedCacheIdleWorkersTotal;
-		UnsignedInt m_ownedCacheVersion;
-		DWORD m_ownedCacheLastRefreshTick;
-		nlohmann::json m_ownedCacheUnits;
-		nlohmann::json m_ownedCacheBuildings;
-		nlohmann::json m_ownedCacheIdleWorkers;
-		WorkerAutomationRule m_workerAutomationRule;
-		AttackAutomationRule m_attackAutomationRule;
-		CaptureAutomationRule m_captureAutomationRule;
-		RadarVanAutomationRule m_radarVanAutomationRule;
-		StashWorkerAutomationRule m_stashWorkerAutomationRule;
-		AutonomyState m_autonomyState;
-
-		static Real clampUnitFloat(Real value, Real minimumValue, Real maximumValue)
-		{
-			return std::max(minimumValue, std::min(maximumValue, value));
-		}
-
-		static std::string normalizeAsciiLower(const std::string& value)
-		{
-			std::string out = value;
-			std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-			return out;
-		}
+		AdapterObjectCache m_cache;
+		AdapterAutomationState m_automation;
+		AdapterAutonomyState m_autonomy;
 
 		void resetAutonomyState()
 		{
-			m_autonomyState.mode = "manual";
-			m_autonomyState.profile = "sprawl_balanced";
-			m_autonomyState.paused = false;
-			m_autonomyState.captureTech = true;
-			m_autonomyState.allowSuperweapons = false;
-			m_autonomyState.hasExplicitPlayerIndex = false;
-			m_autonomyState.playerIndex = -1;
-			m_autonomyState.hasExplicitTargetPlayerIndex = false;
-			m_autonomyState.targetPlayerIndex = -1;
-			m_autonomyState.economyBias = 0.65f;
-			m_autonomyState.aggressionBias = 0.35f;
-			m_autonomyState.defenseBias = 0.45f;
-			m_autonomyState.expansionBias = 0.55f;
-			m_autonomyState.sprawlMultiplier = 1.5f;
-			m_autonomyState.zoneRadius = 450.0f;
-			m_autonomyState.lastAppliedTick = 0u;
-			m_autonomyState.nextMacroTick = 0u;
-			m_autonomyState.nextProductionTick = 0u;
-			m_autonomyState.nextTechTick = 0u;
-			m_autonomyState.nextGuardTick = 0u;
-			m_autonomyState.nextSupplyBuildTick = 0u;
-			m_autonomyState.nextBarracksBuildTick = 0u;
-			m_autonomyState.nextArmsBuildTick = 0u;
-			m_autonomyState.nextPalaceBuildTick = 0u;
-			m_autonomyState.nextMarketBuildTick = 0u;
-			m_autonomyState.nextTunnelBuildTick = 0u;
-			m_autonomyState.nextStingerBuildTick = 0u;
-			m_autonomyState.nextZoneIndex = 0u;
-			m_autonomyState.hasLastZone = false;
-			m_autonomyState.lastZoneAnchorId = 0u;
-			m_autonomyState.lastZoneIsMainBase = false;
-			m_autonomyState.lastZoneCenterX = 0.0f;
-			m_autonomyState.lastZoneCenterY = 0.0f;
-			m_autonomyState.lastDecisionCategory.clear();
-			m_autonomyState.lastDecisionCommand.clear();
-			m_autonomyState.lastDecisionReason.clear();
-			m_autonomyState.telemetryZones = nlohmann::json::array();
-			m_autonomyState.telemetryEvents = nlohmann::json::array();
+			m_autonomy.state.mode = "manual";
+			m_autonomy.state.profile = "sprawl_balanced";
+			m_autonomy.state.paused = false;
+			m_autonomy.state.hasAttackAutomationEnabledOverride = false;
+			m_autonomy.state.attackAutomationEnabled = true;
+			m_autonomy.state.captureTech = true;
+			m_autonomy.state.allowSuperweapons = false;
+			m_autonomy.state.hasExplicitPlayerIndex = false;
+			m_autonomy.state.playerIndex = -1;
+			m_autonomy.state.hasExplicitTargetPlayerIndex = false;
+			m_autonomy.state.targetPlayerIndex = -1;
+			m_autonomy.state.economyBias = 0.65f;
+			m_autonomy.state.aggressionBias = 0.35f;
+			m_autonomy.state.defenseBias = 0.45f;
+			m_autonomy.state.expansionBias = 0.55f;
+			m_autonomy.state.sprawlMultiplier = 1.5f;
+			m_autonomy.state.zoneRadius = 450.0f;
+			m_autonomy.state.lastAppliedTick = 0u;
+			m_autonomy.state.nextMacroTick = 0u;
+			m_autonomy.state.nextProductionTick = 0u;
+			m_autonomy.state.nextTechTick = 0u;
+			m_autonomy.state.nextGuardTick = 0u;
+			m_autonomy.state.nextSupplyBuildTick = 0u;
+			m_autonomy.state.nextBarracksBuildTick = 0u;
+			m_autonomy.state.nextArmsBuildTick = 0u;
+			m_autonomy.state.nextPalaceBuildTick = 0u;
+			m_autonomy.state.nextMarketBuildTick = 0u;
+			m_autonomy.state.nextTunnelBuildTick = 0u;
+			m_autonomy.state.nextStingerBuildTick = 0u;
+			m_autonomy.state.nextZoneIndex = 0u;
+			m_autonomy.state.hasLastZone = false;
+			m_autonomy.state.lastZoneAnchorId = 0u;
+			m_autonomy.state.lastZoneIsMainBase = false;
+			m_autonomy.state.lastZoneCenterX = 0.0f;
+			m_autonomy.state.lastZoneCenterY = 0.0f;
+			m_autonomy.state.lastDecisionCategory.clear();
+			m_autonomy.state.lastDecisionCommand.clear();
+			m_autonomy.state.lastDecisionReason.clear();
+			m_autonomy.state.telemetryZones = nlohmann::json::array();
+			m_autonomy.state.telemetryEvents = nlohmann::json::array();
 		}
 
 		bool isAutonomyModeActive() const
 		{
-			if (m_autonomyState.paused)
+			if (m_autonomy.state.paused)
 			{
 				return false;
 			}
-			return m_autonomyState.mode == "autonomous" || m_autonomyState.mode == "hybrid";
+			return m_autonomy.state.mode == "autonomous" || m_autonomy.state.mode == "hybrid";
 		}
 
 		Player* resolveAutonomyPlayer() const
 		{
-			if (m_autonomyState.hasExplicitPlayerIndex)
+			if (m_autonomy.state.hasExplicitPlayerIndex)
 			{
-				return getPlayerByIndex(m_autonomyState.playerIndex);
+				return getPlayerByIndex(m_autonomy.state.playerIndex);
 			}
 			return ThePlayerList != nullptr ? ThePlayerList->getLocalPlayer() : nullptr;
 		}
@@ -513,14 +431,14 @@ namespace
 				event["y"] = position->y;
 			}
 
-			if (!m_autonomyState.telemetryEvents.is_array())
+			if (!m_autonomy.state.telemetryEvents.is_array())
 			{
-				m_autonomyState.telemetryEvents = nlohmann::json::array();
+				m_autonomy.state.telemetryEvents = nlohmann::json::array();
 			}
-			m_autonomyState.telemetryEvents.push_back(event);
-			while (m_autonomyState.telemetryEvents.size() > 12u)
+			m_autonomy.state.telemetryEvents.push_back(event);
+			while (m_autonomy.state.telemetryEvents.size() > 12u)
 			{
-				m_autonomyState.telemetryEvents.erase(m_autonomyState.telemetryEvents.begin());
+				m_autonomy.state.telemetryEvents.erase(m_autonomy.state.telemetryEvents.begin());
 			}
 		}
 
@@ -529,145 +447,149 @@ namespace
 			clearAutonomyManagedRules();
 			if (!isAutonomyModeActive())
 			{
-				m_autonomyState.lastAppliedTick = ::GetTickCount();
-				adapterLog("autonomy_rules_inactive mode=%s paused=%d", m_autonomyState.mode.c_str(), m_autonomyState.paused ? 1 : 0);
+				m_autonomy.state.lastAppliedTick = ::GetTickCount();
+				adapterLog("autonomy_rules_inactive mode=%s paused=%d", m_autonomy.state.mode.c_str(), m_autonomy.state.paused ? 1 : 0);
 				return;
 			}
 
-			const std::string profile = normalizeAsciiLower(m_autonomyState.profile);
+			const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
 			const bool isBalancedSprawl = (profile == "sprawl_balanced");
 			const bool isSprawlStyle = (profile == "sprawl" || isBalancedSprawl);
-			const Real econ = clampUnitFloat(m_autonomyState.economyBias, 0.0f, 1.0f);
-			const Real aggro = clampUnitFloat(m_autonomyState.aggressionBias, 0.0f, 1.0f);
-			const Real defense = clampUnitFloat(m_autonomyState.defenseBias, 0.0f, 1.0f);
-			const Real expansion = clampUnitFloat(m_autonomyState.expansionBias, 0.0f, 1.0f);
+			const Real econ = clampUnitFloat(m_autonomy.state.economyBias, 0.0f, 1.0f);
+			const Real aggro = clampUnitFloat(m_autonomy.state.aggressionBias, 0.0f, 1.0f);
+			const Real defense = clampUnitFloat(m_autonomy.state.defenseBias, 0.0f, 1.0f);
+			const Real expansion = clampUnitFloat(m_autonomy.state.expansionBias, 0.0f, 1.0f);
 
-			m_workerAutomationRule.enabled = true;
-			m_workerAutomationRule.hasExplicitPlayerIndex = m_autonomyState.hasExplicitPlayerIndex;
-			m_workerAutomationRule.playerIndex = m_autonomyState.playerIndex;
-			m_workerAutomationRule.hasExplicitProducerKind = true;
-			m_workerAutomationRule.producerKind = "command_center";
-			m_workerAutomationRule.minIdleWorkers = (econ >= 0.70f || profile == "economic" || isSprawlStyle) ? 2 : 1;
-			m_workerAutomationRule.queueCount = (econ >= 0.75f || profile == "economic" || isSprawlStyle) ? 2 : 1;
-			m_workerAutomationRule.cooldownMs = (profile == "aggressive") ? 1500u : 2500u;
-			m_workerAutomationRule.nextAllowedTick = 0u;
+			m_automation.workerRule.enabled = true;
+			m_automation.workerRule.hasExplicitPlayerIndex = m_autonomy.state.hasExplicitPlayerIndex;
+			m_automation.workerRule.playerIndex = m_autonomy.state.playerIndex;
+			m_automation.workerRule.hasExplicitProducerKind = true;
+			m_automation.workerRule.producerKind = "command_center";
+			m_automation.workerRule.minIdleWorkers = (econ >= 0.70f || profile == "economic" || isSprawlStyle) ? 2 : 1;
+			m_automation.workerRule.queueCount = (econ >= 0.75f || profile == "economic" || isSprawlStyle) ? 2 : 1;
+			m_automation.workerRule.cooldownMs = (profile == "aggressive") ? 1500u : 2500u;
+			m_automation.workerRule.nextAllowedTick = 0u;
 			if (profile == "sprawl")
 			{
-				m_workerAutomationRule.minIdleWorkers = 3;
-				m_workerAutomationRule.queueCount = 1;
-				m_workerAutomationRule.cooldownMs = 2000u;
+				m_automation.workerRule.minIdleWorkers = 3;
+				m_automation.workerRule.queueCount = 1;
+				m_automation.workerRule.cooldownMs = 2000u;
 			}
 			else if (isBalancedSprawl)
 			{
-				m_workerAutomationRule.minIdleWorkers = 2;
-				m_workerAutomationRule.queueCount = 1;
-				m_workerAutomationRule.cooldownMs = 2500u;
+				m_automation.workerRule.minIdleWorkers = 2;
+				m_automation.workerRule.queueCount = 1;
+				m_automation.workerRule.cooldownMs = 2500u;
 			}
 
-			m_stashWorkerAutomationRule.enabled = profile != "builtin_passthrough";
-			m_stashWorkerAutomationRule.hasExplicitPlayerIndex = m_autonomyState.hasExplicitPlayerIndex;
-			m_stashWorkerAutomationRule.playerIndex = m_autonomyState.playerIndex;
-			m_stashWorkerAutomationRule.targetWorkersPerStash = 8;
+			m_automation.stashWorkerRule.enabled = profile != "builtin_passthrough";
+			m_automation.stashWorkerRule.hasExplicitPlayerIndex = m_autonomy.state.hasExplicitPlayerIndex;
+			m_automation.stashWorkerRule.playerIndex = m_autonomy.state.playerIndex;
+			m_automation.stashWorkerRule.targetWorkersPerStash = 8;
 			if (profile == "economic" || isSprawlStyle || econ >= 0.70f)
 			{
-				m_stashWorkerAutomationRule.targetWorkersPerStash = 10;
+				m_automation.stashWorkerRule.targetWorkersPerStash = 10;
 			}
 			else if (profile == "aggressive")
 			{
-				m_stashWorkerAutomationRule.targetWorkersPerStash = 7;
+				m_automation.stashWorkerRule.targetWorkersPerStash = 7;
 			}
-			m_stashWorkerAutomationRule.cooldownMs = 5000u;
-			m_stashWorkerAutomationRule.nextAllowedTick = 0u;
-			m_stashWorkerAutomationRule.servicedStashIds.clear();
+			m_automation.stashWorkerRule.cooldownMs = 5000u;
+			m_automation.stashWorkerRule.nextAllowedTick = 0u;
+			m_automation.stashWorkerRule.servicedStashIds.clear();
 			if (profile == "sprawl")
 			{
-				m_stashWorkerAutomationRule.targetWorkersPerStash = 3;
-				m_stashWorkerAutomationRule.cooldownMs = 12000u;
+				m_automation.stashWorkerRule.targetWorkersPerStash = 3;
+				m_automation.stashWorkerRule.cooldownMs = 12000u;
 			}
 			else if (isBalancedSprawl)
 			{
-				m_stashWorkerAutomationRule.targetWorkersPerStash = 6;
-				m_stashWorkerAutomationRule.cooldownMs = 8000u;
+				m_automation.stashWorkerRule.targetWorkersPerStash = 6;
+				m_automation.stashWorkerRule.cooldownMs = 8000u;
 			}
 
-			m_radarVanAutomationRule.enabled = (profile != "defensive" && profile != "builtin_passthrough");
-			m_radarVanAutomationRule.hasExplicitPlayerIndex = m_autonomyState.hasExplicitPlayerIndex;
-			m_radarVanAutomationRule.playerIndex = m_autonomyState.playerIndex;
-			m_radarVanAutomationRule.minCount = (profile == "tech") ? 2 : 1;
-			m_radarVanAutomationRule.cooldownMs = 12000u;
-			m_radarVanAutomationRule.nextAllowedTick = 0u;
+			m_automation.radarVanRule.enabled = (profile != "defensive" && profile != "builtin_passthrough");
+			m_automation.radarVanRule.hasExplicitPlayerIndex = m_autonomy.state.hasExplicitPlayerIndex;
+			m_automation.radarVanRule.playerIndex = m_autonomy.state.playerIndex;
+			m_automation.radarVanRule.minCount = (profile == "tech") ? 2 : 1;
+			m_automation.radarVanRule.cooldownMs = 12000u;
+			m_automation.radarVanRule.nextAllowedTick = 0u;
 
-			m_attackAutomationRule.enabled = profile != "builtin_passthrough";
-			m_attackAutomationRule.hasExplicitPlayerIndex = m_autonomyState.hasExplicitPlayerIndex;
-			m_attackAutomationRule.playerIndex = m_autonomyState.playerIndex;
-			m_attackAutomationRule.minUnits = 38;
-			m_attackAutomationRule.groupSize = 28;
-			m_attackAutomationRule.distance = 3000.0f + (expansion * 400.0f);
-			m_attackAutomationRule.cooldownMs = 18000u;
-			m_attackAutomationRule.nextAllowedTick = 0u;
+			m_automation.attackRule.enabled = profile != "builtin_passthrough";
+			if (m_autonomy.state.hasAttackAutomationEnabledOverride)
+			{
+				m_automation.attackRule.enabled = m_autonomy.state.attackAutomationEnabled && profile != "builtin_passthrough";
+			}
+			m_automation.attackRule.hasExplicitPlayerIndex = m_autonomy.state.hasExplicitPlayerIndex;
+			m_automation.attackRule.playerIndex = m_autonomy.state.playerIndex;
+			m_automation.attackRule.minUnits = 38;
+			m_automation.attackRule.groupSize = 28;
+			m_automation.attackRule.distance = 3000.0f + (expansion * 400.0f);
+			m_automation.attackRule.cooldownMs = 18000u;
+			m_automation.attackRule.nextAllowedTick = 0u;
 			if (profile == "aggressive" || aggro >= 0.70f)
 			{
-				m_attackAutomationRule.minUnits = 24;
-				m_attackAutomationRule.groupSize = 20;
-				m_attackAutomationRule.cooldownMs = 12000u;
+				m_automation.attackRule.minUnits = 24;
+				m_automation.attackRule.groupSize = 20;
+				m_automation.attackRule.cooldownMs = 12000u;
 			}
 			else if (profile == "economic")
 			{
-				m_attackAutomationRule.minUnits = 50;
-				m_attackAutomationRule.groupSize = 34;
-				m_attackAutomationRule.cooldownMs = 22000u;
+				m_automation.attackRule.minUnits = 50;
+				m_automation.attackRule.groupSize = 34;
+				m_automation.attackRule.cooldownMs = 22000u;
 			}
 			else if (profile == "defensive" || defense >= 0.70f)
 			{
-				m_attackAutomationRule.minUnits = 60;
-				m_attackAutomationRule.groupSize = 40;
-				m_attackAutomationRule.cooldownMs = 26000u;
+				m_automation.attackRule.minUnits = 60;
+				m_automation.attackRule.groupSize = 40;
+				m_automation.attackRule.cooldownMs = 26000u;
 			}
 			else if (profile == "tech")
 			{
-				m_attackAutomationRule.minUnits = 44;
-				m_attackAutomationRule.groupSize = 30;
-				m_attackAutomationRule.cooldownMs = 20000u;
+				m_automation.attackRule.minUnits = 44;
+				m_automation.attackRule.groupSize = 30;
+				m_automation.attackRule.cooldownMs = 20000u;
 			}
 			else if (profile == "sprawl")
 			{
-				m_attackAutomationRule.minUnits = 70;
-				m_attackAutomationRule.groupSize = 45;
-				m_attackAutomationRule.cooldownMs = 26000u;
+				m_automation.attackRule.minUnits = 70;
+				m_automation.attackRule.groupSize = 45;
+				m_automation.attackRule.cooldownMs = 26000u;
 			}
 			else if (isBalancedSprawl)
 			{
-				m_attackAutomationRule.minUnits = 55;
-				m_attackAutomationRule.groupSize = 28;
-				m_attackAutomationRule.cooldownMs = 22000u;
+				m_automation.attackRule.minUnits = 55;
+				m_automation.attackRule.groupSize = 28;
+				m_automation.attackRule.cooldownMs = 22000u;
 			}
 
-			m_captureAutomationRule.enabled = m_autonomyState.captureTech && profile != "builtin_passthrough";
-			m_captureAutomationRule.hasExplicitPlayerIndex = m_autonomyState.hasExplicitPlayerIndex;
-			m_captureAutomationRule.playerIndex = m_autonomyState.playerIndex;
-			m_captureAutomationRule.preferIdle = true;
-			m_captureAutomationRule.maxConcurrent = (profile == "tech") ? 3 : 2;
-			m_captureAutomationRule.cooldownMs = 5000u;
-			m_captureAutomationRule.nextAllowedTick = 0u;
-			m_captureAutomationRule.pendingTargetsUntilTick.clear();
-			m_captureAutomationRule.pendingSourcesUntilTick.clear();
+			m_automation.captureRule.enabled = m_autonomy.state.captureTech && profile != "builtin_passthrough";
+			m_automation.captureRule.hasExplicitPlayerIndex = m_autonomy.state.hasExplicitPlayerIndex;
+			m_automation.captureRule.playerIndex = m_autonomy.state.playerIndex;
+			m_automation.captureRule.preferIdle = true;
+			m_automation.captureRule.maxConcurrent = (profile == "tech") ? 3 : 2;
+			m_automation.captureRule.cooldownMs = 5000u;
+			m_automation.captureRule.nextAllowedTick = 0u;
+			m_automation.captureRule.pendingTargetsUntilTick.clear();
+			m_automation.captureRule.pendingSourcesUntilTick.clear();
 
-			m_autonomyState.lastAppliedTick = ::GetTickCount();
-			m_autonomyState.nextMacroTick = 0u;
-			m_autonomyState.nextProductionTick = 0u;
-			m_autonomyState.nextTechTick = 0u;
-			m_autonomyState.nextGuardTick = 0u;
+			m_autonomy.state.lastAppliedTick = ::GetTickCount();
+			m_autonomy.state.nextMacroTick = 0u;
+			m_autonomy.state.nextProductionTick = 0u;
+			m_autonomy.state.nextTechTick = 0u;
+			m_autonomy.state.nextGuardTick = 0u;
 			adapterLog(
 				"autonomy_apply mode=%s profile=%s paused=%d economy_bias=%.2f aggression_bias=%.2f defense_bias=%.2f expansion_bias=%.2f capture_tech=%d target_player=%d",
-				m_autonomyState.mode.c_str(),
-				m_autonomyState.profile.c_str(),
-				m_autonomyState.paused ? 1 : 0,
-				static_cast<double>(m_autonomyState.economyBias),
-				static_cast<double>(m_autonomyState.aggressionBias),
-				static_cast<double>(m_autonomyState.defenseBias),
-				static_cast<double>(m_autonomyState.expansionBias),
-				m_autonomyState.captureTech ? 1 : 0,
-				m_autonomyState.hasExplicitTargetPlayerIndex ? m_autonomyState.targetPlayerIndex : -1);
+				m_autonomy.state.mode.c_str(),
+				m_autonomy.state.profile.c_str(),
+				m_autonomy.state.paused ? 1 : 0,
+				static_cast<double>(m_autonomy.state.economyBias),
+				static_cast<double>(m_autonomy.state.aggressionBias),
+				static_cast<double>(m_autonomy.state.defenseBias),
+				static_cast<double>(m_autonomy.state.expansionBias),
+				m_autonomy.state.captureTech ? 1 : 0,
+				m_autonomy.state.hasExplicitTargetPlayerIndex ? m_autonomy.state.targetPlayerIndex : -1);
 		}
 
 		void kickAutonomyEvaluation()
@@ -677,10 +599,10 @@ namespace
 				return;
 			}
 
-			m_autonomyState.nextMacroTick = 0u;
-			m_autonomyState.nextProductionTick = 0u;
-			m_autonomyState.nextTechTick = 0u;
-			m_autonomyState.nextGuardTick = 0u;
+			m_autonomy.state.nextMacroTick = 0u;
+			m_autonomy.state.nextProductionTick = 0u;
+			m_autonomy.state.nextTechTick = 0u;
+			m_autonomy.state.nextGuardTick = 0u;
 			Player* player = resolveAutonomyPlayer();
 			const DWORD now = ::GetTickCount();
 			Int playerIndex = -1;
@@ -697,24 +619,24 @@ namespace
 					money = wallet->countMoney();
 				}
 				refreshOwnedObjectCache(player);
-				ownedUnits = m_ownedCacheUnitsTotal;
-				ownedBuildings = m_ownedCacheBuildingsTotal;
-				idleWorkers = m_ownedCacheIdleWorkersTotal;
+				ownedUnits = m_cache.unitsTotal;
+				ownedBuildings = m_cache.buildingsTotal;
+				idleWorkers = m_cache.idleWorkersTotal;
 			}
 			adapterLog(
 				"autonomy_kickoff mode=%s profile=%s player=%d now=%lu timers[macro=%lu prod=%lu tech=%lu guard=%lu] ready[macro=%d prod=%d tech=%d guard=%d] assets[units=%d buildings=%d idle_workers=%d money=%lu]",
-				m_autonomyState.mode.c_str(),
-				m_autonomyState.profile.c_str(),
+				m_autonomy.state.mode.c_str(),
+				m_autonomy.state.profile.c_str(),
 				playerIndex,
 				static_cast<unsigned long>(now),
-				static_cast<unsigned long>(m_autonomyState.nextMacroTick),
-				static_cast<unsigned long>(m_autonomyState.nextProductionTick),
-				static_cast<unsigned long>(m_autonomyState.nextTechTick),
-				static_cast<unsigned long>(m_autonomyState.nextGuardTick),
-				AIControlAdapterHasTickElapsed(m_autonomyState.nextMacroTick, now) ? 1 : 0,
-				AIControlAdapterHasTickElapsed(m_autonomyState.nextProductionTick, now) ? 1 : 0,
-				AIControlAdapterHasTickElapsed(m_autonomyState.nextTechTick, now) ? 1 : 0,
-				AIControlAdapterHasTickElapsed(m_autonomyState.nextGuardTick, now) ? 1 : 0,
+				static_cast<unsigned long>(m_autonomy.state.nextMacroTick),
+				static_cast<unsigned long>(m_autonomy.state.nextProductionTick),
+				static_cast<unsigned long>(m_autonomy.state.nextTechTick),
+				static_cast<unsigned long>(m_autonomy.state.nextGuardTick),
+				AIControlAdapterHasTickElapsed(m_autonomy.state.nextMacroTick, now) ? 1 : 0,
+				AIControlAdapterHasTickElapsed(m_autonomy.state.nextProductionTick, now) ? 1 : 0,
+				AIControlAdapterHasTickElapsed(m_autonomy.state.nextTechTick, now) ? 1 : 0,
+				AIControlAdapterHasTickElapsed(m_autonomy.state.nextGuardTick, now) ? 1 : 0,
 				ownedUnits,
 				ownedBuildings,
 				idleWorkers,
@@ -741,10 +663,10 @@ namespace
 				"autonomy_macro_enter player=%d now=%lu timers[macro=%lu prod=%lu tech=%lu guard=%lu]",
 				player->getPlayerIndex(),
 				static_cast<unsigned long>(now),
-				static_cast<unsigned long>(m_autonomyState.nextMacroTick),
-				static_cast<unsigned long>(m_autonomyState.nextProductionTick),
-				static_cast<unsigned long>(m_autonomyState.nextTechTick),
-				static_cast<unsigned long>(m_autonomyState.nextGuardTick));
+				static_cast<unsigned long>(m_autonomy.state.nextMacroTick),
+				static_cast<unsigned long>(m_autonomy.state.nextProductionTick),
+				static_cast<unsigned long>(m_autonomy.state.nextTechTick),
+				static_cast<unsigned long>(m_autonomy.state.nextGuardTick));
 			UnsignedInt money = 0u;
 			const Money* wallet = player->getMoney();
 			if (wallet != nullptr)
@@ -768,6 +690,7 @@ namespace
 				Int stingersInProgress;
 				Int supplyStashes;
 				Int supplyStashesInProgress;
+				Int mobileUnits;
 				Int workers;
 				Int radarVans;
 				Int soldiers;
@@ -775,7 +698,7 @@ namespace
 				Int quads;
 				Int scorpions;
 				Int scudLaunchers;
-			} counts = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+			} counts = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
 			struct AutonomyZone
 			{
@@ -840,6 +763,7 @@ namespace
 					return;
 				}
 
+				++counts->mobileUnits;
 				if (obj->isKindOf(KINDOF_DOZER))
 				{
 					++counts->workers;
@@ -935,21 +859,144 @@ namespace
 			Int activeZoneIndex = -1;
 			if (!zones.empty())
 			{
-				m_autonomyState.nextZoneIndex = zones.empty() ? 0u : (m_autonomyState.nextZoneIndex % zones.size());
-				activeZone = zones[m_autonomyState.nextZoneIndex];
+				m_autonomy.state.nextZoneIndex = zones.empty() ? 0u : (m_autonomy.state.nextZoneIndex % zones.size());
+				activeZone = zones[m_autonomy.state.nextZoneIndex];
 				hasActiveZone = true;
-				activeZoneIndex = static_cast<Int>(m_autonomyState.nextZoneIndex);
+				activeZoneIndex = static_cast<Int>(m_autonomy.state.nextZoneIndex);
 			}
 			adapterLog(
 				"autonomy_macro_phase phase=zones player=%d zones=%d has_active=%d",
 				player->getPlayerIndex(),
 				static_cast<int>(zones.size()),
 				hasActiveZone ? 1 : 0);
-			m_autonomyState.hasLastZone = hasActiveZone;
-			m_autonomyState.lastZoneAnchorId = hasActiveZone ? static_cast<UnsignedInt>(activeZone.anchorId) : 0u;
-			m_autonomyState.lastZoneIsMainBase = hasActiveZone && activeZone.isMainBase;
-			m_autonomyState.lastZoneCenterX = hasActiveZone ? activeZone.center.x : 0.0f;
-			m_autonomyState.lastZoneCenterY = hasActiveZone ? activeZone.center.y : 0.0f;
+			m_autonomy.state.hasLastZone = hasActiveZone;
+			m_autonomy.state.lastZoneAnchorId = hasActiveZone ? static_cast<UnsignedInt>(activeZone.anchorId) : 0u;
+			m_autonomy.state.lastZoneIsMainBase = hasActiveZone && activeZone.isMainBase;
+			m_autonomy.state.lastZoneCenterX = hasActiveZone ? activeZone.center.x : 0.0f;
+			m_autonomy.state.lastZoneCenterY = hasActiveZone ? activeZone.center.y : 0.0f;
+			Int mainZoneIndex = -1;
+			Real sprawlAxisDx = 0.0f;
+			Real sprawlAxisDy = 0.0f;
+			for (std::size_t i = 0; i < zones.size(); ++i)
+			{
+				if (zones[i].isMainBase)
+				{
+					mainZoneIndex = static_cast<Int>(i);
+					break;
+				}
+			}
+			if (mainZoneIndex >= 0)
+			{
+				Real furthestDistSq = -1.0f;
+				for (std::size_t i = 0; i < zones.size(); ++i)
+				{
+					if (static_cast<Int>(i) == mainZoneIndex)
+					{
+						continue;
+					}
+					const Real dx = zones[i].center.x - zones[static_cast<std::size_t>(mainZoneIndex)].center.x;
+					const Real dy = zones[i].center.y - zones[static_cast<std::size_t>(mainZoneIndex)].center.y;
+					const Real distSq = (dx * dx) + (dy * dy);
+					if (distSq > furthestDistSq)
+					{
+						furthestDistSq = distSq;
+						sprawlAxisDx = dx;
+						sprawlAxisDy = dy;
+					}
+				}
+			}
+			const Real sprawlAxisLenSq = (sprawlAxisDx * sprawlAxisDx) + (sprawlAxisDy * sprawlAxisDy);
+			if (sprawlAxisLenSq > 1.0f)
+			{
+				const Real invLen = 1.0f / std::sqrt(sprawlAxisLenSq);
+				sprawlAxisDx *= invLen;
+				sprawlAxisDy *= invLen;
+			}
+			else
+			{
+				sprawlAxisDx = 0.0f;
+				sprawlAxisDy = -1.0f;
+			}
+
+			const UnsignedInt telemetryNowTick = ::GetTickCount();
+			AIControlAdapterMapPoint recentAttackTarget = { 0.0f, 0.0f };
+			const bool hasRecentAttackTarget = AIControlAdapterTryGetRecentAttackTarget(
+				m_autonomy.state.telemetryEvents,
+				telemetryNowTick,
+				45000u,
+				recentAttackTarget);
+
+			const GameSlot* selfSlot = findSlotForPlayer(player);
+			const Int selfTeamNumber = selfSlot != nullptr ? selfSlot->getTeamNumber() : -1;
+			bool hasPreferredEnemyBase = false;
+			AIControlAdapterMapPoint preferredEnemyBase = { 0.0f, 0.0f };
+			std::vector<AIControlAdapterMapPoint> knownEnemyBasePositions;
+			auto captureEnemyBasePosition = [&](Player* candidate, bool preferred) -> void
+			{
+				if (candidate == nullptr || candidate == player || ThePlayerList == nullptr)
+				{
+					return;
+				}
+				const GameSlot* candidateSlot = findSlotForPlayer(candidate);
+				if (candidateSlot != nullptr && selfSlot != nullptr)
+				{
+					const Int candidateTeamNumber = candidateSlot->getTeamNumber();
+					if (candidateTeamNumber >= 0 && selfTeamNumber >= 0 && candidateTeamNumber == selfTeamNumber)
+					{
+						return;
+					}
+				}
+				AIControlAdapterMapPoint candidatePos = { 0.0f, 0.0f };
+				if (!AIControlAdapterTryReadMapPosition(buildPlayerMapPositionSummary(candidate), candidatePos))
+				{
+					return;
+				}
+				if (preferred)
+				{
+					preferredEnemyBase = candidatePos;
+					hasPreferredEnemyBase = true;
+					return;
+				}
+				knownEnemyBasePositions.push_back(candidatePos);
+			};
+
+			if (m_autonomy.state.hasExplicitPlayerIndex)
+			{
+				captureEnemyBasePosition(getPlayerByIndex(m_autonomy.state.playerIndex), true);
+			}
+			if (ThePlayerList != nullptr)
+			{
+				const Int playerCount = ThePlayerList->getPlayerCount();
+				for (Int i = 0; i < playerCount; ++i)
+				{
+					Player* candidate = ThePlayerList->getNthPlayer(i);
+					if (candidate == nullptr)
+					{
+						continue;
+					}
+					if (hasPreferredEnemyBase && candidate->getPlayerIndex() == m_autonomy.state.playerIndex)
+					{
+						continue;
+					}
+					captureEnemyBasePosition(candidate, false);
+				}
+			}
+
+			auto resolveZoneFrontDirection = [&](const AutonomyZone& zone, Real& outDx, Real& outDy, const char*& outSource) -> void
+			{
+				const AIControlAdapterZoneFrontDirectionResult result = AIControlAdapterResolveZoneFrontDirection(
+					{ zone.center.x, zone.center.y },
+					hasRecentAttackTarget,
+					recentAttackTarget,
+					hasPreferredEnemyBase,
+					preferredEnemyBase,
+					knownEnemyBasePositions,
+					sprawlAxisDx,
+					sprawlAxisDy);
+				outDx = result.dx;
+				outDy = result.dy;
+				outSource = result.source;
+			};
 
 			struct AutonomyZoneCounts
 			{
@@ -971,7 +1018,7 @@ namespace
 			std::vector<AutonomyZoneCounts> zoneCounts(zones.size(), AutonomyZoneCounts{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
 			if (!zones.empty())
 			{
-				const Real zoneRadiusSq = std::max<Real>(160.0f, m_autonomyState.zoneRadius) * std::max<Real>(160.0f, m_autonomyState.zoneRadius);
+				const Real zoneRadiusSq = std::max<Real>(160.0f, m_autonomy.state.zoneRadius) * std::max<Real>(160.0f, m_autonomy.state.zoneRadius);
 				for (Object* obj = TheGameLogic != nullptr ? TheGameLogic->getFirstObject() : nullptr; obj != nullptr; obj = obj->getNextObject())
 				{
 					if (obj->isEffectivelyDead() || obj->getControllingPlayer() != player || !obj->isKindOf(KINDOF_STRUCTURE) || obj->getPosition() == nullptr)
@@ -1035,7 +1082,7 @@ namespace
 			AutonomyZoneCounts activeZoneCounts = (activeZoneIndex >= 0 && activeZoneIndex < static_cast<Int>(zoneCounts.size()))
 				? zoneCounts[static_cast<std::size_t>(activeZoneIndex)]
 				: AutonomyZoneCounts{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
-			m_autonomyState.telemetryZones = nlohmann::json::array();
+			m_autonomy.state.telemetryZones = nlohmann::json::array();
 			for (std::size_t i = 0; i < zones.size(); ++i)
 			{
 				const Int zoneSupply = zoneCounts[i].supplyStashes + zoneCounts[i].supplyStashesInProgress;
@@ -1052,12 +1099,27 @@ namespace
 				const bool zoneDeveloped =
 					zoneSupply > 0
 					&& (zoneBarracks + zoneArms + zoneTunnels + zoneStingers) >= 3;
-				m_autonomyState.telemetryZones.push_back(nlohmann::json::object({
+				const Real zoneRadius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius);
+				Real zoneFrontDx = sprawlAxisDx;
+				Real zoneFrontDy = sprawlAxisDy;
+				const char* frontSource = "sprawl_axis";
+				resolveZoneFrontDirection(zones[i], zoneFrontDx, zoneFrontDy, frontSource);
+				const AIControlAdapterZoneFrontRearPoints zonePoints = AIControlAdapterBuildZoneFrontRearPoints(
+					{ zones[i].center.x, zones[i].center.y },
+					zoneRadius,
+					zoneFrontDx,
+					zoneFrontDy);
+				m_autonomy.state.telemetryZones.push_back(nlohmann::json::object({
 					{"anchor_id", static_cast<UnsignedInt>(zones[i].anchorId)},
 					{"is_main_base", zones[i].isMainBase},
 					{"active", isActiveZone},
 					{"center_x", zones[i].center.x},
 					{"center_y", zones[i].center.y},
+					{"front_point_x", zonePoints.frontPoint.x},
+					{"front_point_y", zonePoints.frontPoint.y},
+					{"rear_point_x", zonePoints.rearPoint.x},
+					{"rear_point_y", zonePoints.rearPoint.y},
+					{"front_source", frontSource},
 					{"supply_stashes", zoneSupply},
 					{"barracks", zoneBarracks},
 					{"arms_dealers", zoneArms},
@@ -1113,9 +1175,9 @@ namespace
 					{"cmd", std::string(cmd)},
 					{"args", args}
 				};
-				if (m_autonomyState.hasExplicitPlayerIndex)
+				if (m_autonomy.state.hasExplicitPlayerIndex)
 				{
-					message["args"]["player_index"] = m_autonomyState.playerIndex;
+					message["args"]["player_index"] = m_autonomy.state.playerIndex;
 				}
 
 				bool ok = false;
@@ -1209,7 +1271,7 @@ namespace
 					ok ? "" : outReason.c_str());
 				if (ok)
 				{
-					m_ownedCacheValid = false;
+					m_cache.valid = false;
 				}
 				return ok;
 			};
@@ -1220,22 +1282,66 @@ namespace
 				{
 					return tryCommand(requestIdPrefix, cmd, args, outReason);
 				}
+				Coord3D zoneCenter = activeZone.center;
+				Real zoneRadius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius);
+				const std::string cmdString = cmd != nullptr ? cmd : "";
+				Real zoneFrontDx = sprawlAxisDx;
+				Real zoneFrontDy = sprawlAxisDy;
+				const char* ignoredFrontSource = "sprawl_axis";
+				resolveZoneFrontDirection(activeZone, zoneFrontDx, zoneFrontDy, ignoredFrontSource);
+				const bool hasAxis = (std::fabs(zoneFrontDx) > 0.0001f) || (std::fabs(zoneFrontDy) > 0.0001f);
+				if (hasAxis && (cmdString == "Game.BuildTunnelNetwork" || cmdString == "Game.BuildStingerSite"))
+				{
+					const Real frontOffset = activeZone.isMainBase ? 0.45f : 0.72f;
+					zoneCenter.x += zoneFrontDx * zoneRadius * frontOffset;
+					zoneCenter.y += zoneFrontDy * zoneRadius * frontOffset;
+					zoneRadius = std::max<Real>(96.0f, zoneRadius * 0.32f);
+				}
+				else if (hasAxis && (cmdString == "Game.BuildBarracksSmart" || cmdString == "Game.BuildArmsDealerSmart"))
+				{
+					const Real lineOffset = activeZone.isMainBase ? 0.18f : 0.38f;
+					zoneCenter.x += zoneFrontDx * zoneRadius * lineOffset;
+					zoneCenter.y += zoneFrontDy * zoneRadius * lineOffset;
+					zoneRadius = std::max<Real>(120.0f, zoneRadius * 0.42f);
+				}
 				args["zone_center"] = nlohmann::json::object({
-					{"x", activeZone.center.x},
-					{"y", activeZone.center.y}
+					{"x", zoneCenter.x},
+					{"y", zoneCenter.y}
 				});
-				args["zone_radius"] = std::max<Real>(160.0f, m_autonomyState.zoneRadius);
+				args["zone_radius"] = zoneRadius;
 				args["strict_zone"] = false;
 				return tryCommand(requestIdPrefix, cmd, args, outReason);
 			};
 
 			auto trySpecificZoneCommand = [&](const char* requestIdPrefix, const char* cmd, const AutonomyZone& zone, nlohmann::json args, std::string& outReason) -> bool
 			{
+				Coord3D zoneCenter = zone.center;
+				Real zoneRadius = std::max<Real>(220.0f, m_autonomy.state.zoneRadius * 1.35f);
+				const std::string cmdString = cmd != nullptr ? cmd : "";
+				Real zoneFrontDx = sprawlAxisDx;
+				Real zoneFrontDy = sprawlAxisDy;
+				const char* ignoredFrontSource = "sprawl_axis";
+				resolveZoneFrontDirection(zone, zoneFrontDx, zoneFrontDy, ignoredFrontSource);
+				const bool hasAxis = (std::fabs(zoneFrontDx) > 0.0001f) || (std::fabs(zoneFrontDy) > 0.0001f);
+				if (hasAxis && (cmdString == "Game.BuildTunnelNetwork" || cmdString == "Game.BuildStingerSite"))
+				{
+					const Real frontOffset = zone.isMainBase ? 0.45f : 0.72f;
+					zoneCenter.x += zoneFrontDx * zoneRadius * frontOffset;
+					zoneCenter.y += zoneFrontDy * zoneRadius * frontOffset;
+					zoneRadius = std::max<Real>(96.0f, zoneRadius * 0.32f);
+				}
+				else if (hasAxis && (cmdString == "Game.BuildBarracksSmart" || cmdString == "Game.BuildArmsDealerSmart"))
+				{
+					const Real lineOffset = zone.isMainBase ? 0.18f : 0.38f;
+					zoneCenter.x += zoneFrontDx * zoneRadius * lineOffset;
+					zoneCenter.y += zoneFrontDy * zoneRadius * lineOffset;
+					zoneRadius = std::max<Real>(120.0f, zoneRadius * 0.42f);
+				}
 				args["zone_center"] = nlohmann::json::object({
-					{"x", zone.center.x},
-					{"y", zone.center.y}
+					{"x", zoneCenter.x},
+					{"y", zoneCenter.y}
 				});
-				args["zone_radius"] = std::max<Real>(220.0f, m_autonomyState.zoneRadius * 1.35f);
+				args["zone_radius"] = zoneRadius;
 				args["strict_zone"] = false;
 				return tryCommand(requestIdPrefix, cmd, args, outReason);
 			};
@@ -1275,31 +1381,31 @@ namespace
 				const std::string cmdString = cmd != nullptr ? cmd : "";
 				if (cmdString == "Game.BuildSupplyStashSmart")
 				{
-					return &m_autonomyState.nextSupplyBuildTick;
+					return &m_autonomy.state.nextSupplyBuildTick;
 				}
 				if (cmdString == "Game.BuildBarracksSmart")
 				{
-					return &m_autonomyState.nextBarracksBuildTick;
+					return &m_autonomy.state.nextBarracksBuildTick;
 				}
 				if (cmdString == "Game.BuildArmsDealerSmart")
 				{
-					return &m_autonomyState.nextArmsBuildTick;
+					return &m_autonomy.state.nextArmsBuildTick;
 				}
 				if (cmdString == "Game.BuildPalaceSmart")
 				{
-					return &m_autonomyState.nextPalaceBuildTick;
+					return &m_autonomy.state.nextPalaceBuildTick;
 				}
 				if (cmdString == "Game.BuildBlackMarketSmart")
 				{
-					return &m_autonomyState.nextMarketBuildTick;
+					return &m_autonomy.state.nextMarketBuildTick;
 				}
 				if (cmdString == "Game.BuildTunnelNetwork")
 				{
-					return &m_autonomyState.nextTunnelBuildTick;
+					return &m_autonomy.state.nextTunnelBuildTick;
 				}
 				if (cmdString == "Game.BuildStingerSite")
 				{
-					return &m_autonomyState.nextStingerBuildTick;
+					return &m_autonomy.state.nextStingerBuildTick;
 				}
 				return nullptr;
 			};
@@ -1325,14 +1431,14 @@ namespace
 				*nextAllowedTick = now + delayMs;
 			};
 
-			if (AIControlAdapterHasTickElapsed(m_autonomyState.nextMacroTick, now))
+			if (AIControlAdapterHasTickElapsed(m_autonomy.state.nextMacroTick, now))
 			{
 				std::string reason;
 				bool issued = false;
-				const std::string profile = normalizeAsciiLower(m_autonomyState.profile);
+				const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
 				const bool isBalancedSprawl = (profile == "sprawl_balanced");
 				const bool isSprawlStyle = (profile == "sprawl" || isBalancedSprawl);
-				const Real sprawlMultiplier = std::max<Real>(0.5f, std::min<Real>(10.0f, m_autonomyState.sprawlMultiplier));
+				const Real sprawlMultiplier = std::max<Real>(0.5f, std::min<Real>(10.0f, m_autonomy.state.sprawlMultiplier));
 				const Int sprawlSupplyCap = std::max<Int>(1, static_cast<Int>(std::floor((isBalancedSprawl ? 3.0f : 4.0f) * sprawlMultiplier)));
 				const Int sprawlBarracksCap = std::max<Int>(1, static_cast<Int>(std::floor((isBalancedSprawl ? 1.5f : 2.0f) * sprawlMultiplier)));
 				const Int sprawlArmsCap = std::max<Int>(1, static_cast<Int>(std::floor((isBalancedSprawl ? 2.0f : 3.0f) * sprawlMultiplier)));
@@ -1385,6 +1491,25 @@ namespace
 					isBalancedSprawl
 					&& money < reserveCash
 					&& totalSupplyStashes > 0;
+				Int stashZoneCount = 0;
+				Int developedZoneCount = 0;
+				for (std::size_t zoneIdx = 0; zoneIdx < zoneCounts.size(); ++zoneIdx)
+				{
+					const Int zoneSupply = zoneCounts[zoneIdx].supplyStashes + zoneCounts[zoneIdx].supplyStashesInProgress;
+					const Int zoneBarracks = zoneCounts[zoneIdx].barracks + zoneCounts[zoneIdx].barracksInProgress;
+					const Int zoneArms = zoneCounts[zoneIdx].armsDealers + zoneCounts[zoneIdx].armsDealersInProgress;
+					const Int zoneTunnels = zoneCounts[zoneIdx].tunnels + zoneCounts[zoneIdx].tunnelsInProgress;
+					const Int zoneStingers = zoneCounts[zoneIdx].stingers + zoneCounts[zoneIdx].stingersInProgress;
+					if (zoneSupply > 0)
+					{
+						++stashZoneCount;
+					}
+					if (zoneSupply > 0 && (zoneBarracks + zoneArms + zoneTunnels + zoneStingers) >= 3)
+					{
+						++developedZoneCount;
+					}
+				}
+				const Int desiredZoneCount = std::max<Int>(1, sprawlSupplyCap);
 				const char* requiredOpeningBuild = AIControlAdapterGetRequiredOpeningBuild({
 					counts.supplyStashes,
 					counts.barracks,
@@ -1462,7 +1587,7 @@ namespace
 						}
 					}
 				}
-				else if (totalSupplyStashes < 2 && (profile == "economic" || isSprawlStyle || m_autonomyState.expansionBias >= 0.70f))
+				else if (totalSupplyStashes < 2 && (profile == "economic" || isSprawlStyle || m_autonomy.state.expansionBias >= 0.70f))
 				{
 					if (totalSupplyStashes < 2
 						&& counts.supplyStashesInProgress < 1
@@ -1572,6 +1697,17 @@ namespace
 					recordBuildAttempt("Game.BuildStingerSite", issued, reason);
 				}
 				else if (isSprawlStyle
+					&& !remoteZoneNeedsFollowup
+					&& stashZoneCount < desiredZoneCount
+					&& counts.supplyStashesInProgress < 1
+					&& isBuildAttemptReady("Game.BuildSupplyStashSmart", counts.supplyStashesInProgress)
+					&& money >= (isBalancedSprawl ? (reserveCash + 1800u) : 1800u))
+				{
+					chosenCommand = "Game.BuildSupplyStashSmart";
+					issued = tryMacroBuildWithFallback("Game.BuildSupplyStashSmart", false, reason);
+					recordBuildAttempt("Game.BuildSupplyStashSmart", issued, reason);
+				}
+				else if (isSprawlStyle
 					&& totalBlackMarkets < 1
 					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", counts.blackMarketsInProgress)
 					&& canAttemptBlackMarketNow)
@@ -1666,10 +1802,37 @@ namespace
 					issued = tryMacroBuildWithFallback("Game.BuildSupplyStashSmart", false, reason);
 					recordBuildAttempt("Game.BuildSupplyStashSmart", issued, reason);
 				}
+				if (!issued && reason.empty())
+				{
+					if (shouldPreserveReserve)
+					{
+						reason = "macro_hold_reserve";
+					}
+					else if (shouldForceEcoRecovery)
+					{
+						reason = "macro_wait_eco_recovery";
+					}
+					else if (totalBlackMarkets < sprawlDesiredMarketCount && !canAttemptBlackMarketNow)
+					{
+						reason = "macro_wait_market_cash";
+					}
+					else if (remoteZoneNeedsFollowup)
+					{
+						reason = "macro_wait_zone_followup";
+					}
+					else if (stashZoneCount < desiredZoneCount)
+					{
+						reason = "macro_wait_zone_expansion";
+					}
+					else
+					{
+						reason = "macro_no_priority";
+					}
+				}
 
-				m_autonomyState.lastDecisionCategory = "macro";
-				m_autonomyState.lastDecisionCommand = chosenCommand;
-				m_autonomyState.lastDecisionReason = issued ? "ok" : reason;
+				m_autonomy.state.lastDecisionCategory = "macro";
+				m_autonomy.state.lastDecisionCommand = chosenCommand;
+				m_autonomy.state.lastDecisionReason = issued ? "ok" : reason;
 				if (!chosenCommand.empty())
 				{
 					recordAutonomyTelemetryEvent(
@@ -1681,7 +1844,7 @@ namespace
 				adapterLog(
 					"autonomy_tick category=macro profile=%s money=%lu selected_zone=%lu zone_main=%d zone_center=(%.1f,%.1f) "
 					"global[supply=%d barracks=%d arms=%d palace=%d markets=%d tunnels=%d stingers=%d workers=%d radar=%d soldiers=%d rpg=%d quads=%d scorpions=%d scuds=%d] "
-					"zone[supply=%d barracks=%d arms=%d markets=%d tunnels=%d stingers=%d] action=%s issued=%d reason=%s",
+					"zones[current=%d developed=%d desired=%d] zone[supply=%d barracks=%d arms=%d markets=%d tunnels=%d stingers=%d] action=%s issued=%d reason=%s",
 					profile.c_str(),
 					static_cast<unsigned long>(money),
 					hasActiveZone ? static_cast<unsigned long>(activeZone.anchorId) : 0ul,
@@ -1702,6 +1865,9 @@ namespace
 					counts.quads,
 					counts.scorpions,
 					counts.scudLaunchers,
+					stashZoneCount,
+					developedZoneCount,
+					desiredZoneCount,
 					activeZoneCounts.supplyStashes,
 					activeZoneCounts.barracks,
 					activeZoneCounts.armsDealers,
@@ -1714,24 +1880,24 @@ namespace
 
 				if (isSprawlStyle && hasActiveZone && !zones.empty())
 				{
-					m_autonomyState.nextZoneIndex = (m_autonomyState.nextZoneIndex + 1u) % zones.size();
+					m_autonomy.state.nextZoneIndex = (m_autonomy.state.nextZoneIndex + 1u) % zones.size();
 				}
-				m_autonomyState.nextMacroTick = now + (issued ? 3000u : 2000u);
+				m_autonomy.state.nextMacroTick = now + (issued ? 3000u : 2000u);
 			}
 
-			if (AIControlAdapterHasTickElapsed(m_autonomyState.nextProductionTick, now))
+			if (AIControlAdapterHasTickElapsed(m_autonomy.state.nextProductionTick, now))
 			{
 				std::string reason;
 				bool issued = false;
-				const std::string profile = normalizeAsciiLower(m_autonomyState.profile);
+				const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
 				const bool isBalancedSprawl = (profile == "sprawl_balanced");
 				const Int armyCap = isBalancedSprawl ? 100 : 9999;
-				const Int combatCount = counts.soldiers + counts.rpg + counts.quads + counts.scorpions + counts.scudLaunchers;
+				const Int armyCount = std::max<Int>(0, counts.mobileUnits - counts.workers);
 				const UnsignedInt reserveCash = isBalancedSprawl ? 10000u : 0u;
 				const bool openingInfrastructureReady = totalSupplyStashes >= 1 && totalBarracks >= 1 && totalArmsDealers >= 1;
 				const bool openingEconomyReady = totalSupplyStashes >= 2 || totalBlackMarkets >= 1;
 				const bool wasRecoveringFromReserve =
-					(m_autonomyState.lastDecisionCategory == "production" && m_autonomyState.lastDecisionReason == "reserve_cash_recovery");
+					(m_autonomy.state.lastDecisionCategory == "production" && m_autonomy.state.lastDecisionReason == "reserve_cash_recovery");
 				const bool shouldPauseCombatProduction = AIControlAdapterShouldPauseCombatProduction({
 					isBalancedSprawl,
 					openingInfrastructureReady,
@@ -1743,15 +1909,15 @@ namespace
 					counts.supplyStashesInProgress
 				});
 				const bool wasArmyCapReached =
-					(m_autonomyState.lastDecisionCategory == "production" && m_autonomyState.lastDecisionReason == "army_cap_reached");
+					(m_autonomy.state.lastDecisionCategory == "production" && m_autonomy.state.lastDecisionReason == "army_cap_reached");
 				const bool shouldHoldArmyCap = AIControlAdapterShouldHoldArmyCap({
 					shouldPauseCombatProduction,
 					isBalancedSprawl,
 					wasArmyCapReached,
-					combatCount,
+					armyCount,
 					armyCap
 				});
-				const Real zoneRadiusSq = std::max<Real>(160.0f, m_autonomyState.zoneRadius) * std::max<Real>(160.0f, m_autonomyState.zoneRadius);
+				const Real zoneRadiusSq = std::max<Real>(160.0f, m_autonomy.state.zoneRadius) * std::max<Real>(160.0f, m_autonomy.state.zoneRadius);
 				std::string chosenCommand = "none";
 
 				auto queueAtPreferredZoneProducer = [&](bool wantBarracks, const std::string& unitTemplateName, const char* cmdName, std::string& outReason) -> bool
@@ -1822,9 +1988,9 @@ namespace
 							{"unit_template", unitTemplateName}
 						})}
 					};
-					if (m_autonomyState.hasExplicitPlayerIndex)
+					if (m_autonomy.state.hasExplicitPlayerIndex)
 					{
-						queuedMessage["args"]["player_index"] = m_autonomyState.playerIndex;
+						queuedMessage["args"]["player_index"] = m_autonomy.state.playerIndex;
 					}
 
 					for (Object* producer : candidates)
@@ -1990,7 +2156,10 @@ namespace
 					counts.rpg,
 					counts.quads,
 					counts.scorpions,
-					counts.scudLaunchers
+					counts.scudLaunchers,
+					counts.radarVans,
+					armyCount,
+					armyCap
 				});
 
 				if (shouldPauseCombatProduction)
@@ -2012,20 +2181,20 @@ namespace
 						tryChosenProduction("Game.QueueQuadsAllWarFactories");
 					}
 				}
-				m_autonomyState.lastDecisionCategory = "production";
-				m_autonomyState.lastDecisionCommand = chosenCommand;
-				m_autonomyState.lastDecisionReason = issued ? "ok" : reason;
+				m_autonomy.state.lastDecisionCategory = "production";
+				m_autonomy.state.lastDecisionCommand = chosenCommand;
+				m_autonomy.state.lastDecisionReason = issued ? "ok" : reason;
 				if (!chosenCommand.empty())
 				{
 					Coord3D zoneCenter = {};
-					zoneCenter.x = m_autonomyState.lastZoneCenterX;
-					zoneCenter.y = m_autonomyState.lastZoneCenterY;
+					zoneCenter.x = m_autonomy.state.lastZoneCenterX;
+					zoneCenter.y = m_autonomy.state.lastZoneCenterY;
 					zoneCenter.z = 0.0f;
 					recordAutonomyTelemetryEvent(
 						"production",
 						chosenCommand,
 						issued ? "ok" : reason,
-						m_autonomyState.hasLastZone ? &zoneCenter : nullptr);
+						m_autonomy.state.hasLastZone ? &zoneCenter : nullptr);
 				}
 				adapterLog(
 					"autonomy_tick category=production profile=%s money=%lu action=%s issued=%d reason=%s units[soldiers=%d rpg=%d quads=%d scorpions=%d scuds=%d radar=%d]",
@@ -2040,12 +2209,12 @@ namespace
 					counts.scorpions,
 					counts.scudLaunchers,
 					counts.radarVans);
-				m_autonomyState.nextProductionTick = now + (issued ? 2200u : 1500u);
+				m_autonomy.state.nextProductionTick = now + AIControlAdapterGetProductionRetryDelayMs(issued, reason.c_str());
 			}
 
-			if (AIControlAdapterHasTickElapsed(m_autonomyState.nextTechTick, now))
+			if (AIControlAdapterHasTickElapsed(m_autonomy.state.nextTechTick, now))
 			{
-				const std::string profile = normalizeAsciiLower(m_autonomyState.profile);
+				const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
 				if (profile == "sprawl" || profile == "sprawl_balanced" || profile == "tech")
 				{
 					bool issued = false;
@@ -2072,18 +2241,18 @@ namespace
 							if (tryCommand("auto_tech", "Game.PurchaseScience", args, reason))
 							{
 								issued = true;
-								m_autonomyState.lastDecisionCategory = "tech";
-								m_autonomyState.lastDecisionCommand = "Game.PurchaseScience";
-								m_autonomyState.lastDecisionReason = std::string("ok:") + scienceName;
+								m_autonomy.state.lastDecisionCategory = "tech";
+								m_autonomy.state.lastDecisionCommand = "Game.PurchaseScience";
+								m_autonomy.state.lastDecisionReason = std::string("ok:") + scienceName;
 								Coord3D zoneCenter = {};
-								zoneCenter.x = m_autonomyState.lastZoneCenterX;
-								zoneCenter.y = m_autonomyState.lastZoneCenterY;
+								zoneCenter.x = m_autonomy.state.lastZoneCenterX;
+								zoneCenter.y = m_autonomy.state.lastZoneCenterY;
 								zoneCenter.z = 0.0f;
 								recordAutonomyTelemetryEvent(
 									"tech",
 									"Game.PurchaseScience",
-									m_autonomyState.lastDecisionReason,
-									m_autonomyState.hasLastZone ? &zoneCenter : nullptr);
+									m_autonomy.state.lastDecisionReason,
+									m_autonomy.state.hasLastZone ? &zoneCenter : nullptr);
 								break;
 							}
 							if (AIControlAdapterShouldAbortSciencePlanForTick(reason.c_str()))
@@ -2117,18 +2286,18 @@ namespace
 							if (tryCommand("auto_tech", "Game.QueueUpgrade", args, reason))
 							{
 								issued = true;
-								m_autonomyState.lastDecisionCategory = "tech";
-								m_autonomyState.lastDecisionCommand = "Game.QueueUpgrade";
-								m_autonomyState.lastDecisionReason = std::string("ok:") + kAutonomyUpgradePlan[i].upgradeName;
+								m_autonomy.state.lastDecisionCategory = "tech";
+								m_autonomy.state.lastDecisionCommand = "Game.QueueUpgrade";
+								m_autonomy.state.lastDecisionReason = std::string("ok:") + kAutonomyUpgradePlan[i].upgradeName;
 								Coord3D zoneCenter = {};
-								zoneCenter.x = m_autonomyState.lastZoneCenterX;
-								zoneCenter.y = m_autonomyState.lastZoneCenterY;
+								zoneCenter.x = m_autonomy.state.lastZoneCenterX;
+								zoneCenter.y = m_autonomy.state.lastZoneCenterY;
 								zoneCenter.z = 0.0f;
 								recordAutonomyTelemetryEvent(
 									"tech",
 									"Game.QueueUpgrade",
-									m_autonomyState.lastDecisionReason,
-									m_autonomyState.hasLastZone ? &zoneCenter : nullptr);
+									m_autonomy.state.lastDecisionReason,
+									m_autonomy.state.hasLastZone ? &zoneCenter : nullptr);
 								break;
 							}
 							if (AIControlAdapterShouldAbortUpgradePlanForTick(reason.c_str()))
@@ -2140,33 +2309,33 @@ namespace
 
 					if (!issued)
 					{
-						m_autonomyState.lastDecisionCategory = "tech";
-						m_autonomyState.lastDecisionCommand = "none";
-						m_autonomyState.lastDecisionReason = reason.empty() ? "tech_prereq_missing" : reason;
+						m_autonomy.state.lastDecisionCategory = "tech";
+						m_autonomy.state.lastDecisionCommand = "none";
+						m_autonomy.state.lastDecisionReason = reason.empty() ? "tech_prereq_missing" : reason;
 					}
 
-					m_autonomyState.nextTechTick = now + AIControlAdapterGetTechRetryDelayMs(issued, m_autonomyState.lastDecisionReason.c_str());
+					m_autonomy.state.nextTechTick = now + AIControlAdapterGetTechRetryDelayMs(issued, m_autonomy.state.lastDecisionReason.c_str());
 				}
 				else
 				{
-					m_autonomyState.nextTechTick = now + 5000u;
+					m_autonomy.state.nextTechTick = now + 5000u;
 				}
 			}
 
-			if (AIControlAdapterHasTickElapsed(m_autonomyState.nextGuardTick, now))
+			if (AIControlAdapterHasTickElapsed(m_autonomy.state.nextGuardTick, now))
 			{
-				const std::string profile = normalizeAsciiLower(m_autonomyState.profile);
+				const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
 				const Int combatCount = counts.soldiers + counts.rpg + counts.quads + counts.scorpions;
 				const DWORD cadenceMs = (profile == "aggressive") ? 5000u : (((profile == "sprawl" || profile == "sprawl_balanced" || profile == "defensive")) ? 7000u : 6000u);
 				if (combatCount > 0)
 				{
 					std::string reason;
 					const bool guarded = tryCommand("auto_guard", "Game.GuardAllIdleGroundCombat", nlohmann::json::object(), reason);
-					m_autonomyState.nextGuardTick = now + (guarded ? cadenceMs : 4000u);
+					m_autonomy.state.nextGuardTick = now + (guarded ? cadenceMs : 4000u);
 				}
 				else
 				{
-					m_autonomyState.nextGuardTick = now + 3000u;
+					m_autonomy.state.nextGuardTick = now + 3000u;
 				}
 			}
 		}
@@ -2219,7 +2388,7 @@ namespace
 					reason = "invalid_profile";
 					return false;
 				}
-				m_autonomyState.profile = profile;
+				m_autonomy.state.profile = profile;
 			}
 
 			auto parseBias = [&](const char* key, Real& target) -> bool
@@ -2237,10 +2406,10 @@ namespace
 				target = clampUnitFloat(it->get<Real>(), 0.0f, 1.0f);
 				return true;
 			};
-			if (!parseBias("economy_bias", m_autonomyState.economyBias)
-				|| !parseBias("aggression_bias", m_autonomyState.aggressionBias)
-				|| !parseBias("defense_bias", m_autonomyState.defenseBias)
-				|| !parseBias("expansion_bias", m_autonomyState.expansionBias))
+			if (!parseBias("economy_bias", m_autonomy.state.economyBias)
+				|| !parseBias("aggression_bias", m_autonomy.state.aggressionBias)
+				|| !parseBias("defense_bias", m_autonomy.state.defenseBias)
+				|| !parseBias("expansion_bias", m_autonomy.state.expansionBias))
 			{
 				return false;
 			}
@@ -2253,7 +2422,7 @@ namespace
 					reason = "invalid_sprawl_multiplier";
 					return false;
 				}
-				m_autonomyState.sprawlMultiplier = std::max<Real>(0.5f, std::min<Real>(10.0f, sprawlMultiplierIt->get<Real>()));
+				m_autonomy.state.sprawlMultiplier = std::max<Real>(0.5f, std::min<Real>(10.0f, sprawlMultiplierIt->get<Real>()));
 			}
 
 			const auto zoneRadiusIt = argsIt->find("zone_radius");
@@ -2264,7 +2433,7 @@ namespace
 					reason = "invalid_zone_radius";
 					return false;
 				}
-				m_autonomyState.zoneRadius = std::max<Real>(120.0f, std::min<Real>(4000.0f, zoneRadiusIt->get<Real>()));
+				m_autonomy.state.zoneRadius = std::max<Real>(120.0f, std::min<Real>(4000.0f, zoneRadiusIt->get<Real>()));
 			}
 
 			const auto captureIt = argsIt->find("capture_tech");
@@ -2275,7 +2444,19 @@ namespace
 					reason = "invalid_capture_tech";
 					return false;
 				}
-				m_autonomyState.captureTech = captureIt->get<bool>();
+				m_autonomy.state.captureTech = captureIt->get<bool>();
+			}
+
+			const auto attackEnabledIt = argsIt->find("attack_enabled");
+			if (attackEnabledIt != argsIt->end())
+			{
+				if (!attackEnabledIt->is_boolean())
+				{
+					reason = "invalid_attack_enabled";
+					return false;
+				}
+				m_autonomy.state.hasAttackAutomationEnabledOverride = true;
+				m_autonomy.state.attackAutomationEnabled = attackEnabledIt->get<bool>();
 			}
 
 			const auto superIt = argsIt->find("allow_superweapons");
@@ -2286,7 +2467,7 @@ namespace
 					reason = "invalid_allow_superweapons";
 					return false;
 				}
-				m_autonomyState.allowSuperweapons = superIt->get<bool>();
+				m_autonomy.state.allowSuperweapons = superIt->get<bool>();
 			}
 
 			const auto playerIndexIt = argsIt->find("player_index");
@@ -2297,8 +2478,8 @@ namespace
 					reason = "invalid_player_index";
 					return false;
 				}
-				m_autonomyState.hasExplicitPlayerIndex = true;
-				m_autonomyState.playerIndex = playerIndexIt->get<Int>();
+				m_autonomy.state.hasExplicitPlayerIndex = true;
+				m_autonomy.state.playerIndex = playerIndexIt->get<Int>();
 			}
 
 			const auto targetPlayerIt = argsIt->find("target_player_index");
@@ -2309,8 +2490,8 @@ namespace
 					reason = "invalid_target_player_index";
 					return false;
 				}
-				m_autonomyState.hasExplicitTargetPlayerIndex = true;
-				m_autonomyState.targetPlayerIndex = targetPlayerIt->get<Int>();
+				m_autonomy.state.hasExplicitTargetPlayerIndex = true;
+				m_autonomy.state.targetPlayerIndex = targetPlayerIt->get<Int>();
 			}
 
 			if (isAutonomyModeActive())
@@ -2336,8 +2517,8 @@ namespace
 				return false;
 			}
 
-			m_autonomyState.mode = mode;
-			m_autonomyState.paused = false;
+			m_autonomy.state.mode = mode;
+			m_autonomy.state.paused = false;
 			applyAutonomyRules();
 			kickAutonomyEvaluation();
 			return true;
@@ -2345,13 +2526,13 @@ namespace
 
 		void pauseAutonomy()
 		{
-			m_autonomyState.paused = true;
+			m_autonomy.state.paused = true;
 			applyAutonomyRules();
 		}
 
 		void resumeAutonomy()
 		{
-			m_autonomyState.paused = false;
+			m_autonomy.state.paused = false;
 			applyAutonomyRules();
 			kickAutonomyEvaluation();
 		}
@@ -2366,26 +2547,27 @@ namespace
 		nlohmann::json buildAutonomyStatus()
 		{
 			nlohmann::json result = nlohmann::json::object();
-			result["mode"] = m_autonomyState.mode;
-			result["profile"] = m_autonomyState.profile;
-			result["paused"] = m_autonomyState.paused;
+			result["mode"] = m_autonomy.state.mode;
+			result["profile"] = m_autonomy.state.profile;
+			result["paused"] = m_autonomy.state.paused;
 			result["active"] = isAutonomyModeActive();
-			result["capture_tech"] = m_autonomyState.captureTech;
-			result["allow_superweapons"] = m_autonomyState.allowSuperweapons;
-			result["economy_bias"] = m_autonomyState.economyBias;
-			result["aggression_bias"] = m_autonomyState.aggressionBias;
-			result["defense_bias"] = m_autonomyState.defenseBias;
-			result["expansion_bias"] = m_autonomyState.expansionBias;
-			result["sprawl_multiplier"] = m_autonomyState.sprawlMultiplier;
-			result["zone_radius"] = m_autonomyState.zoneRadius;
-			result["target_player_index"] = m_autonomyState.hasExplicitTargetPlayerIndex ? m_autonomyState.targetPlayerIndex : -1;
-			result["last_applied_tick"] = static_cast<UnsignedInt>(m_autonomyState.lastAppliedTick);
+			result["capture_tech"] = m_autonomy.state.captureTech;
+			result["allow_superweapons"] = m_autonomy.state.allowSuperweapons;
+			result["attack_enabled"] = m_automation.attackRule.enabled;
+			result["economy_bias"] = m_autonomy.state.economyBias;
+			result["aggression_bias"] = m_autonomy.state.aggressionBias;
+			result["defense_bias"] = m_autonomy.state.defenseBias;
+			result["expansion_bias"] = m_autonomy.state.expansionBias;
+			result["sprawl_multiplier"] = m_autonomy.state.sprawlMultiplier;
+			result["zone_radius"] = m_autonomy.state.zoneRadius;
+			result["target_player_index"] = m_autonomy.state.hasExplicitTargetPlayerIndex ? m_autonomy.state.targetPlayerIndex : -1;
+			result["last_applied_tick"] = static_cast<UnsignedInt>(m_autonomy.state.lastAppliedTick);
 			result["selected_zone"] = nlohmann::json::object({
-				{"active", m_autonomyState.hasLastZone},
-				{"anchor_id", m_autonomyState.hasLastZone ? m_autonomyState.lastZoneAnchorId : 0u},
-				{"is_main_base", m_autonomyState.hasLastZone ? m_autonomyState.lastZoneIsMainBase : false},
-				{"center_x", m_autonomyState.hasLastZone ? m_autonomyState.lastZoneCenterX : 0.0f},
-				{"center_y", m_autonomyState.hasLastZone ? m_autonomyState.lastZoneCenterY : 0.0f}
+				{"active", m_autonomy.state.hasLastZone},
+				{"anchor_id", m_autonomy.state.hasLastZone ? m_autonomy.state.lastZoneAnchorId : 0u},
+				{"is_main_base", m_autonomy.state.hasLastZone ? m_autonomy.state.lastZoneIsMainBase : false},
+				{"center_x", m_autonomy.state.hasLastZone ? m_autonomy.state.lastZoneCenterX : 0.0f},
+				{"center_y", m_autonomy.state.hasLastZone ? m_autonomy.state.lastZoneCenterY : 0.0f}
 			});
 
 			Player* player = resolveAutonomyPlayer();
@@ -2488,36 +2670,36 @@ namespace
 
 			result["rules"] = nlohmann::json::object({
 				{"worker", nlohmann::json::object({
-					{"enabled", m_workerAutomationRule.enabled},
-					{"min_idle_workers", m_workerAutomationRule.minIdleWorkers},
-					{"queue_count", m_workerAutomationRule.queueCount},
-					{"producer_kind", m_workerAutomationRule.hasExplicitProducerKind ? m_workerAutomationRule.producerKind : "default"}
+					{"enabled", m_automation.workerRule.enabled},
+					{"min_idle_workers", m_automation.workerRule.minIdleWorkers},
+					{"queue_count", m_automation.workerRule.queueCount},
+					{"producer_kind", m_automation.workerRule.hasExplicitProducerKind ? m_automation.workerRule.producerKind : "default"}
 				})},
 				{"stash_worker", nlohmann::json::object({
-					{"enabled", m_stashWorkerAutomationRule.enabled},
-					{"target_workers_per_stash", m_stashWorkerAutomationRule.targetWorkersPerStash}
+					{"enabled", m_automation.stashWorkerRule.enabled},
+					{"target_workers_per_stash", m_automation.stashWorkerRule.targetWorkersPerStash}
 				})},
 				{"attack", nlohmann::json::object({
-					{"enabled", m_attackAutomationRule.enabled},
-					{"min_units", m_attackAutomationRule.minUnits},
-					{"group_size", m_attackAutomationRule.groupSize},
-					{"distance", m_attackAutomationRule.distance}
+					{"enabled", m_automation.attackRule.enabled},
+					{"min_units", m_automation.attackRule.minUnits},
+					{"group_size", m_automation.attackRule.groupSize},
+					{"distance", m_automation.attackRule.distance}
 				})},
 				{"capture", nlohmann::json::object({
-					{"enabled", m_captureAutomationRule.enabled},
-					{"max_concurrent", m_captureAutomationRule.maxConcurrent},
-					{"prefer_idle", m_captureAutomationRule.preferIdle}
+					{"enabled", m_automation.captureRule.enabled},
+					{"max_concurrent", m_automation.captureRule.maxConcurrent},
+					{"prefer_idle", m_automation.captureRule.preferIdle}
 				})},
 				{"radar_van", nlohmann::json::object({
-					{"enabled", m_radarVanAutomationRule.enabled},
-					{"min_count", m_radarVanAutomationRule.minCount}
+					{"enabled", m_automation.radarVanRule.enabled},
+					{"min_count", m_automation.radarVanRule.minCount}
 				})}
 			});
 
 			result["last_decision"] = nlohmann::json::object({
-				{"category", m_autonomyState.lastDecisionCategory},
-				{"command", m_autonomyState.lastDecisionCommand},
-				{"reason", m_autonomyState.lastDecisionReason}
+				{"category", m_autonomy.state.lastDecisionCategory},
+				{"command", m_autonomy.state.lastDecisionCommand},
+				{"reason", m_autonomy.state.lastDecisionReason}
 			});
 
 			return result;
@@ -2527,12 +2709,94 @@ namespace
 		{
 			nlohmann::json result = buildAutonomyStatus();
 			result["telemetry_tick"] = static_cast<UnsignedInt>(::GetTickCount());
-			result["zones"] = m_autonomyState.telemetryZones.is_array() ? m_autonomyState.telemetryZones : nlohmann::json::array();
-			result["recent_events"] = m_autonomyState.telemetryEvents.is_array() ? m_autonomyState.telemetryEvents : nlohmann::json::array();
+			result["zones"] = m_autonomy.state.telemetryZones.is_array() ? m_autonomy.state.telemetryZones : nlohmann::json::array();
+			result["recent_events"] = m_autonomy.state.telemetryEvents.is_array() ? m_autonomy.state.telemetryEvents : nlohmann::json::array();
+			if (m_autonomy.state.telemetryZones.is_array())
+			{
+				Int currentZoneCount = 0;
+				Int developedZoneCount = 0;
+				for (const auto& zone : m_autonomy.state.telemetryZones)
+				{
+					if (!zone.is_object())
+					{
+						continue;
+					}
+					const Int supplyStashes = zone.value("supply_stashes", 0);
+					if (supplyStashes > 0)
+					{
+						++currentZoneCount;
+					}
+					if (zone.value("developed", false))
+					{
+						++developedZoneCount;
+					}
+				}
+				result["current_zone_count"] = currentZoneCount;
+				result["developed_zone_count"] = developedZoneCount;
+			}
+			const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
+			if (profile == "sprawl" || profile == "sprawl_balanced")
+			{
+				const bool isBalancedSprawl = (profile == "sprawl_balanced");
+				const Real sprawlMultiplier = std::max<Real>(0.5f, std::min<Real>(10.0f, m_autonomy.state.sprawlMultiplier));
+				result["desired_zone_count"] = std::max<Int>(
+					1,
+					static_cast<Int>(std::floor((isBalancedSprawl ? 3.0f : 4.0f) * sprawlMultiplier)));
+			}
+			if (m_autonomy.state.telemetryZones.is_array() && !m_autonomy.state.telemetryZones.empty())
+			{
+				for (const auto& zone : m_autonomy.state.telemetryZones)
+				{
+					if (!zone.is_object() || !zone.value("is_main_base", false))
+					{
+						continue;
+					}
+					result["main_zone_anchor_id"] = zone.value("anchor_id", 0u);
+					break;
+				}
+			}
+			if (m_autonomy.state.telemetryZones.is_array() && m_autonomy.state.telemetryZones.size() >= 2u)
+			{
+				const auto* mainZone = static_cast<const nlohmann::json*>(nullptr);
+				const auto* furthestZone = static_cast<const nlohmann::json*>(nullptr);
+				Real furthestDistSq = -1.0f;
+				for (const auto& zone : m_autonomy.state.telemetryZones)
+				{
+					if (zone.is_object() && zone.value("is_main_base", false))
+					{
+						mainZone = &zone;
+						break;
+					}
+				}
+				if (mainZone != nullptr)
+				{
+					const Real mainX = mainZone->value("center_x", 0.0f);
+					const Real mainY = mainZone->value("center_y", 0.0f);
+					for (const auto& zone : m_autonomy.state.telemetryZones)
+					{
+						if (!zone.is_object() || zone.value("is_main_base", false))
+						{
+							continue;
+						}
+						const Real dx = zone.value("center_x", 0.0f) - mainX;
+						const Real dy = zone.value("center_y", 0.0f) - mainY;
+						const Real distSq = (dx * dx) + (dy * dy);
+						if (distSq > furthestDistSq)
+						{
+							furthestDistSq = distSq;
+							furthestZone = &zone;
+							result["sprawl_axis_dx"] = dx;
+							result["sprawl_axis_dy"] = dy;
+						}
+					}
+				}
+				if (furthestZone != nullptr)
+				{
+					result["furthest_zone_anchor_id"] = furthestZone->value("anchor_id", 0u);
+				}
+			}
 			return result;
 		}
-
-		#include "AIControlAdapterTransport.inl"
 
 		#include "AIControlAdapterProtocol.inl"
 
@@ -2625,8 +2889,8 @@ namespace
 			{
 				return false;
 			}
-			const auto it = m_captureAutomationRule.pendingSourcesUntilTick.find(sourceId);
-			if (it == m_captureAutomationRule.pendingSourcesUntilTick.end())
+			const auto it = m_automation.captureRule.pendingSourcesUntilTick.find(sourceId);
+			if (it == m_automation.captureRule.pendingSourcesUntilTick.end())
 			{
 				return false;
 			}
@@ -2718,27 +2982,27 @@ namespace
 
 		void pruneCaptureAutomationPendingTargets()
 		{
-			if (m_captureAutomationRule.pendingTargetsUntilTick.empty())
+			if (m_automation.captureRule.pendingTargetsUntilTick.empty())
 			{
 				// fall through and still prune pending sources
 			}
 			const DWORD now = ::GetTickCount();
-			for (auto it = m_captureAutomationRule.pendingTargetsUntilTick.begin(); it != m_captureAutomationRule.pendingTargetsUntilTick.end(); )
+			for (auto it = m_automation.captureRule.pendingTargetsUntilTick.begin(); it != m_automation.captureRule.pendingTargetsUntilTick.end(); )
 			{
 				if (AIControlAdapterHasTickElapsed(it->second, now))
 				{
-					it = m_captureAutomationRule.pendingTargetsUntilTick.erase(it);
+					it = m_automation.captureRule.pendingTargetsUntilTick.erase(it);
 				}
 				else
 				{
 					++it;
 				}
 			}
-			for (auto it = m_captureAutomationRule.pendingSourcesUntilTick.begin(); it != m_captureAutomationRule.pendingSourcesUntilTick.end(); )
+			for (auto it = m_automation.captureRule.pendingSourcesUntilTick.begin(); it != m_automation.captureRule.pendingSourcesUntilTick.end(); )
 			{
 				if (AIControlAdapterHasTickElapsed(it->second, now))
 				{
-					it = m_captureAutomationRule.pendingSourcesUntilTick.erase(it);
+					it = m_automation.captureRule.pendingSourcesUntilTick.erase(it);
 				}
 				else
 				{
@@ -2749,21 +3013,21 @@ namespace
 
 		void evaluateWorkerAutomationRule()
 		{
-			if (!m_workerAutomationRule.enabled)
+			if (!m_automation.workerRule.enabled)
 			{
 				return;
 			}
 
 			const DWORD now = ::GetTickCount();
-			if (AIControlAdapterIsTickInFuture(m_workerAutomationRule.nextAllowedTick, now))
+			if (AIControlAdapterIsTickInFuture(m_automation.workerRule.nextAllowedTick, now))
 			{
 				return;
 			}
 
 			Player* player = nullptr;
-			if (m_workerAutomationRule.hasExplicitPlayerIndex)
+			if (m_automation.workerRule.hasExplicitPlayerIndex)
 			{
-				player = getPlayerByIndex(m_workerAutomationRule.playerIndex);
+				player = getPlayerByIndex(m_automation.workerRule.playerIndex);
 			}
 			else if (ThePlayerList != nullptr)
 			{
@@ -2772,27 +3036,27 @@ namespace
 
 			if (player == nullptr)
 			{
-				m_workerAutomationRule.nextAllowedTick = now + m_workerAutomationRule.cooldownMs;
+				m_automation.workerRule.nextAllowedTick = now + m_automation.workerRule.cooldownMs;
 				adapterLog("automation_worker_rule_skip reason=player_not_found");
 				return;
 			}
 
 			refreshOwnedObjectCache(player);
-			const Int idleWorkers = m_ownedCacheIdleWorkersTotal;
-			if (idleWorkers >= m_workerAutomationRule.minIdleWorkers)
+			const Int idleWorkers = m_cache.idleWorkersTotal;
+			if (idleWorkers >= m_automation.workerRule.minIdleWorkers)
 			{
 				return;
 			}
 
 			nlohmann::json args = nlohmann::json::object();
-			args["count"] = m_workerAutomationRule.queueCount;
-			if (m_workerAutomationRule.hasExplicitProducerKind && !m_workerAutomationRule.producerKind.empty())
+			args["count"] = m_automation.workerRule.queueCount;
+			if (m_automation.workerRule.hasExplicitProducerKind && !m_automation.workerRule.producerKind.empty())
 			{
-				args["producer_kind"] = m_workerAutomationRule.producerKind;
+				args["producer_kind"] = m_automation.workerRule.producerKind;
 			}
-			if (m_workerAutomationRule.hasExplicitPlayerIndex)
+			if (m_automation.workerRule.hasExplicitPlayerIndex)
 			{
-				args["player_index"] = m_workerAutomationRule.playerIndex;
+				args["player_index"] = m_automation.workerRule.playerIndex;
 			}
 
 			char requestIdBuffer[64];
@@ -2811,41 +3075,41 @@ namespace
 
 			std::string reason;
 			const bool ok = executeGameBuildWorker(message, reason);
-			m_workerAutomationRule.nextAllowedTick = now + m_workerAutomationRule.cooldownMs;
+			m_automation.workerRule.nextAllowedTick = now + m_automation.workerRule.cooldownMs;
 			adapterLog(
 				"automation_worker_rule request_id=%s player=%d idle_workers=%d min_idle_workers=%d queue_count=%d producer_kind=%s ok=%d reason=%s",
 				requestIdBuffer,
 				player->getPlayerIndex(),
 				idleWorkers,
-				m_workerAutomationRule.minIdleWorkers,
-				m_workerAutomationRule.queueCount,
-				m_workerAutomationRule.hasExplicitProducerKind ? m_workerAutomationRule.producerKind.c_str() : "default",
+				m_automation.workerRule.minIdleWorkers,
+				m_automation.workerRule.queueCount,
+				m_automation.workerRule.hasExplicitProducerKind ? m_automation.workerRule.producerKind.c_str() : "default",
 				ok ? 1 : 0,
 				ok ? "" : reason.c_str());
 
 			if (ok)
 			{
-				m_ownedCacheValid = false;
+				m_cache.valid = false;
 			}
 		}
 
 		void evaluateStashWorkerAutomationRule()
 		{
-			if (!m_stashWorkerAutomationRule.enabled)
+			if (!m_automation.stashWorkerRule.enabled)
 			{
 				return;
 			}
 
 			const DWORD now = ::GetTickCount();
-			if (AIControlAdapterIsTickInFuture(m_stashWorkerAutomationRule.nextAllowedTick, now))
+			if (AIControlAdapterIsTickInFuture(m_automation.stashWorkerRule.nextAllowedTick, now))
 			{
 				return;
 			}
 
 			Player* player = nullptr;
-			if (m_stashWorkerAutomationRule.hasExplicitPlayerIndex)
+			if (m_automation.stashWorkerRule.hasExplicitPlayerIndex)
 			{
-				player = getPlayerByIndex(m_stashWorkerAutomationRule.playerIndex);
+				player = getPlayerByIndex(m_automation.stashWorkerRule.playerIndex);
 			}
 			else if (ThePlayerList != nullptr)
 			{
@@ -2853,7 +3117,7 @@ namespace
 			}
 			if (player == nullptr)
 			{
-				m_stashWorkerAutomationRule.nextAllowedTick = now + m_stashWorkerAutomationRule.cooldownMs;
+				m_automation.stashWorkerRule.nextAllowedTick = now + m_automation.stashWorkerRule.cooldownMs;
 				adapterLog("automation_stash_worker_rule_skip reason=player_not_found");
 				return;
 			}
@@ -2883,7 +3147,7 @@ namespace
 
 			if (stashes.empty())
 			{
-				m_stashWorkerAutomationRule.nextAllowedTick = now + m_stashWorkerAutomationRule.cooldownMs;
+				m_automation.stashWorkerRule.nextAllowedTick = now + m_automation.stashWorkerRule.cooldownMs;
 				adapterLog("automation_stash_worker_rule_skip player=%d reason=no_stashes", player->getPlayerIndex());
 				return;
 			}
@@ -2896,7 +3160,7 @@ namespace
 					continue;
 				}
 				const Int stashId = static_cast<Int>(stash->getID());
-				if (m_stashWorkerAutomationRule.servicedStashIds.find(stashId) != m_stashWorkerAutomationRule.servicedStashIds.end())
+				if (m_automation.stashWorkerRule.servicedStashIds.find(stashId) != m_automation.stashWorkerRule.servicedStashIds.end())
 				{
 					continue;
 				}
@@ -2917,13 +3181,13 @@ namespace
 				static_cast<unsigned int>(now));
 
 			nlohmann::json args = {
-				{"count", m_stashWorkerAutomationRule.targetWorkersPerStash},
+				{"count", m_automation.stashWorkerRule.targetWorkersPerStash},
 				{"producer_kind", "supply_stash"},
 				{"producer_object_id", static_cast<Int>(targetStash->getID())}
 			};
-			if (m_stashWorkerAutomationRule.hasExplicitPlayerIndex)
+			if (m_automation.stashWorkerRule.hasExplicitPlayerIndex)
 			{
-				args["player_index"] = m_stashWorkerAutomationRule.playerIndex;
+				args["player_index"] = m_automation.stashWorkerRule.playerIndex;
 			}
 
 			nlohmann::json message = {
@@ -2935,17 +3199,17 @@ namespace
 
 			std::string reason;
 			const bool ok = executeGameBuildWorker(message, reason);
-			m_stashWorkerAutomationRule.nextAllowedTick = now + m_stashWorkerAutomationRule.cooldownMs;
+			m_automation.stashWorkerRule.nextAllowedTick = now + m_automation.stashWorkerRule.cooldownMs;
 			if (ok)
 			{
-				m_stashWorkerAutomationRule.servicedStashIds.insert(static_cast<Int>(targetStash->getID()));
+				m_automation.stashWorkerRule.servicedStashIds.insert(static_cast<Int>(targetStash->getID()));
 			}
 			adapterLog(
 				"automation_stash_worker_rule request_id=%s player=%d stash_id=%d target_workers=%d serviced=%d ok=%d reason=%s",
 				requestIdBuffer,
 				player->getPlayerIndex(),
 				static_cast<Int>(targetStash->getID()),
-				m_stashWorkerAutomationRule.targetWorkersPerStash,
+				m_automation.stashWorkerRule.targetWorkersPerStash,
 				ok ? 1 : 0,
 				ok ? 1 : 0,
 				ok ? "" : reason.c_str());
@@ -2953,21 +3217,21 @@ namespace
 
 		void evaluateAttackAutomationRule()
 		{
-			if (!m_attackAutomationRule.enabled)
+			if (!m_automation.attackRule.enabled)
 			{
 				return;
 			}
 
 			const DWORD now = ::GetTickCount();
-			if (AIControlAdapterIsTickInFuture(m_attackAutomationRule.nextAllowedTick, now))
+			if (AIControlAdapterIsTickInFuture(m_automation.attackRule.nextAllowedTick, now))
 			{
 				return;
 			}
 
 			Player* player = nullptr;
-			if (m_attackAutomationRule.hasExplicitPlayerIndex)
+			if (m_automation.attackRule.hasExplicitPlayerIndex)
 			{
-				player = getPlayerByIndex(m_attackAutomationRule.playerIndex);
+				player = getPlayerByIndex(m_automation.attackRule.playerIndex);
 			}
 			else if (ThePlayerList != nullptr)
 			{
@@ -2976,7 +3240,7 @@ namespace
 
 			if (player == nullptr)
 			{
-				m_attackAutomationRule.nextAllowedTick = now + m_attackAutomationRule.cooldownMs;
+				m_automation.attackRule.nextAllowedTick = now + m_automation.attackRule.cooldownMs;
 				adapterLog("automation_attack_rule_skip reason=player_not_found");
 				return;
 			}
@@ -2984,19 +3248,19 @@ namespace
 			std::vector<Object*> combatUnits;
 			collectCombatUnitsForRaid(player, combatUnits);
 			const Int combatUnitCount = static_cast<Int>(combatUnits.size());
-			if (combatUnitCount < m_attackAutomationRule.minUnits)
+			if (combatUnitCount < m_automation.attackRule.minUnits)
 			{
 				return;
 			}
 
 			nlohmann::json args = nlohmann::json::object({
-				{"min_units", m_attackAutomationRule.minUnits},
-				{"group_size", m_attackAutomationRule.groupSize},
-				{"distance", m_attackAutomationRule.distance}
+				{"min_units", m_automation.attackRule.minUnits},
+				{"group_size", m_automation.attackRule.groupSize},
+				{"distance", m_automation.attackRule.distance}
 			});
-			if (m_attackAutomationRule.hasExplicitPlayerIndex)
+			if (m_automation.attackRule.hasExplicitPlayerIndex)
 			{
-				args["player_index"] = m_attackAutomationRule.playerIndex;
+				args["player_index"] = m_automation.attackRule.playerIndex;
 			}
 
 			char requestIdBuffer[64];
@@ -3015,36 +3279,36 @@ namespace
 
 			std::string reason;
 			const bool ok = executeGameAttackMoveRaidSmart(message, reason);
-			m_attackAutomationRule.nextAllowedTick = now + m_attackAutomationRule.cooldownMs;
+			m_automation.attackRule.nextAllowedTick = now + m_automation.attackRule.cooldownMs;
 			adapterLog(
 				"automation_attack_rule request_id=%s player=%d combat_units=%d min_units=%d group_size=%d distance=%.1f ok=%d reason=%s",
 				requestIdBuffer,
 				player->getPlayerIndex(),
 				combatUnitCount,
-				m_attackAutomationRule.minUnits,
-				m_attackAutomationRule.groupSize,
-				static_cast<double>(m_attackAutomationRule.distance),
+				m_automation.attackRule.minUnits,
+				m_automation.attackRule.groupSize,
+				static_cast<double>(m_automation.attackRule.distance),
 				ok ? 1 : 0,
 				ok ? "" : reason.c_str());
 		}
 
 		void evaluateRadarVanAutomationRule()
 		{
-			if (!m_radarVanAutomationRule.enabled)
+			if (!m_automation.radarVanRule.enabled)
 			{
 				return;
 			}
 
 			const DWORD now = ::GetTickCount();
-			if (AIControlAdapterIsTickInFuture(m_radarVanAutomationRule.nextAllowedTick, now))
+			if (AIControlAdapterIsTickInFuture(m_automation.radarVanRule.nextAllowedTick, now))
 			{
 				return;
 			}
 
 			Player* player = nullptr;
-			if (m_radarVanAutomationRule.hasExplicitPlayerIndex)
+			if (m_automation.radarVanRule.hasExplicitPlayerIndex)
 			{
-				player = getPlayerByIndex(m_radarVanAutomationRule.playerIndex);
+				player = getPlayerByIndex(m_automation.radarVanRule.playerIndex);
 			}
 			else if (ThePlayerList != nullptr)
 			{
@@ -3052,17 +3316,20 @@ namespace
 			}
 			if (player == nullptr)
 			{
-				m_radarVanAutomationRule.nextAllowedTick = now + m_radarVanAutomationRule.cooldownMs;
+				m_automation.radarVanRule.nextAllowedTick = now + m_automation.radarVanRule.cooldownMs;
 				adapterLog("automation_radar_van_rule_skip reason=player_not_found");
 				return;
 			}
 
 			struct RadarVanCountContext
 			{
+				Int supplyStashCount;
+				Int barracksCount;
+				Int blackMarketCount;
 				Int armsCount;
 				Int radarVanCount;
 				Int combatVehicleCount;
-			} counts = { 0, 0 };
+			} counts = { 0, 0, 0, 0, 0, 0 };
 			player->iterateObjects([](Object* obj, void* userData)
 			{
 				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
@@ -3076,6 +3343,18 @@ namespace
 				}
 				const ThingTemplate* tt = obj->getTemplate();
 				const std::string name = tt != nullptr ? tt->getName().str() : "";
+				if (containsIgnoreCase(name, "supplystash") || containsIgnoreCase(name, "supplycenter"))
+				{
+					++counts->supplyStashCount;
+				}
+				if (containsIgnoreCase(name, "barracks"))
+				{
+					++counts->barracksCount;
+				}
+				if (containsIgnoreCase(name, "black") && containsIgnoreCase(name, "market"))
+				{
+					++counts->blackMarketCount;
+				}
 				if (containsIgnoreCase(name, "armsdealer"))
 				{
 					++counts->armsCount;
@@ -3091,15 +3370,46 @@ namespace
 					++counts->combatVehicleCount;
 				}
 			}, &counts);
+			const Int supplyStashCount = counts.supplyStashCount;
+			const Int barracksCount = counts.barracksCount;
+			const Int blackMarketCount = counts.blackMarketCount;
 			const Int armsCount = counts.armsCount;
 			const Int radarVanCount = counts.radarVanCount;
 			const Int combatVehicleCount = counts.combatVehicleCount;
+			const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
+			const bool isBalancedSprawl = (profile == "sprawl_balanced");
+			const UnsignedInt reserveCash = isBalancedSprawl ? 10000u : 0u;
+			const bool openingInfrastructureReady = supplyStashCount >= 1 && barracksCount >= 1 && armsCount >= 1;
+			const bool openingEconomyReady = supplyStashCount >= 2 || blackMarketCount >= 1;
+			const bool wasRecoveringFromReserve =
+				(m_autonomy.state.lastDecisionCategory == "production" && m_autonomy.state.lastDecisionReason == "reserve_cash_recovery");
+			const bool shouldPauseCombatProduction = AIControlAdapterShouldPauseCombatProduction({
+				isBalancedSprawl,
+				openingInfrastructureReady,
+				openingEconomyReady,
+				wasRecoveringFromReserve,
+				player->getMoney()->countMoney(),
+				reserveCash,
+				0,
+				0
+			});
+			const bool wasArmyCapReached =
+				(m_autonomy.state.lastDecisionCategory == "production" && m_autonomy.state.lastDecisionReason == "army_cap_reached");
+			const bool shouldHoldArmyCap = AIControlAdapterShouldHoldArmyCap({
+				shouldPauseCombatProduction,
+				isBalancedSprawl,
+				wasArmyCapReached,
+				combatVehicleCount,
+				isBalancedSprawl ? 100 : 9999
+			});
 
 			if (!AIControlAdapterShouldQueueRadarVan({
+				shouldPauseCombatProduction,
+				shouldHoldArmyCap,
 				armsCount,
 				radarVanCount,
 				combatVehicleCount,
-				m_radarVanAutomationRule.minCount
+				m_automation.radarVanRule.minCount
 			}))
 			{
 				return;
@@ -3113,9 +3423,9 @@ namespace
 				static_cast<unsigned int>(now));
 
 			nlohmann::json args = nlohmann::json::object();
-			if (m_radarVanAutomationRule.hasExplicitPlayerIndex)
+			if (m_automation.radarVanRule.hasExplicitPlayerIndex)
 			{
-				args["player_index"] = m_radarVanAutomationRule.playerIndex;
+				args["player_index"] = m_automation.radarVanRule.playerIndex;
 			}
 
 			nlohmann::json message = {
@@ -3135,43 +3445,43 @@ namespace
 					{"cmd", "Game.QueueRadarVansAllWarFactories"},
 					{"args", nlohmann::json::object({{"count", 1}})}
 				};
-				if (m_radarVanAutomationRule.hasExplicitPlayerIndex)
+				if (m_automation.radarVanRule.hasExplicitPlayerIndex)
 				{
-					fallbackMessage["args"]["player_index"] = m_radarVanAutomationRule.playerIndex;
+					fallbackMessage["args"]["player_index"] = m_automation.radarVanRule.playerIndex;
 				}
 				ok = executeGameQueueRadarVansAllWarFactories(fallbackMessage, reason);
 			}
 
-			m_radarVanAutomationRule.nextAllowedTick = now + m_radarVanAutomationRule.cooldownMs;
+			m_automation.radarVanRule.nextAllowedTick = now + m_automation.radarVanRule.cooldownMs;
 			adapterLog(
 				"automation_radar_van_rule request_id=%s player=%d arms=%d radar_vans=%d min_count=%d ok=%d reason=%s",
 				requestIdBuffer,
 				player->getPlayerIndex(),
 				armsCount,
 				radarVanCount,
-				m_radarVanAutomationRule.minCount,
+				m_automation.radarVanRule.minCount,
 				ok ? 1 : 0,
 				ok ? "" : reason.c_str());
 		}
 
 		void evaluateCaptureAutomationRule()
 		{
-			if (!m_captureAutomationRule.enabled)
+			if (!m_automation.captureRule.enabled)
 			{
 				return;
 			}
 
 			const DWORD now = ::GetTickCount();
 			pruneCaptureAutomationPendingTargets();
-			if (AIControlAdapterIsTickInFuture(m_captureAutomationRule.nextAllowedTick, now))
+			if (AIControlAdapterIsTickInFuture(m_automation.captureRule.nextAllowedTick, now))
 			{
 				return;
 			}
 
 			Player* player = nullptr;
-			if (m_captureAutomationRule.hasExplicitPlayerIndex)
+			if (m_automation.captureRule.hasExplicitPlayerIndex)
 			{
-				player = getPlayerByIndex(m_captureAutomationRule.playerIndex);
+				player = getPlayerByIndex(m_automation.captureRule.playerIndex);
 			}
 			else if (ThePlayerList != nullptr)
 			{
@@ -3180,13 +3490,13 @@ namespace
 
 			if (player == nullptr)
 			{
-				m_captureAutomationRule.nextAllowedTick = now + m_captureAutomationRule.cooldownMs;
+				m_automation.captureRule.nextAllowedTick = now + m_automation.captureRule.cooldownMs;
 				adapterLog("automation_capture_rule_skip reason=player_not_found");
 				return;
 			}
 
-			const Int pendingCount = static_cast<Int>(m_captureAutomationRule.pendingTargetsUntilTick.size());
-			if (pendingCount >= m_captureAutomationRule.maxConcurrent)
+			const Int pendingCount = static_cast<Int>(m_automation.captureRule.pendingTargetsUntilTick.size());
+			if (pendingCount >= m_automation.captureRule.maxConcurrent)
 			{
 				return;
 			}
@@ -3199,16 +3509,16 @@ namespace
 			}
 
 			std::vector<Object*> sources;
-			collectCaptureSourcesForPlayer(player, m_captureAutomationRule.preferIdle, sources);
+			collectCaptureSourcesForPlayer(player, m_automation.captureRule.preferIdle, sources);
 			if (sources.empty())
 			{
-				m_captureAutomationRule.nextAllowedTick = now + m_captureAutomationRule.cooldownMs;
+				m_automation.captureRule.nextAllowedTick = now + m_automation.captureRule.cooldownMs;
 				adapterLog(
 					"automation_capture_rule_skip player=%d reason=no_capture_sources pending=%d max_concurrent=%d prefer_idle=%d",
 					player->getPlayerIndex(),
 					pendingCount,
-					m_captureAutomationRule.maxConcurrent,
-					m_captureAutomationRule.preferIdle ? 1 : 0);
+					m_automation.captureRule.maxConcurrent,
+					m_automation.captureRule.preferIdle ? 1 : 0);
 				return;
 			}
 
@@ -3254,7 +3564,7 @@ namespace
 				return ((ldx * ldx) + (ldy * ldy)) < ((rdx * rdx) + (rdy * rdy));
 			});
 
-			Int assignmentsRemaining = std::max<Int>(0, m_captureAutomationRule.maxConcurrent - pendingCount);
+			Int assignmentsRemaining = std::max<Int>(0, m_automation.captureRule.maxConcurrent - pendingCount);
 			Int sentOk = 0;
 			Int attemptsRemaining = std::max<Int>(assignmentsRemaining, 1) * 4;
 			std::string lastReason;
@@ -3269,7 +3579,7 @@ namespace
 				{
 					continue;
 				}
-				if (m_captureAutomationRule.pendingTargetsUntilTick.find(targetId) != m_captureAutomationRule.pendingTargetsUntilTick.end())
+				if (m_automation.captureRule.pendingTargetsUntilTick.find(targetId) != m_automation.captureRule.pendingTargetsUntilTick.end())
 				{
 					continue;
 				}
@@ -3304,9 +3614,9 @@ namespace
 					{"target_object_id", targetId},
 					{"source_object_id", static_cast<Int>(selectedSource->getID())}
 				});
-				if (m_captureAutomationRule.hasExplicitPlayerIndex)
+				if (m_automation.captureRule.hasExplicitPlayerIndex)
 				{
-					args["player_index"] = m_captureAutomationRule.playerIndex;
+					args["player_index"] = m_automation.captureRule.playerIndex;
 				}
 
 				nlohmann::json message = {
@@ -3327,7 +3637,7 @@ namespace
 					static_cast<Int>(selectedSource->getID()),
 					targetId,
 					pendingCount + sentOk,
-					m_captureAutomationRule.maxConcurrent,
+					m_automation.captureRule.maxConcurrent,
 					ok ? 1 : 0,
 					ok ? "" : reason.c_str());
 				if (!ok)
@@ -3342,29 +3652,29 @@ namespace
 
 				++sentOk;
 				--assignmentsRemaining;
-				const DWORD pendingUntil = now + std::max<DWORD>(m_captureAutomationRule.cooldownMs, 20000u);
+				const DWORD pendingUntil = now + std::max<DWORD>(m_automation.captureRule.cooldownMs, 20000u);
 				const Int sourceId = static_cast<Int>(selectedSource->getID());
-				m_captureAutomationRule.pendingTargetsUntilTick[targetId] = pendingUntil;
+				m_automation.captureRule.pendingTargetsUntilTick[targetId] = pendingUntil;
 				if (sourceId > 0)
 				{
-					m_captureAutomationRule.pendingSourcesUntilTick[sourceId] = pendingUntil;
+					m_automation.captureRule.pendingSourcesUntilTick[sourceId] = pendingUntil;
 				}
 				sources.erase(std::remove(sources.begin(), sources.end(), selectedSource), sources.end());
 			}
 
 			if (sentOk > 0)
 			{
-				m_captureAutomationRule.nextAllowedTick = now + m_captureAutomationRule.cooldownMs;
+				m_automation.captureRule.nextAllowedTick = now + m_automation.captureRule.cooldownMs;
 			}
 			else if (!lastReason.empty())
 			{
-				m_captureAutomationRule.nextAllowedTick = now + std::max<DWORD>(m_captureAutomationRule.cooldownMs, 2000u);
+				m_automation.captureRule.nextAllowedTick = now + std::max<DWORD>(m_automation.captureRule.cooldownMs, 2000u);
 				adapterLog(
 					"automation_capture_rule_skip player=%d reason=%s pending=%d max_concurrent=%d",
 					player->getPlayerIndex(),
 					lastReason.c_str(),
 					pendingCount,
-					m_captureAutomationRule.maxConcurrent);
+					m_automation.captureRule.maxConcurrent);
 			}
 		}
 
@@ -3469,30 +3779,30 @@ namespace
 				rule.cooldownMs = static_cast<DWORD>(cooldownValue);
 			}
 
-			m_workerAutomationRule = rule;
+			m_automation.workerRule = rule;
 			adapterLog(
 				"automation_worker_rule_configured enabled=%d player=%d explicit_player=%d min_idle_workers=%d queue_count=%d producer_kind=%s cooldown_ms=%lu",
-				m_workerAutomationRule.enabled ? 1 : 0,
-				m_workerAutomationRule.playerIndex,
-				m_workerAutomationRule.hasExplicitPlayerIndex ? 1 : 0,
-				m_workerAutomationRule.minIdleWorkers,
-				m_workerAutomationRule.queueCount,
-				m_workerAutomationRule.hasExplicitProducerKind ? m_workerAutomationRule.producerKind.c_str() : "default",
-				static_cast<unsigned long>(m_workerAutomationRule.cooldownMs));
+				m_automation.workerRule.enabled ? 1 : 0,
+				m_automation.workerRule.playerIndex,
+				m_automation.workerRule.hasExplicitPlayerIndex ? 1 : 0,
+				m_automation.workerRule.minIdleWorkers,
+				m_automation.workerRule.queueCount,
+				m_automation.workerRule.hasExplicitProducerKind ? m_automation.workerRule.producerKind.c_str() : "default",
+				static_cast<unsigned long>(m_automation.workerRule.cooldownMs));
 			return true;
 		}
 
 		void clearWorkerAutomationRule()
 		{
-			m_workerAutomationRule.enabled = false;
-			m_workerAutomationRule.hasExplicitPlayerIndex = false;
-			m_workerAutomationRule.hasExplicitProducerKind = false;
-			m_workerAutomationRule.playerIndex = -1;
-			m_workerAutomationRule.minIdleWorkers = 0;
-			m_workerAutomationRule.queueCount = 1;
-			m_workerAutomationRule.producerKind.clear();
-			m_workerAutomationRule.cooldownMs = 3000u;
-			m_workerAutomationRule.nextAllowedTick = 0u;
+			m_automation.workerRule.enabled = false;
+			m_automation.workerRule.hasExplicitPlayerIndex = false;
+			m_automation.workerRule.hasExplicitProducerKind = false;
+			m_automation.workerRule.playerIndex = -1;
+			m_automation.workerRule.minIdleWorkers = 0;
+			m_automation.workerRule.queueCount = 1;
+			m_automation.workerRule.producerKind.clear();
+			m_automation.workerRule.cooldownMs = 3000u;
+			m_automation.workerRule.nextAllowedTick = 0u;
 			adapterLog("automation_worker_rule_cleared");
 		}
 
@@ -3585,29 +3895,29 @@ namespace
 				rule.cooldownMs = static_cast<DWORD>(cooldownValue);
 			}
 
-			m_attackAutomationRule = rule;
+			m_automation.attackRule = rule;
 			adapterLog(
 				"automation_attack_rule_configured enabled=%d player=%d explicit_player=%d min_units=%d group_size=%d distance=%.1f cooldown_ms=%lu",
-				m_attackAutomationRule.enabled ? 1 : 0,
-				m_attackAutomationRule.playerIndex,
-				m_attackAutomationRule.hasExplicitPlayerIndex ? 1 : 0,
-				m_attackAutomationRule.minUnits,
-				m_attackAutomationRule.groupSize,
-				static_cast<double>(m_attackAutomationRule.distance),
-				static_cast<unsigned long>(m_attackAutomationRule.cooldownMs));
+				m_automation.attackRule.enabled ? 1 : 0,
+				m_automation.attackRule.playerIndex,
+				m_automation.attackRule.hasExplicitPlayerIndex ? 1 : 0,
+				m_automation.attackRule.minUnits,
+				m_automation.attackRule.groupSize,
+				static_cast<double>(m_automation.attackRule.distance),
+				static_cast<unsigned long>(m_automation.attackRule.cooldownMs));
 			return true;
 		}
 
 		void clearAttackAutomationRule()
 		{
-			m_attackAutomationRule.enabled = false;
-			m_attackAutomationRule.hasExplicitPlayerIndex = false;
-			m_attackAutomationRule.playerIndex = -1;
-			m_attackAutomationRule.minUnits = 40;
-			m_attackAutomationRule.groupSize = 30;
-			m_attackAutomationRule.distance = 3000.0f;
-			m_attackAutomationRule.cooldownMs = 15000u;
-			m_attackAutomationRule.nextAllowedTick = 0u;
+			m_automation.attackRule.enabled = false;
+			m_automation.attackRule.hasExplicitPlayerIndex = false;
+			m_automation.attackRule.playerIndex = -1;
+			m_automation.attackRule.minUnits = 40;
+			m_automation.attackRule.groupSize = 30;
+			m_automation.attackRule.distance = 3000.0f;
+			m_automation.attackRule.cooldownMs = 15000u;
+			m_automation.attackRule.nextAllowedTick = 0u;
 			adapterLog("automation_attack_rule_cleared");
 		}
 
@@ -3690,15 +4000,15 @@ namespace
 				rule.cooldownMs = static_cast<DWORD>(cooldownValue);
 			}
 
-			m_captureAutomationRule = rule;
+			m_automation.captureRule = rule;
 			adapterLog(
 				"automation_capture_rule_configured enabled=%d player=%d explicit_player=%d max_concurrent=%d prefer_idle=%d cooldown_ms=%lu",
-				m_captureAutomationRule.enabled ? 1 : 0,
-				m_captureAutomationRule.playerIndex,
-				m_captureAutomationRule.hasExplicitPlayerIndex ? 1 : 0,
-				m_captureAutomationRule.maxConcurrent,
-				m_captureAutomationRule.preferIdle ? 1 : 0,
-				static_cast<unsigned long>(m_captureAutomationRule.cooldownMs));
+				m_automation.captureRule.enabled ? 1 : 0,
+				m_automation.captureRule.playerIndex,
+				m_automation.captureRule.hasExplicitPlayerIndex ? 1 : 0,
+				m_automation.captureRule.maxConcurrent,
+				m_automation.captureRule.preferIdle ? 1 : 0,
+				static_cast<unsigned long>(m_automation.captureRule.cooldownMs));
 			return true;
 		}
 
@@ -3764,14 +4074,14 @@ namespace
 				rule.cooldownMs = static_cast<DWORD>(cooldownValue);
 			}
 
-			m_radarVanAutomationRule = rule;
+			m_automation.radarVanRule = rule;
 			adapterLog(
 				"automation_radar_van_rule_configured enabled=%d player=%d explicit_player=%d min_count=%d cooldown_ms=%lu",
-				m_radarVanAutomationRule.enabled ? 1 : 0,
-				m_radarVanAutomationRule.playerIndex,
-				m_radarVanAutomationRule.hasExplicitPlayerIndex ? 1 : 0,
-				m_radarVanAutomationRule.minCount,
-				static_cast<unsigned long>(m_radarVanAutomationRule.cooldownMs));
+				m_automation.radarVanRule.enabled ? 1 : 0,
+				m_automation.radarVanRule.playerIndex,
+				m_automation.radarVanRule.hasExplicitPlayerIndex ? 1 : 0,
+				m_automation.radarVanRule.minCount,
+				static_cast<unsigned long>(m_automation.radarVanRule.cooldownMs));
 			return true;
 		}
 
@@ -3846,51 +4156,51 @@ namespace
 				rule.cooldownMs = static_cast<DWORD>(cooldownValue);
 			}
 
-			m_stashWorkerAutomationRule = rule;
+			m_automation.stashWorkerRule = rule;
 			adapterLog(
 				"automation_stash_worker_rule_configured enabled=%d player=%d explicit_player=%d target_workers_per_stash=%d cooldown_ms=%lu",
-				m_stashWorkerAutomationRule.enabled ? 1 : 0,
-				m_stashWorkerAutomationRule.playerIndex,
-				m_stashWorkerAutomationRule.hasExplicitPlayerIndex ? 1 : 0,
-				m_stashWorkerAutomationRule.targetWorkersPerStash,
-				static_cast<unsigned long>(m_stashWorkerAutomationRule.cooldownMs));
+				m_automation.stashWorkerRule.enabled ? 1 : 0,
+				m_automation.stashWorkerRule.playerIndex,
+				m_automation.stashWorkerRule.hasExplicitPlayerIndex ? 1 : 0,
+				m_automation.stashWorkerRule.targetWorkersPerStash,
+				static_cast<unsigned long>(m_automation.stashWorkerRule.cooldownMs));
 			return true;
 		}
 
 		void clearStashWorkerAutomationRule()
 		{
-			m_stashWorkerAutomationRule.enabled = false;
-			m_stashWorkerAutomationRule.hasExplicitPlayerIndex = false;
-			m_stashWorkerAutomationRule.playerIndex = -1;
-			m_stashWorkerAutomationRule.targetWorkersPerStash = 9;
-			m_stashWorkerAutomationRule.cooldownMs = 4000u;
-			m_stashWorkerAutomationRule.nextAllowedTick = 0u;
-			m_stashWorkerAutomationRule.servicedStashIds.clear();
+			m_automation.stashWorkerRule.enabled = false;
+			m_automation.stashWorkerRule.hasExplicitPlayerIndex = false;
+			m_automation.stashWorkerRule.playerIndex = -1;
+			m_automation.stashWorkerRule.targetWorkersPerStash = 9;
+			m_automation.stashWorkerRule.cooldownMs = 4000u;
+			m_automation.stashWorkerRule.nextAllowedTick = 0u;
+			m_automation.stashWorkerRule.servicedStashIds.clear();
 			adapterLog("automation_stash_worker_rule_cleared");
 		}
 
 		void clearRadarVanAutomationRule()
 		{
-			m_radarVanAutomationRule.enabled = false;
-			m_radarVanAutomationRule.hasExplicitPlayerIndex = false;
-			m_radarVanAutomationRule.playerIndex = -1;
-			m_radarVanAutomationRule.minCount = 1;
-			m_radarVanAutomationRule.cooldownMs = 12000u;
-			m_radarVanAutomationRule.nextAllowedTick = 0u;
+			m_automation.radarVanRule.enabled = false;
+			m_automation.radarVanRule.hasExplicitPlayerIndex = false;
+			m_automation.radarVanRule.playerIndex = -1;
+			m_automation.radarVanRule.minCount = 1;
+			m_automation.radarVanRule.cooldownMs = 12000u;
+			m_automation.radarVanRule.nextAllowedTick = 0u;
 			adapterLog("automation_radar_van_rule_cleared");
 		}
 
 		void clearCaptureAutomationRule()
 		{
-			m_captureAutomationRule.enabled = false;
-			m_captureAutomationRule.hasExplicitPlayerIndex = false;
-			m_captureAutomationRule.preferIdle = true;
-			m_captureAutomationRule.playerIndex = -1;
-			m_captureAutomationRule.maxConcurrent = 3;
-			m_captureAutomationRule.cooldownMs = 4000u;
-			m_captureAutomationRule.nextAllowedTick = 0u;
-			m_captureAutomationRule.pendingTargetsUntilTick.clear();
-			m_captureAutomationRule.pendingSourcesUntilTick.clear();
+			m_automation.captureRule.enabled = false;
+			m_automation.captureRule.hasExplicitPlayerIndex = false;
+			m_automation.captureRule.preferIdle = true;
+			m_automation.captureRule.playerIndex = -1;
+			m_automation.captureRule.maxConcurrent = 3;
+			m_automation.captureRule.cooldownMs = 4000u;
+			m_automation.captureRule.nextAllowedTick = 0u;
+			m_automation.captureRule.pendingTargetsUntilTick.clear();
+			m_automation.captureRule.pendingSourcesUntilTick.clear();
 			adapterLog("automation_capture_rule_cleared");
 		}
 

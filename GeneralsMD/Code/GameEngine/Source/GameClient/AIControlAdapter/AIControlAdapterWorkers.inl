@@ -8,18 +8,18 @@
 
 		void pruneExpiredWorkerReservations()
 		{
-			if (m_reservedWorkersUntilTick.empty())
+			if (m_workers.reservedWorkersUntilTick.empty())
 			{
 				return;
 			}
 			const DWORD now = ::GetTickCount();
-			for (auto it = m_reservedWorkersUntilTick.begin(); it != m_reservedWorkersUntilTick.end(); )
+			for (auto it = m_workers.reservedWorkersUntilTick.begin(); it != m_workers.reservedWorkersUntilTick.end(); )
 			{
 				const DWORD untilTick = it->second;
 				// Handles tick wrap correctly with signed subtraction.
 				if (static_cast<LONG>(untilTick - now) <= 0)
 				{
-					it = m_reservedWorkersUntilTick.erase(it);
+					it = m_workers.reservedWorkersUntilTick.erase(it);
 				}
 				else
 				{
@@ -40,8 +40,8 @@
 			{
 				return false;
 			}
-			const auto it = m_reservedWorkersUntilTick.find(id);
-			if (it == m_reservedWorkersUntilTick.end())
+			const auto it = m_workers.reservedWorkersUntilTick.find(id);
+			if (it == m_workers.reservedWorkersUntilTick.end())
 			{
 				return false;
 			}
@@ -60,7 +60,7 @@
 			{
 				return;
 			}
-			m_reservedWorkersUntilTick[id] = ::GetTickCount() + durationMs;
+			m_workers.reservedWorkersUntilTick[id] = ::GetTickCount() + durationMs;
 		}
 
 		bool isWorkerAssignedToActiveConstruction(Object* worker) const
@@ -272,8 +272,8 @@
 
 				Object* selected = candidates->front();
 				const Int playerIndex = player->getPlayerIndex();
-				const auto lastIt = m_lastSelectedWorkerByPlayer.find(playerIndex);
-				if (lastIt != m_lastSelectedWorkerByPlayer.end() && candidates->size() > 1u)
+				const auto lastIt = m_workers.lastSelectedWorkerByPlayer.find(playerIndex);
+				if (lastIt != m_workers.lastSelectedWorkerByPlayer.end() && candidates->size() > 1u)
 				{
 					const ObjectID lastId = lastIt->second;
 					for (std::size_t i = 0; i < candidates->size(); ++i)
@@ -290,7 +290,7 @@
 
 				if (selected != nullptr)
 				{
-					m_lastSelectedWorkerByPlayer[playerIndex] = selected->getID();
+					m_workers.lastSelectedWorkerByPlayer[playerIndex] = selected->getID();
 					// Reserve the worker briefly so rapid-fire smart build requests don't
 					// keep reselecting and interrupting the same unit.
 					reserveWorkerForBuild(selected);

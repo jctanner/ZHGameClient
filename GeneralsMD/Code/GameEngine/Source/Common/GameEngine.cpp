@@ -86,7 +86,7 @@
 #include "GameLogic/SidesList.h"
 
 #include "GameClient/ClientInstance.h"
-#include "GameClient/AIControlAdapter.h"
+#include "GameClient/AIControlAdapter/AIControlAdapter.h"
 #include "GameClient/FXList.h"
 #include "GameClient/GameClient.h"
 #include "GameClient/Keyboard.h"
