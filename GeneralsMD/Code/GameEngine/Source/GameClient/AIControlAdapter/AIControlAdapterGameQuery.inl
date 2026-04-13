@@ -1644,6 +1644,12 @@
 				return true;
 			}
 
+			if (path == "game.skirmish_setup")
+			{
+				result = buildSkirmishSetup();
+				return true;
+			}
+
 			reason = "unsupported_query_path";
 			return false;
 		}

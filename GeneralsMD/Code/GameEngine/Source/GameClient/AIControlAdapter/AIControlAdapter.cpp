@@ -4460,6 +4460,8 @@ namespace
 
 		#include "AIControlAdapterGameQuery.inl"
 
+		#include "AIControlAdapterSkirmish.inl"
+
 		#include "AIControlAdapterUI.inl"
 	};
 
