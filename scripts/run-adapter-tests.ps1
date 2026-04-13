@@ -1,8 +1,8 @@
 param(
     [string]$BuildDir = "build/win32",
     [string]$Config = "Release",
-    [string]$Target = "z_gameengine_adapter_tests",
-    [string]$CTestFilter = "z_gameengine_adapter_tests"
+    [string]$Target = "z_gameengine_adapter_tests z_gameengine_adapter_ui_tests",
+    [string]$CTestFilter = "z_gameengine_adapter"
 )
 
 $ErrorActionPreference = "Stop"
@@ -22,7 +22,12 @@ Invoke-Step "Configure" {
 }
 
 Invoke-Step "Build" {
-    cmake --build $BuildDir --config $Config --target $Target
+    # Build both adapter test executables
+    foreach ($t in $Target -split ' ') {
+        if ($t) {
+            cmake --build $BuildDir --config $Config --target $t
+        }
+    }
 }
 
 Invoke-Step "Test" {
