@@ -232,6 +232,109 @@ Adaptive direction overrides:
 - surface `front_source` in telemetry so the UI stays interpretable
 
 
+## Unit Test Plan
+
+The new Phase 3 behavior is only partially testable in its current inline form inside the adapter macro evaluation path.
+
+To make it testable without mocking the whole game, the decision logic should be extracted into small pure helpers and covered directly.
+
+### Priority order
+
+1. extract and test direction normalization
+2. extract and test map-position extraction from JSON
+3. extract and test recent-attack target selection
+4. extract and test zone front-direction fallback resolution
+
+This keeps the first test pass cheap and focused while covering the highest-risk logic added in Phase 3.
+
+### 1. Direction normalization helper
+
+Extract a helper equivalent to:
+
+- `tryNormalizeDirection(dx, dy, outDx, outDy)`
+
+Expected test coverage:
+
+- valid vectors normalize correctly
+- zero-length vectors are rejected
+- near-zero vectors are rejected
+- successful outputs are approximately unit length
+
+### 2. Map-position extraction helper
+
+Extract a helper equivalent to:
+
+- `tryReadMapPosition(json, outPos)`
+
+Expected test coverage:
+
+- accepts a valid object with numeric `x` and `y`
+- rejects non-object payloads
+- rejects missing `x`
+- rejects missing `y`
+- rejects wrong types for `x` or `y`
+
+### 3. Recent attack target helper
+
+Extract a helper equivalent to:
+
+- `tryGetRecentAttackTarget(events, nowTick, freshnessMs, outPos)`
+
+Expected test coverage:
+
+- accepts a fresh `attack` event with `x` and `y`
+- ignores stale attack events
+- ignores non-attack events
+- ignores malformed attack events without usable coordinates
+- prefers the newest valid attack event when multiple exist
+
+### 4. Zone front-direction resolver
+
+Extract a helper equivalent to:
+
+- `resolveZoneFrontDirection(...)`
+
+Inputs should include:
+
+- zone center
+- optional recent attack target
+- optional preferred enemy base
+- optional list of known enemy bases
+- fallback sprawl-axis direction
+
+Outputs should include:
+
+- normalized `dx`
+- normalized `dy`
+- `front_source`
+
+Expected test coverage:
+
+- uses `attack_target` when a valid recent attack target exists
+- falls back to preferred enemy base when no attack target exists
+- falls back to nearest enemy base when only a list of enemy bases exists
+- falls back to `sprawl_axis` when no higher-priority source is usable
+- ignores degenerate vectors where the candidate source is effectively on top of the zone center
+
+### 5. Front/rear point geometry helper
+
+If the geometry calculation is split out, add a helper equivalent to:
+
+- `buildZoneFrontRearPoints(center, radius, dirDx, dirDy)`
+
+Expected test coverage:
+
+- `front_point = center + dir * radius`
+- `rear_point = center - dir * radius`
+- non-cardinal directions are handled correctly
+
+### Why this structure
+
+The goal is to test the Phase 3 logic without introducing heavy world-state fixtures.
+
+The adapter’s game-facing orchestration can remain integration-tested through live runs, while the mathematically deterministic parts are validated with fast unit tests.
+
+
 ## Performance Constraints
 
 This feature must remain cheap.

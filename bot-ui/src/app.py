@@ -113,10 +113,16 @@ class BotUIApp:
         self._connection_light_canvases: list[tuple[tk.Canvas, int]] = []
         self._autonomy_light_canvases: list[tuple[tk.Canvas, int]] = []
         self._autonomy_log_path = r"D:\logs\adapter.log"
+        self._autonomy_telemetry_dump_path = r"D:\logs\bot-ui-autonomy-telemetry.ndjson"
+        self._autonomy_telemetry_dump_initialized = False
         self._autonomy_log_position = 0
         self._autonomy_log_inode_hint: tuple[int, int] | None = None
         self._next_autonomy_log_poll_monotonic = 0.0
         self._next_autonomy_telemetry_poll_monotonic = 0.0
+        self._last_autonomy_telemetry_monotonic = 0.0
+        self._last_autonomy_telemetry_tick = 0
+        self._autonomy_telemetry_stale = False
+        self._autonomy_telemetry_stale_logged = False
         self.autonomy_log_box: scrolledtext.ScrolledText | None = None
         self.notebook: ttk.Notebook | None = None
         self._manual_tab: ttk.Frame | None = None
@@ -131,6 +137,7 @@ class BotUIApp:
         self.poll_interval_ms = tk.IntVar(value=1000)
         self.stream_enabled = tk.BooleanVar(value=False)
         self.debug_inbound = tk.BooleanVar(value=False)
+        self.autonomy_telemetry_dump_enabled = tk.BooleanVar(value=False)
         self.build_count_var = tk.IntVar(value=1)
         self.unit_queue_count_var = tk.IntVar(value=1)
         self.raid_count_var = tk.IntVar(value=1)
@@ -165,6 +172,7 @@ class BotUIApp:
         self.camera_zoom_limited_var = tk.BooleanVar(value=True)
         self.autonomy_control_mode_var = tk.StringVar(value="autonomous")
         self.autonomy_profile_var = tk.StringVar(value="sprawl_balanced")
+        self.autonomy_attack_enabled_var = tk.BooleanVar(value=False)
         self.autonomy_status_var = tk.StringVar(value="Autonomy: manual/sprawl_balanced")
         self.autonomy_assets_var = tk.StringVar(value="Assets: units=- buildings=- workers=- money=-")
         self.autonomy_zone_var = tk.StringVar(value="Zone: -")
@@ -416,6 +424,18 @@ class BotUIApp:
             "Reserved for a future persistent streaming transport. In the current one-shot request/reply mode this toggle is informational and will reset off.",
         )
 
+        telemetry_dump_toggle = ttk.Checkbutton(
+            conn_toggles,
+            text="Dump Telemetry",
+            variable=self.autonomy_telemetry_dump_enabled,
+            command=self._on_autonomy_telemetry_dump_toggle,
+        )
+        telemetry_dump_toggle.grid(row=0, column=4, sticky="w", padx=(12, 0))
+        self._attach_tooltip(
+            telemetry_dump_toggle,
+            "Writes each received autonomy telemetry payload to D:\\logs\\bot-ui-autonomy-telemetry.ndjson for later inspection. Off by default.",
+        )
+
         status = ttk.LabelFrame(left, text="Status", padding=8)
         status.grid(row=1, column=0, sticky="ew", pady=(8, 0))
         status.grid_columnconfigure(0, weight=1)
@@ -491,8 +511,17 @@ class BotUIApp:
             row=0, column=3, sticky="w", padx=(6, 0)
         )
 
+        behavior_row = ttk.Frame(controls)
+        behavior_row.grid(row=3, column=0, sticky="w", pady=(10, 0))
+        raids_toggle = ttk.Checkbutton(behavior_row, text="Enable Raids", variable=self.autonomy_attack_enabled_var)
+        raids_toggle.grid(row=0, column=0, sticky="w")
+        self._attach_tooltip(
+            raids_toggle,
+            "Enables the autonomy attack automation rule. Turn this off to suppress automatic raids while keeping the rest of autonomous macro active.",
+        )
+
         actions = ttk.Frame(controls)
-        actions.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        actions.grid(row=4, column=0, sticky="ew", pady=(12, 0))
         for idx in range(5):
             actions.grid_columnconfigure(idx, weight=1)
         ttk.Button(actions, text="Start Autonomous", command=self._autonomy_go).grid(row=0, column=0, sticky="ew", padx=2)
@@ -961,6 +990,35 @@ class BotUIApp:
         except Exception as exc:  # noqa: BLE001
             self._log(f"Streaming toggle failed: {exc}")
 
+    def _on_autonomy_telemetry_dump_toggle(self) -> None:
+        if self.autonomy_telemetry_dump_enabled.get():
+            self._autonomy_telemetry_dump_initialized = False
+            self._log(f"Autonomy telemetry dump enabled: {self._autonomy_telemetry_dump_path}")
+        else:
+            self._log("Autonomy telemetry dump disabled.")
+
+    def _append_autonomy_telemetry_dump(self, cmd: str, payload: dict[str, Any]) -> None:
+        if not self.autonomy_telemetry_dump_enabled.get():
+            return
+        try:
+            directory = os.path.dirname(self._autonomy_telemetry_dump_path)
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+            mode = "a"
+            if not self._autonomy_telemetry_dump_initialized:
+                mode = "w"
+                self._autonomy_telemetry_dump_initialized = True
+            record = {
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                "monotonic": time.monotonic(),
+                "cmd": cmd,
+                "payload": payload,
+            }
+            with open(self._autonomy_telemetry_dump_path, mode, encoding="utf-8") as handle:
+                handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+        except Exception as exc:  # noqa: BLE001
+            self._log(f"Autonomy telemetry dump write failed: {exc}")
+
     def _menu_click(self, control_id: str) -> None:
         self._send_session_command("Menu.Click", {"controlId": control_id})
 
@@ -1274,6 +1332,7 @@ class BotUIApp:
 
     def _autonomy_config_payload(self) -> dict[str, Any]:
         payload: dict[str, Any] = {"profile": self.autonomy_profile_var.get().strip() or "standard"}
+        payload["attack_enabled"] = bool(self.autonomy_attack_enabled_var.get())
         try:
             sprawl_multiplier = float(self.sprawl_multiplier_var.get())
         except Exception:  # noqa: BLE001
@@ -1352,6 +1411,7 @@ class BotUIApp:
         self._autonomy_mode = "manual"
         self.autonomy_control_mode_var.set("autonomous")
         self.autonomy_profile_var.set("sprawl_balanced")
+        self.autonomy_attack_enabled_var.set(False)
         self.sprawl_multiplier_var.set(1.5)
         self.autonomy_target_player_index_var.set(1)
         self.poll_enabled.set(True)
@@ -1412,7 +1472,7 @@ class BotUIApp:
                 else:
                     timeout_ms = 4000 if path == "game.objects_all_map" else 2500
             elif cmd in ("Autonomy.Status", "Autonomy.Telemetry"):
-                timeout_ms = 2000
+                timeout_ms = 10000
             elif cmd in ("Autonomy.Configure", "Autonomy.SetMode", "Autonomy.Resume", "Autonomy.Pause", "Autonomy.Reset"):
                 timeout_ms = 2500
             self._request_async(msg, priority=priority, timeout_ms=timeout_ms)
@@ -1460,6 +1520,7 @@ class BotUIApp:
         interval = 500
         try:
             interval = max(100, int(self.poll_interval_ms.get()))
+            self._check_autonomy_telemetry_freshness()
             self._poll_autonomy_telemetry_if_due()
             if self._hello_ok and self.poll_enabled.get():
                 now = time.monotonic()
@@ -1504,12 +1565,62 @@ class BotUIApp:
         now = time.monotonic()
         if now < self._next_autonomy_telemetry_poll_monotonic:
             return
-        if self.pending_requests:
+        if self._has_pending_command("Autonomy.Telemetry"):
             return
-        if self._request_queue.qsize() != 0:
-            return
-        self._next_autonomy_telemetry_poll_monotonic = now + 1.0
+        self._next_autonomy_telemetry_poll_monotonic = now + 2.0
         self._autonomy_telemetry(quiet=True)
+
+    def _has_pending_command(self, cmd: str) -> bool:
+        for info in self.pending_requests.values():
+            if info.get("cmd") == cmd:
+                return True
+        return False
+
+    def _check_autonomy_telemetry_freshness(self) -> None:
+        if not self._hello_ok:
+            return
+        if self.notebook is not None and self._autonomy_tab is not None:
+            try:
+                if self.notebook.select() != str(self._autonomy_tab):
+                    return
+            except Exception:  # noqa: BLE001
+                return
+
+        now = time.monotonic()
+        if self._last_autonomy_telemetry_monotonic <= 0.0:
+            return
+
+        age = now - self._last_autonomy_telemetry_monotonic
+        became_stale = age >= 4.0
+        if became_stale:
+            if not self._autonomy_telemetry_stale_logged:
+                self._log(f"Autonomy telemetry stale: last update {age:.1f}s ago")
+                self._autonomy_telemetry_stale_logged = True
+            if age >= 8.0 and (self.store.autonomy_zones or self.store.autonomy_events):
+                self.store.autonomy_zones = []
+                self.store.autonomy_events = []
+                self._dirty_view = True
+        elif self._autonomy_telemetry_stale:
+            self._autonomy_telemetry_stale_logged = False
+
+        if self._autonomy_telemetry_stale != became_stale:
+            self._autonomy_telemetry_stale = became_stale
+            self._refresh_autonomy_status_line()
+
+    def _refresh_autonomy_status_line(self) -> None:
+        mode = self._autonomy_mode or "manual"
+        profile = self.autonomy_profile_var.get().strip() or "standard"
+        try:
+            multiplier = float(self.sprawl_multiplier_var.get())
+        except Exception:  # noqa: BLE001
+            multiplier = 1.0
+        suffix_parts: list[str] = []
+        if mode == "manual":
+            suffix_parts.append("manual")
+        if self._autonomy_telemetry_stale:
+            suffix_parts.append("telemetry stale")
+        suffix_text = f" [{' | '.join(suffix_parts)}]" if suffix_parts else ""
+        self.autonomy_status_var.set(f"Autonomy: {mode}/{profile} x{multiplier:g}{suffix_text}")
 
     def _poll_map_updates_only(self) -> None:
         now = time.monotonic()
@@ -1649,7 +1760,7 @@ class BotUIApp:
             self._log(f"ack {cmd} ok={ok}{extra}")
             if pending.get("cmd") == "Game.Query":
                 self._apply_query_result(msg, str(pending.get("path", "")))
-            elif msg_type == "QueryResult":
+            elif msg_type == "QueryResult" or "result" in msg:
                 self._handle_command_query_result(cmd, msg)
         else:
             if msg_type == "QueryResult":
@@ -1697,6 +1808,14 @@ class BotUIApp:
             self._log(f"{cmd} payload={payload}")
 
     def _apply_autonomy_payload(self, cmd: str, payload: dict[str, Any]) -> None:
+            if cmd == "Autonomy.Telemetry":
+                self._append_autonomy_telemetry_dump(cmd, payload)
+                self._last_autonomy_telemetry_monotonic = time.monotonic()
+                telemetry_tick = payload.get("telemetry_tick")
+                self._last_autonomy_telemetry_tick = int(telemetry_tick) if isinstance(telemetry_tick, int) else 0
+                if self._autonomy_telemetry_stale or self._autonomy_telemetry_stale_logged:
+                    self._autonomy_telemetry_stale = False
+                    self._autonomy_telemetry_stale_logged = False
             mode = str(payload.get("mode", "manual"))
             profile = str(payload.get("profile", "standard"))
             paused = bool(payload.get("paused", False))
@@ -1720,6 +1839,9 @@ class BotUIApp:
             self.autonomy_control_mode_var.set(mode)
             if profile in AUTONOMY_PROFILE_OPTIONS:
                 self.autonomy_profile_var.set(profile)
+            attack_enabled = payload.get("attack_enabled")
+            if isinstance(attack_enabled, bool):
+                self.autonomy_attack_enabled_var.set(attack_enabled)
             target_player_index = payload.get("target_player_index")
             if isinstance(target_player_index, int) and target_player_index >= 0:
                 self.autonomy_target_player_index_var.set(target_player_index)
@@ -1737,7 +1859,8 @@ class BotUIApp:
                         self._suppress_autonomy_control_updates = False
             self._last_autonomy_config_signature = self._autonomy_config_signature()
             multiplier_text = float(sprawl_multiplier) if isinstance(sprawl_multiplier, (int, float)) else 1.0
-            self.autonomy_status_var.set(f"Autonomy: {mode}/{profile} x{multiplier_text:g}{suffix}")
+            stale_suffix = " [telemetry stale]" if self._autonomy_telemetry_stale else ""
+            self.autonomy_status_var.set(f"Autonomy: {mode}/{profile} x{multiplier_text:g}{suffix}{stale_suffix}")
             if mode == "manual":
                 self._set_autonomy_light("stopped")
             elif paused:
