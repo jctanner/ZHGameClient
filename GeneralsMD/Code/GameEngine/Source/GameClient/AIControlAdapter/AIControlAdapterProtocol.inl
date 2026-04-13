@@ -104,6 +104,8 @@
 						"session",
 						"menu_click",
 						"menu_set_text",
+						"menu_select_combobox",
+						"menu_set_slider",
 						"chat_send",
 						"game_query",
 						"game_query_skirmish_setup",
@@ -156,7 +158,8 @@
 						"skirmish_set_superweapon_restriction",
 						"skirmish_set_seed",
 						"skirmish_start",
-						"skirmish_configure"
+						"skirmish_configure",
+						"skirmish_refresh_ui"
 					})}
 				};
 				sendJsonLine(reply);
@@ -209,6 +212,32 @@
 			{
 				std::string reason;
 				if (!executeMenuSetText(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Menu.SelectComboBox")
+			{
+				std::string reason;
+				if (!executeMenuSelectComboBox(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Menu.SetSlider")
+			{
+				std::string reason;
+				if (!executeMenuSetSlider(message, reason))
 				{
 					sendActionAck(requestId, false, "invalid_state", reason.c_str());
 					return;
@@ -980,6 +1009,18 @@
 			{
 				std::string reason;
 				if (!executeSkirmishConfigure(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Skirmish.RefreshUI")
+			{
+				std::string reason;
+				if (!executeSkirmishRefreshUI(reason))
 				{
 					sendActionAck(requestId, false, "invalid_state", reason.c_str());
 					return;
