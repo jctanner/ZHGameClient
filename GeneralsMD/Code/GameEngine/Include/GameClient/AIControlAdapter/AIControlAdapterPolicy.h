@@ -1,5 +1,9 @@
 #pragma once
 
+#include <vector>
+
+#include "GameNetwork/GeneralsOnline/json.hpp"
+
 struct AIControlAdapterProductionPolicyInputs
 {
 	bool isBalancedSprawl;
@@ -63,9 +67,12 @@ const char* AIControlAdapterGetEcoRecoveryBuild(const AIControlAdapterEcoRecover
 bool AIControlAdapterShouldAbortSciencePlanForTick(const char* reason);
 bool AIControlAdapterShouldAbortUpgradePlanForTick(const char* reason);
 unsigned int AIControlAdapterGetTechRetryDelayMs(bool issued, const char* reason);
+unsigned int AIControlAdapterGetProductionRetryDelayMs(bool issued, const char* reason);
 
 struct AIControlAdapterRadarVanPolicyInputs
 {
+	bool shouldPauseForEconomy;
+	bool shouldHoldArmyCap;
 	int armsDealers;
 	int radarVans;
 	int combatVehicles;
@@ -93,6 +100,9 @@ struct AIControlAdapterProductionChoiceInputs
 	int quads;
 	int scorpions;
 	int scudLaunchers;
+	int radarVans;
+	int armyCount;
+	int armyCap;
 };
 
 struct AIControlAdapterProductionChoiceResult
@@ -161,3 +171,46 @@ bool AIControlAdapterShouldPrioritizeMarketsOverProductionBuildings(
 	const AIControlAdapterMarketGrowthPolicyInputs& inputs);
 
 bool AIControlAdapterShouldAbortUpgradePlanForReason(const char* reason);
+
+struct AIControlAdapterMapPoint
+{
+	float x;
+	float y;
+};
+
+bool AIControlAdapterTryNormalizeDirection(float dx, float dy, float& outDx, float& outDy);
+bool AIControlAdapterTryReadMapPosition(const nlohmann::json& mapPos, AIControlAdapterMapPoint& outPos);
+bool AIControlAdapterTryGetRecentAttackTarget(
+	const nlohmann::json& events,
+	unsigned int nowTick,
+	unsigned int freshnessMs,
+	AIControlAdapterMapPoint& outPos);
+
+struct AIControlAdapterZoneFrontDirectionResult
+{
+	float dx;
+	float dy;
+	const char* source;
+};
+
+AIControlAdapterZoneFrontDirectionResult AIControlAdapterResolveZoneFrontDirection(
+	const AIControlAdapterMapPoint& zoneCenter,
+	bool hasRecentAttackTarget,
+	const AIControlAdapterMapPoint& recentAttackTarget,
+	bool hasPreferredEnemyBase,
+	const AIControlAdapterMapPoint& preferredEnemyBase,
+	const std::vector<AIControlAdapterMapPoint>& knownEnemyBases,
+	float fallbackDx,
+	float fallbackDy);
+
+struct AIControlAdapterZoneFrontRearPoints
+{
+	AIControlAdapterMapPoint frontPoint;
+	AIControlAdapterMapPoint rearPoint;
+};
+
+AIControlAdapterZoneFrontRearPoints AIControlAdapterBuildZoneFrontRearPoints(
+	const AIControlAdapterMapPoint& center,
+	float radius,
+	float dirDx,
+	float dirDy);

@@ -1,5 +1,6 @@
-#include "GameClient/AIControlAdapterPolicy.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterPolicy.h"
 
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -11,6 +12,15 @@ namespace
 		if (!condition)
 		{
 			std::cerr << "FAIL: " << message << "\n";
+			std::exit(1);
+		}
+	}
+
+	void expectNear(float actual, float expected, float epsilon, const char* message)
+	{
+		if (std::fabs(actual - expected) > epsilon)
+		{
+			std::cerr << "FAIL: " << message << " actual=" << actual << " expected=" << expected << "\n";
 			std::exit(1);
 		}
 	}
@@ -136,12 +146,26 @@ int main()
 			true,
 			true,
 			true,
-			11500u,
+			12999u,
 			10000u,
 			0,
 			0
 		};
-		expect(!AIControlAdapterShouldPauseCombatProduction(inputs), "balanced sprawl should resume after clearing the reserve hysteresis buffer");
+		expect(AIControlAdapterShouldPauseCombatProduction(inputs), "balanced sprawl should keep recovering until it clears the widened reserve hysteresis buffer");
+	}
+
+	{
+		const AIControlAdapterProductionPolicyInputs inputs = {
+			true,
+			true,
+			true,
+			true,
+			13000u,
+			10000u,
+			0,
+			0
+		};
+		expect(!AIControlAdapterShouldPauseCombatProduction(inputs), "balanced sprawl should resume after clearing the widened reserve hysteresis buffer");
 	}
 
 	expect(!AIControlAdapterShouldHoldArmyCap({
@@ -299,19 +323,29 @@ int main()
 	expect(AIControlAdapterGetTechRetryDelayMs(false, "tech_prereq_missing") == 12000u, "missing tech prerequisites should back off moderately");
 	expect(AIControlAdapterGetTechRetryDelayMs(false, "science_not_purchasable") == 15000u, "non-actionable science should back off longer");
 	expect(AIControlAdapterGetTechRetryDelayMs(false, "queue_full") == 15000u, "queue contention should back off longer");
+	expect(AIControlAdapterGetProductionRetryDelayMs(true, "ok") == 2200u, "successful production should keep the normal cadence");
+	expect(AIControlAdapterGetProductionRetryDelayMs(false, "queue_full") == 3500u, "queue-full production retries should back off instead of spamming every tick");
+	expect(AIControlAdapterGetProductionRetryDelayMs(false, "producer_under_construction") == 5000u, "producer-under-construction retries should back off longer");
+	expect(AIControlAdapterGetProductionRetryDelayMs(false, "no_prereq") == 6000u, "no-prereq production retries should back off the most");
+	expect(AIControlAdapterGetProductionRetryDelayMs(false, "no_money") == 2500u, "no-money production retries should keep a moderate backoff");
+	expect(AIControlAdapterGetProductionRetryDelayMs(false, "") == 1500u, "generic production failures should keep the default short retry");
 
 	{
 		const AIControlAdapterRadarVanPolicyInputs inputs = {
+			true,
+			false,
 			0,
 			0,
 			5,
 			1
 		};
-		expect(!AIControlAdapterShouldQueueRadarVan(inputs), "radar van automation should require an arms dealer");
+		expect(!AIControlAdapterShouldQueueRadarVan(inputs), "radar van automation should remain paused during reserve recovery");
 	}
 
 	{
 		const AIControlAdapterRadarVanPolicyInputs inputs = {
+			false,
+			false,
 			1,
 			0,
 			0,
@@ -322,6 +356,8 @@ int main()
 
 	{
 		const AIControlAdapterRadarVanPolicyInputs inputs = {
+			false,
+			false,
 			1,
 			0,
 			1,
@@ -332,6 +368,8 @@ int main()
 
 	{
 		const AIControlAdapterRadarVanPolicyInputs inputs = {
+			false,
+			false,
 			1,
 			1,
 			1,
@@ -342,12 +380,26 @@ int main()
 
 	{
 		const AIControlAdapterRadarVanPolicyInputs inputs = {
+			false,
+			false,
 			2,
 			1,
 			3,
 			2
 		};
 		expect(AIControlAdapterShouldQueueRadarVan(inputs), "radar van automation should still allow another radar van when combat vehicles clearly outnumber them");
+	}
+
+	{
+		const AIControlAdapterRadarVanPolicyInputs inputs = {
+			false,
+			true,
+			2,
+			0,
+			6,
+			1
+		};
+		expect(!AIControlAdapterShouldQueueRadarVan(inputs), "radar van automation should not add more units while the army cap hold is active");
 	}
 
 	{
@@ -509,7 +561,10 @@ int main()
 			0,
 			0,
 			0,
-			0
+			0,
+			0,
+			4,
+			100
 		});
 		expect(result.command == nullptr, "production choice should not queue units during reserve recovery");
 		expect(std::string(result.reason) == "reserve_cash_recovery", "production choice should preserve the pause reason");
@@ -530,7 +585,10 @@ int main()
 			0,
 			0,
 			0,
-			0
+			0,
+			0,
+			6,
+			100
 		});
 		expect(std::string(result.command) == "Game.QueueQuadsAllWarFactories", "balanced sprawl should seed vehicles once arms dealers exist and no vehicles are present");
 	}
@@ -550,7 +608,10 @@ int main()
 			8,
 			0,
 			0,
-			0
+			0,
+			0,
+			20,
+			100
 		});
 		expect(std::string(result.command) == "Game.QueueQuadsAllWarFactories", "balanced sprawl should keep replenishing vehicles when the frontline vehicle floor is still weak");
 	}
@@ -570,9 +631,12 @@ int main()
 			0,
 			4,
 			0,
-			0
+			0,
+			0,
+			10,
+			100
 		});
-		expect(std::string(result.command) == "Game.QueueRpgTroopersAllBarracks", "balanced sprawl should return to infantry once the frontline vehicle floor is healthy");
+		expect(std::string(result.command) == "Game.QueueScorpionsAllWarFactories", "balanced sprawl should keep building toward the vehicle target instead of immediately falling back to barracks-first spam");
 	}
 
 	{
@@ -590,7 +654,10 @@ int main()
 			0,
 			0,
 			0,
-			0
+			0,
+			0,
+			0,
+			9999
 	});
 	expect(std::string(result.command) == "Game.QueueQuadsAllWarFactories", "non-barracks profiles should still choose vehicle production when only arms dealers are available");
 	}
@@ -610,10 +677,60 @@ int main()
 			20,
 			10,
 			6,
-			0
+			0,
+			0,
+			56,
+			100
 		});
 		expect(result.command == nullptr, "balanced sprawl should hold production entirely while the army cap lock is active");
 		expect(std::string(result.reason) == "army_cap_reached", "army cap hold should return a stable reason for logging and throttling");
+	}
+
+	{
+		const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
+			false,
+			"",
+			false,
+			true,
+			"sprawl_balanced",
+			2000u,
+			2,
+			2,
+			1,
+			28,
+			10,
+			24,
+			20,
+			2,
+			4,
+			96,
+			100
+		});
+		expect(result.command == nullptr, "balanced sprawl should stop queueing when the mobile army is near cap and both composition buckets are already healthy");
+		expect(std::string(result.reason) == "army_cap_buffer", "balanced sprawl should report a stable near-cap buffer reason before hard cap hold engages");
+	}
+
+	{
+		const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
+			false,
+			"",
+			false,
+			true,
+			"sprawl_balanced",
+			2000u,
+			2,
+			2,
+			1,
+			12,
+			10,
+			18,
+			14,
+			0,
+			3,
+			57,
+			100
+		});
+		expect(std::string(result.command) == "Game.QueueRpgTroopersAllBarracks", "balanced sprawl should refill infantry when vehicles are already ahead and infantry is the larger end-state deficit");
 	}
 
 	expect(AIControlAdapterHasTickElapsed(0u, 0u), "zero deadline should be ready immediately at tick zero");
@@ -628,6 +745,123 @@ int main()
 	expect(!AIControlAdapterHasTickElapsed(0x80000010u, 0x7ffffff0u), "wrap-safe comparison should not treat a slightly later deadline as elapsed before it arrives");
 	expect(AIControlAdapterIsTickInFuture(0x80000010u, 0x7ffffff0u), "wrap-safe comparison should detect future deadlines across the signed boundary");
 	expect(!AIControlAdapterIsTickInFuture(0x7ffffff0u, 0x80000010u), "elapsed deadlines across the signed boundary should not remain future");
+
+	{
+		float dx = 0.0f;
+		float dy = 0.0f;
+		expect(AIControlAdapterTryNormalizeDirection(3.0f, 4.0f, dx, dy), "direction normalization should accept normal vectors");
+		expectNear(dx, 0.6f, 0.0001f, "normalized dx should match expected value");
+		expectNear(dy, 0.8f, 0.0001f, "normalized dy should match expected value");
+		expectNear((dx * dx) + (dy * dy), 1.0f, 0.0002f, "normalized vector magnitude should be approximately one");
+	}
+
+	{
+		float dx = 0.0f;
+		float dy = 0.0f;
+		expect(!AIControlAdapterTryNormalizeDirection(0.0f, 0.0f, dx, dy), "direction normalization should reject zero vectors");
+		expect(!AIControlAdapterTryNormalizeDirection(0.5f, 0.5f, dx, dy), "direction normalization should reject near-zero vectors");
+	}
+
+	{
+		AIControlAdapterMapPoint point = { 0.0f, 0.0f };
+		expect(AIControlAdapterTryReadMapPosition(nlohmann::json::object({ { "x", 120.5f }, { "y", -42.0f } }), point), "map position extraction should accept numeric x/y");
+		expectNear(point.x, 120.5f, 0.0001f, "map position x should match input");
+		expectNear(point.y, -42.0f, 0.0001f, "map position y should match input");
+		expect(!AIControlAdapterTryReadMapPosition(nlohmann::json::array(), point), "map position extraction should reject non-object payloads");
+		expect(!AIControlAdapterTryReadMapPosition(nlohmann::json::object({ { "x", 1.0f } }), point), "map position extraction should reject missing y");
+		expect(!AIControlAdapterTryReadMapPosition(nlohmann::json::object({ { "y", 1.0f } }), point), "map position extraction should reject missing x");
+		expect(!AIControlAdapterTryReadMapPosition(nlohmann::json::object({ { "x", "bad" }, { "y", 1.0f } }), point), "map position extraction should reject wrong x types");
+	}
+
+	{
+		AIControlAdapterMapPoint attackPoint = { 0.0f, 0.0f };
+		const nlohmann::json events = nlohmann::json::array({
+			nlohmann::json::object({ { "kind", "move" }, { "x", 10.0f }, { "y", 20.0f }, { "tick", 980u } }),
+			nlohmann::json::object({ { "kind", "attack" }, { "x", 30.0f }, { "y", 40.0f }, { "tick", 900u } }),
+			nlohmann::json::object({ { "kind", "attack" }, { "x", 50.0f }, { "y", 60.0f }, { "tick", 995u } })
+		});
+		expect(AIControlAdapterTryGetRecentAttackTarget(events, 1000u, 45u, attackPoint), "recent attack target should accept fresh attack events");
+		expectNear(attackPoint.x, 50.0f, 0.0001f, "recent attack target should prefer the newest valid event");
+		expectNear(attackPoint.y, 60.0f, 0.0001f, "recent attack target y should prefer the newest valid event");
+		expect(!AIControlAdapterTryGetRecentAttackTarget(events, 1000u, 2u, attackPoint), "recent attack target should reject stale events");
+		expect(!AIControlAdapterTryGetRecentAttackTarget(nlohmann::json::array({
+			nlohmann::json::object({ { "kind", "attack" }, { "tick", 995u } })
+		}), 1000u, 45u, attackPoint), "recent attack target should reject malformed attack events");
+	}
+
+	{
+		const AIControlAdapterMapPoint zoneCenter = { 100.0f, 100.0f };
+		const AIControlAdapterMapPoint attackPoint = { 130.0f, 100.0f };
+		const AIControlAdapterMapPoint preferredEnemyBase = { 100.0f, 200.0f };
+		const std::vector<AIControlAdapterMapPoint> enemyBases = {
+			{ 300.0f, 100.0f },
+			{ 120.0f, 100.0f }
+		};
+
+		AIControlAdapterZoneFrontDirectionResult result = AIControlAdapterResolveZoneFrontDirection(
+			zoneCenter,
+			true,
+			attackPoint,
+			true,
+			preferredEnemyBase,
+			enemyBases,
+			0.0f,
+			-1.0f);
+		expect(std::string(result.source) == "attack_target", "front direction should prefer a recent attack target");
+		expectNear(result.dx, 1.0f, 0.0001f, "attack-target front direction should point at the attack target");
+		expectNear(result.dy, 0.0f, 0.0001f, "attack-target front direction should point at the attack target");
+
+		result = AIControlAdapterResolveZoneFrontDirection(
+			zoneCenter,
+			false,
+			attackPoint,
+			true,
+			preferredEnemyBase,
+			enemyBases,
+			0.0f,
+			-1.0f);
+		expect(std::string(result.source) == "enemy_base", "front direction should fall back to preferred enemy base");
+		expectNear(result.dx, 0.0f, 0.0001f, "preferred enemy-base front direction should point vertically");
+		expectNear(result.dy, 1.0f, 0.0001f, "preferred enemy-base front direction should point vertically");
+
+		result = AIControlAdapterResolveZoneFrontDirection(
+			zoneCenter,
+			false,
+			attackPoint,
+			false,
+			preferredEnemyBase,
+			enemyBases,
+			0.0f,
+			-1.0f);
+		expect(std::string(result.source) == "enemy_base", "front direction should fall back to nearest known enemy base");
+		expectNear(result.dx, 1.0f, 0.0001f, "nearest enemy-base front direction should choose the closest base");
+		expectNear(result.dy, 0.0f, 0.0001f, "nearest enemy-base front direction should choose the closest base");
+
+		result = AIControlAdapterResolveZoneFrontDirection(
+			zoneCenter,
+			false,
+			attackPoint,
+			false,
+			preferredEnemyBase,
+			std::vector<AIControlAdapterMapPoint>{ { 100.0f, 100.0f } },
+			0.0f,
+			-1.0f);
+		expect(std::string(result.source) == "sprawl_axis", "front direction should fall back to the sprawl axis when other sources are degenerate");
+		expectNear(result.dx, 0.0f, 0.0001f, "sprawl-axis fallback dx should be preserved");
+		expectNear(result.dy, -1.0f, 0.0001f, "sprawl-axis fallback dy should be preserved");
+	}
+
+	{
+		const AIControlAdapterZoneFrontRearPoints points = AIControlAdapterBuildZoneFrontRearPoints(
+			{ 10.0f, 20.0f },
+			5.0f,
+			0.6f,
+			0.8f);
+		expectNear(points.frontPoint.x, 13.0f, 0.0001f, "front point x should be center plus direction times radius");
+		expectNear(points.frontPoint.y, 24.0f, 0.0001f, "front point y should be center plus direction times radius");
+		expectNear(points.rearPoint.x, 7.0f, 0.0001f, "rear point x should be center minus direction times radius");
+		expectNear(points.rearPoint.y, 16.0f, 0.0001f, "rear point y should be center minus direction times radius");
+	}
 
 	std::cout << "AIControlAdapterPolicyTests passed\n";
 	return 0;

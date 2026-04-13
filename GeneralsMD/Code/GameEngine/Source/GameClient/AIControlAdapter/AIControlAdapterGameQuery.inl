@@ -295,19 +295,19 @@
 
 		void refreshOwnedObjectCache(Player* player)
 		{
-			m_ownedCacheUnits = nlohmann::json::array();
-			m_ownedCacheBuildings = nlohmann::json::array();
-			m_ownedCacheIdleWorkers = nlohmann::json::array();
-			m_ownedCacheUnitsTotal = 0;
-			m_ownedCacheBuildingsTotal = 0;
-			m_ownedCacheIdleWorkersTotal = 0;
+			m_cache.units = nlohmann::json::array();
+			m_cache.buildings = nlohmann::json::array();
+			m_cache.idleWorkers = nlohmann::json::array();
+			m_cache.unitsTotal = 0;
+			m_cache.buildingsTotal = 0;
+			m_cache.idleWorkersTotal = 0;
 
 			if (player == nullptr)
 			{
-				m_ownedCacheValid = true;
-				m_ownedCachePlayerIndex = -1;
-				++m_ownedCacheVersion;
-				m_ownedCacheLastRefreshTick = ::GetTickCount();
+				m_cache.valid = true;
+				m_cache.playerIndex = -1;
+				++m_cache.version;
+				m_cache.lastRefreshTick = ::GetTickCount();
 				return;
 			}
 
@@ -330,13 +330,13 @@
 				nlohmann::json row = self->buildObjectMapRow(obj, true);
 				if (isStructure)
 				{
-					++self->m_ownedCacheBuildingsTotal;
-					self->m_ownedCacheBuildings.push_back(row);
+					++self->m_cache.buildingsTotal;
+					self->m_cache.buildings.push_back(row);
 					return;
 				}
 
-				++self->m_ownedCacheUnitsTotal;
-				self->m_ownedCacheUnits.push_back(row);
+				++self->m_cache.unitsTotal;
+				self->m_cache.units.push_back(row);
 
 				const ThingTemplate* tt = obj->getTemplate();
 				if (tt == nullptr)
@@ -354,23 +354,23 @@
 					return;
 				}
 
-				++self->m_ownedCacheIdleWorkersTotal;
-				self->m_ownedCacheIdleWorkers.push_back(row);
+				++self->m_cache.idleWorkersTotal;
+				self->m_cache.idleWorkers.push_back(row);
 			}, &ctx);
 
-			m_ownedCacheValid = true;
-			m_ownedCachePlayerIndex = player->getPlayerIndex();
-			++m_ownedCacheVersion;
-			m_ownedCacheLastRefreshTick = ::GetTickCount();
+			m_cache.valid = true;
+			m_cache.playerIndex = player->getPlayerIndex();
+			++m_cache.version;
+			m_cache.lastRefreshTick = ::GetTickCount();
 		}
 
 		void ensureOwnedObjectCache(Player* player, DWORD maxCacheAgeMs = 60000u)
 		{
 			const Int playerIndex = (player != nullptr) ? player->getPlayerIndex() : -1;
 			const DWORD nowTick = ::GetTickCount();
-			if (m_ownedCacheValid && m_ownedCachePlayerIndex == playerIndex)
+			if (m_cache.valid && m_cache.playerIndex == playerIndex)
 			{
-				const DWORD age = nowTick - m_ownedCacheLastRefreshTick;
+				const DWORD age = nowTick - m_cache.lastRefreshTick;
 				if (age <= maxCacheAgeMs)
 				{
 					return;
@@ -459,9 +459,9 @@
 		nlohmann::json buildOwnedObjectsUnitsMap(Player* player, std::size_t maxUnits)
 		{
 			ensureOwnedObjectCache(player);
-			nlohmann::json units = truncateJsonArray(m_ownedCacheUnits, maxUnits);
+			nlohmann::json units = truncateJsonArray(m_cache.units, maxUnits);
 			const Int playerIndex = (player != nullptr) ? player->getPlayerIndex() : -1;
-			const Int totalUnits = (player != nullptr) ? m_ownedCacheUnitsTotal : 0;
+			const Int totalUnits = (player != nullptr) ? m_cache.unitsTotal : 0;
 
 			return nlohmann::json{
 				{"player_index", playerIndex},
@@ -469,17 +469,17 @@
 				{"units_total", totalUnits},
 				{"truncated", units.size() < static_cast<std::size_t>(totalUnits)},
 				{"path", "game.objects_units_map"},
-				{"cache_version", m_ownedCacheVersion},
-				{"cache_age_ms", ::GetTickCount() - m_ownedCacheLastRefreshTick}
+				{"cache_version", m_cache.version},
+				{"cache_age_ms", ::GetTickCount() - m_cache.lastRefreshTick}
 			};
 		}
 
 		nlohmann::json buildOwnedObjectsBuildingsMap(Player* player, std::size_t maxBuildings)
 		{
 			ensureOwnedObjectCache(player);
-			nlohmann::json buildings = truncateJsonArray(m_ownedCacheBuildings, maxBuildings);
+			nlohmann::json buildings = truncateJsonArray(m_cache.buildings, maxBuildings);
 			const Int playerIndex = (player != nullptr) ? player->getPlayerIndex() : -1;
-			const Int totalBuildings = (player != nullptr) ? m_ownedCacheBuildingsTotal : 0;
+			const Int totalBuildings = (player != nullptr) ? m_cache.buildingsTotal : 0;
 
 			return nlohmann::json{
 				{"player_index", playerIndex},
@@ -487,17 +487,17 @@
 				{"buildings_total", totalBuildings},
 				{"truncated", buildings.size() < static_cast<std::size_t>(totalBuildings)},
 				{"path", "game.objects_buildings_map"},
-				{"cache_version", m_ownedCacheVersion},
-				{"cache_age_ms", ::GetTickCount() - m_ownedCacheLastRefreshTick}
+				{"cache_version", m_cache.version},
+				{"cache_age_ms", ::GetTickCount() - m_cache.lastRefreshTick}
 			};
 		}
 
 		nlohmann::json buildIdleWorkersSummary(Player* player, std::size_t maxWorkers)
 		{
 			ensureOwnedObjectCache(player);
-			nlohmann::json workers = truncateJsonArray(m_ownedCacheIdleWorkers, maxWorkers);
+			nlohmann::json workers = truncateJsonArray(m_cache.idleWorkers, maxWorkers);
 			const Int playerIndex = (player != nullptr) ? player->getPlayerIndex() : -1;
-			const Int totalIdleWorkers = (player != nullptr) ? m_ownedCacheIdleWorkersTotal : 0;
+			const Int totalIdleWorkers = (player != nullptr) ? m_cache.idleWorkersTotal : 0;
 
 			return nlohmann::json{
 				{"player_index", playerIndex},
@@ -505,8 +505,8 @@
 				{"idle_workers_total", totalIdleWorkers},
 				{"truncated", workers.size() < static_cast<std::size_t>(totalIdleWorkers)},
 				{"path", "game.idle_workers"},
-				{"cache_version", m_ownedCacheVersion},
-				{"cache_age_ms", ::GetTickCount() - m_ownedCacheLastRefreshTick}
+				{"cache_version", m_cache.version},
+				{"cache_age_ms", ::GetTickCount() - m_cache.lastRefreshTick}
 			};
 		}
 
@@ -1408,16 +1408,16 @@
 			if (path == "game.objects_cache_status")
 			{
 				const Int selectedIndex = selectedPlayer != nullptr ? selectedPlayer->getPlayerIndex() : -1;
-				const bool validForSelected = m_ownedCacheValid && (m_ownedCachePlayerIndex == selectedIndex);
+				const bool validForSelected = m_cache.valid && (m_cache.playerIndex == selectedIndex);
 				result = nlohmann::json{
 					{"player_index", selectedIndex},
 					{"cache_valid", validForSelected},
-					{"cache_player_index", m_ownedCachePlayerIndex},
-					{"cache_version", m_ownedCacheVersion},
-					{"cache_age_ms", validForSelected ? (::GetTickCount() - m_ownedCacheLastRefreshTick) : 0u},
-					{"units_total", validForSelected ? m_ownedCacheUnitsTotal : 0},
-					{"buildings_total", validForSelected ? m_ownedCacheBuildingsTotal : 0},
-					{"idle_workers_total", validForSelected ? m_ownedCacheIdleWorkersTotal : 0},
+					{"cache_player_index", m_cache.playerIndex},
+					{"cache_version", m_cache.version},
+					{"cache_age_ms", validForSelected ? (::GetTickCount() - m_cache.lastRefreshTick) : 0u},
+					{"units_total", validForSelected ? m_cache.unitsTotal : 0},
+					{"buildings_total", validForSelected ? m_cache.buildingsTotal : 0},
+					{"idle_workers_total", validForSelected ? m_cache.idleWorkersTotal : 0},
 					{"path", "game.objects_cache_status"}
 				};
 				result["is_local_player"] = (selectedPlayer == localPlayer);
@@ -1429,11 +1429,11 @@
 				refreshOwnedObjectCache(selectedPlayer);
 				result = nlohmann::json{
 					{"player_index", selectedPlayer != nullptr ? selectedPlayer->getPlayerIndex() : -1},
-					{"cache_version", m_ownedCacheVersion},
+					{"cache_version", m_cache.version},
 					{"cache_age_ms", 0u},
-					{"units_total", m_ownedCacheUnitsTotal},
-					{"buildings_total", m_ownedCacheBuildingsTotal},
-					{"idle_workers_total", m_ownedCacheIdleWorkersTotal},
+					{"units_total", m_cache.unitsTotal},
+					{"buildings_total", m_cache.buildingsTotal},
+					{"idle_workers_total", m_cache.idleWorkersTotal},
 					{"path", "game.objects_cache_refresh"}
 				};
 				result["is_local_player"] = (selectedPlayer == localPlayer);

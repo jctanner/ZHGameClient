@@ -1,8 +1,9 @@
 #include "PreRTS.h"
 
-#include "GameClient/AIControlAdapterPolicy.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterPolicy.h"
 
 #include <windows.h>
+#include <cmath>
 #include <cstring>
 
 bool AIControlAdapterShouldPauseCombatProduction(const AIControlAdapterProductionPolicyInputs& inputs)
@@ -34,7 +35,7 @@ bool AIControlAdapterShouldPauseCombatProduction(const AIControlAdapterProductio
 		return true;
 	}
 
-	if (inputs.wasRecoveringFromReserve && inputs.money < (inputs.reserveCash + 1500u))
+	if (inputs.wasRecoveringFromReserve && inputs.money < (inputs.reserveCash + 3000u))
 	{
 		return true;
 	}
@@ -294,8 +295,48 @@ unsigned int AIControlAdapterGetTechRetryDelayMs(bool issued, const char* reason
 	return 8000u;
 }
 
+unsigned int AIControlAdapterGetProductionRetryDelayMs(bool issued, const char* reason)
+{
+	if (issued)
+	{
+		return 2200u;
+	}
+
+	if (reason == nullptr || *reason == '\0')
+	{
+		return 1500u;
+	}
+
+	if (std::strcmp(reason, "queue_full") == 0)
+	{
+		return 3500u;
+	}
+
+	if (std::strcmp(reason, "producer_under_construction") == 0)
+	{
+		return 5000u;
+	}
+
+	if (std::strcmp(reason, "no_prereq") == 0)
+	{
+		return 6000u;
+	}
+
+	if (std::strcmp(reason, "no_money") == 0)
+	{
+		return 2500u;
+	}
+
+	return 1500u;
+}
+
 bool AIControlAdapterShouldQueueRadarVan(const AIControlAdapterRadarVanPolicyInputs& inputs)
 {
+	if (inputs.shouldPauseForEconomy || inputs.shouldHoldArmyCap)
+	{
+		return false;
+	}
+
 	if (inputs.armsDealers <= 0)
 	{
 		return false;
@@ -404,6 +445,8 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 	const char* profile = inputs.profile != nullptr ? inputs.profile : "";
 	const bool aggressive = std::strcmp(profile, "aggressive") == 0;
 	const bool techy = std::strcmp(profile, "tech") == 0 || std::strcmp(profile, "sprawl") == 0 || inputs.isBalancedSprawl;
+	const int infantry = inputs.soldiers + inputs.rpg;
+	const int frontlineVehicles = inputs.quads + inputs.scorpions + inputs.scudLaunchers;
 	const bool preferVehicleReplenishment = AIControlAdapterShouldPreferVehicleReplenishment({
 		inputs.isBalancedSprawl,
 		inputs.armsDealers,
@@ -424,6 +467,88 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 	if (inputs.shouldHoldArmyCap)
 	{
 		return { nullptr, "army_cap_reached" };
+	}
+
+	if (inputs.isBalancedSprawl && inputs.armyCap > 0)
+	{
+		const int supportReserve = inputs.armsDealers <= 1 ? 2 : 4;
+		const int targetCombatCount = inputs.armyCap > supportReserve ? (inputs.armyCap - supportReserve) : inputs.armyCap;
+		const int desiredVehicleCount = (targetCombatCount * 11) / 20;
+		const int desiredInfantryCount = targetCombatCount - desiredVehicleCount;
+		const int vehicleDeficit = desiredVehicleCount - frontlineVehicles;
+		const int infantryDeficit = desiredInfantryCount - infantry;
+		const bool canQueueVehicles = inputs.armsDealers > 0 && inputs.money >= 700u;
+		const bool canQueueInfantry = inputs.barracks > 0 && inputs.money >= 300u;
+		const bool nearArmyCap = inputs.armyCount >= (inputs.armyCap - 5);
+		const bool compositionCloseEnough = std::abs(vehicleDeficit) <= 8 && std::abs(infantryDeficit) <= 8;
+
+		if (inputs.armyCount >= inputs.armyCap)
+		{
+			return { nullptr, "army_cap_reached" };
+		}
+
+		if (nearArmyCap && compositionCloseEnough)
+		{
+			return { nullptr, "army_cap_buffer" };
+		}
+
+		if (canQueueVehicles
+			&& (preferVehicleReplenishment
+				|| !canQueueInfantry
+				|| vehicleDeficit > infantryDeficit))
+		{
+			if (techy
+				&& inputs.palaces > 0
+				&& inputs.scudLaunchers < ((inputs.quads + inputs.scorpions) / 10 > 1 ? (inputs.quads + inputs.scorpions) / 10 : 1)
+				&& inputs.money >= 1200u)
+			{
+				return { "Game.QueueScudLauncher", "" };
+			}
+			if (aggressive || inputs.quads <= inputs.scorpions)
+			{
+				return { "Game.QueueQuadsAllWarFactories", "" };
+			}
+			return { "Game.QueueScorpionsAllWarFactories", "" };
+		}
+
+		if (canQueueInfantry
+			&& (!canQueueVehicles
+				|| infantryDeficit > 0
+				|| inputs.armyCount < (inputs.armyCap / 2)))
+		{
+			if (aggressive || inputs.rpg < inputs.soldiers)
+			{
+				return { "Game.QueueRpgTroopersAllBarracks", "" };
+			}
+			return { "Game.QueueSoldiersAllBarracks", "" };
+		}
+
+		if (canQueueVehicles)
+		{
+			if (techy
+				&& inputs.palaces > 0
+				&& inputs.scudLaunchers < ((inputs.quads + inputs.scorpions) / 10 > 1 ? (inputs.quads + inputs.scorpions) / 10 : 1)
+				&& inputs.money >= 1200u)
+			{
+				return { "Game.QueueScudLauncher", "" };
+			}
+			if (aggressive || inputs.quads <= inputs.scorpions)
+			{
+				return { "Game.QueueQuadsAllWarFactories", "" };
+			}
+			return { "Game.QueueScorpionsAllWarFactories", "" };
+		}
+
+		if (canQueueInfantry)
+		{
+			if (aggressive || inputs.rpg < inputs.soldiers)
+			{
+				return { "Game.QueueRpgTroopersAllBarracks", "" };
+			}
+			return { "Game.QueueSoldiersAllBarracks", "" };
+		}
+
+		return { nullptr, "" };
 	}
 
 	if (inputs.isBalancedSprawl
@@ -491,4 +616,161 @@ bool AIControlAdapterIsTickInFuture(unsigned int deadline, unsigned int now)
 	}
 
 	return static_cast<LONG>(now - deadline) < 0;
+}
+
+bool AIControlAdapterTryNormalizeDirection(float dx, float dy, float& outDx, float& outDy)
+{
+	const float lenSq = (dx * dx) + (dy * dy);
+	if (lenSq <= 1.0f)
+	{
+		return false;
+	}
+
+	const float invLen = 1.0f / std::sqrt(lenSq);
+	outDx = dx * invLen;
+	outDy = dy * invLen;
+	return true;
+}
+
+bool AIControlAdapterTryReadMapPosition(const nlohmann::json& mapPos, AIControlAdapterMapPoint& outPos)
+{
+	if (!mapPos.is_object())
+	{
+		return false;
+	}
+
+	const auto xIt = mapPos.find("x");
+	const auto yIt = mapPos.find("y");
+	if (xIt == mapPos.end() || yIt == mapPos.end() || !xIt->is_number() || !yIt->is_number())
+	{
+		return false;
+	}
+
+	outPos.x = xIt->get<float>();
+	outPos.y = yIt->get<float>();
+	return true;
+}
+
+bool AIControlAdapterTryGetRecentAttackTarget(
+	const nlohmann::json& events,
+	unsigned int nowTick,
+	unsigned int freshnessMs,
+	AIControlAdapterMapPoint& outPos)
+{
+	if (!events.is_array())
+	{
+		return false;
+	}
+
+	for (auto it = events.rbegin(); it != events.rend(); ++it)
+	{
+		if (!it->is_object())
+		{
+			continue;
+		}
+
+		if (it->value("kind", "") != "attack")
+		{
+			continue;
+		}
+
+		const auto xIt = it->find("x");
+		const auto yIt = it->find("y");
+		if (xIt == it->end() || yIt == it->end() || !xIt->is_number() || !yIt->is_number())
+		{
+			continue;
+		}
+
+		const unsigned int eventTick = it->value("tick", 0u);
+		if (eventTick != 0u && (nowTick - eventTick) > freshnessMs)
+		{
+			continue;
+		}
+
+		outPos.x = xIt->get<float>();
+		outPos.y = yIt->get<float>();
+		return true;
+	}
+
+	return false;
+}
+
+AIControlAdapterZoneFrontDirectionResult AIControlAdapterResolveZoneFrontDirection(
+	const AIControlAdapterMapPoint& zoneCenter,
+	bool hasRecentAttackTarget,
+	const AIControlAdapterMapPoint& recentAttackTarget,
+	bool hasPreferredEnemyBase,
+	const AIControlAdapterMapPoint& preferredEnemyBase,
+	const std::vector<AIControlAdapterMapPoint>& knownEnemyBases,
+	float fallbackDx,
+	float fallbackDy)
+{
+	AIControlAdapterZoneFrontDirectionResult result = {
+		fallbackDx,
+		fallbackDy,
+		"sprawl_axis"
+	};
+
+	if (hasRecentAttackTarget
+		&& AIControlAdapterTryNormalizeDirection(
+			recentAttackTarget.x - zoneCenter.x,
+			recentAttackTarget.y - zoneCenter.y,
+			result.dx,
+			result.dy))
+	{
+		result.source = "attack_target";
+		return result;
+	}
+
+	if (hasPreferredEnemyBase
+		&& AIControlAdapterTryNormalizeDirection(
+			preferredEnemyBase.x - zoneCenter.x,
+			preferredEnemyBase.y - zoneCenter.y,
+			result.dx,
+			result.dy))
+	{
+		result.source = "enemy_base";
+		return result;
+	}
+
+	bool hasNearestEnemyBase = false;
+	AIControlAdapterMapPoint nearestEnemyBase = {};
+	float nearestEnemyBaseDistSq = 0.0f;
+	for (const AIControlAdapterMapPoint& candidatePos : knownEnemyBases)
+	{
+		const float candidateDx = candidatePos.x - zoneCenter.x;
+		const float candidateDy = candidatePos.y - zoneCenter.y;
+		const float candidateDistSq = (candidateDx * candidateDx) + (candidateDy * candidateDy);
+		if (!hasNearestEnemyBase || candidateDistSq < nearestEnemyBaseDistSq)
+		{
+			hasNearestEnemyBase = true;
+			nearestEnemyBase = candidatePos;
+			nearestEnemyBaseDistSq = candidateDistSq;
+		}
+	}
+
+	if (hasNearestEnemyBase
+		&& AIControlAdapterTryNormalizeDirection(
+			nearestEnemyBase.x - zoneCenter.x,
+			nearestEnemyBase.y - zoneCenter.y,
+			result.dx,
+			result.dy))
+	{
+		result.source = "enemy_base";
+		return result;
+	}
+
+	return result;
+}
+
+AIControlAdapterZoneFrontRearPoints AIControlAdapterBuildZoneFrontRearPoints(
+	const AIControlAdapterMapPoint& center,
+	float radius,
+	float dirDx,
+	float dirDy)
+{
+	return {
+		{ center.x + (dirDx * radius), center.y + (dirDy * radius) },
+		{ center.x - (dirDx * radius), center.y - (dirDy * radius) }
+	};
 }

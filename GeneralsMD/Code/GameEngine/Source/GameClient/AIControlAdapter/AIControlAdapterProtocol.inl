@@ -71,94 +71,6 @@
 			return nullptr;
 		}
 
-		void sendJsonLine(const nlohmann::json& payload)
-		{
-			if (!m_hasClient)
-			{
-				return;
-			}
-
-			std::string line = payload.dump();
-			adapterLog("send_raw %s", truncateForLog(line).c_str());
-			line.push_back('\n');
-
-			DWORD bytesWritten = 0;
-			if (!::WriteFile(m_pipe, line.data(), static_cast<DWORD>(line.size()), &bytesWritten, nullptr))
-			{
-				adapterLog("write_pipe_failed winerr=%lu", static_cast<unsigned long>(::GetLastError()));
-				resetClientConnection();
-			}
-		}
-
-		void sendProtocolError(const std::string& requestId, const char* code, const char* reason)
-		{
-			DEBUG_LOG(("[AICTRL] protocol_error request_id=%s code=%s reason=%s",
-				requestId.c_str(),
-				code != nullptr ? code : "",
-				reason != nullptr ? reason : ""));
-
-			nlohmann::json reply = {
-				{"type", "Error"},
-				{"request_id", requestId},
-				{"code", code},
-				{"reason", reason}
-			};
-			sendJsonLine(reply);
-		}
-
-		void sendActionAck(const std::string& requestId, bool ok, const char* code = nullptr, const char* reason = nullptr)
-		{
-			DEBUG_LOG(("[AICTRL] action_ack request_id=%s ok=%d code=%s reason=%s",
-				requestId.c_str(),
-				ok ? 1 : 0,
-				code != nullptr ? code : "",
-				reason != nullptr ? reason : ""));
-
-			nlohmann::json reply = {
-				{"type", "ActionAck"},
-				{"request_id", requestId},
-				{"ok", ok}
-			};
-
-			if (!ok)
-			{
-				reply["code"] = code != nullptr ? code : "internal_error";
-				reply["reason"] = reason != nullptr ? reason : "request_failed";
-			}
-
-			sendJsonLine(reply);
-		}
-
-		void sendQueryResult(const std::string& requestId, const nlohmann::json& result)
-		{
-			DEBUG_LOG(("[AICTRL] query_result request_id=%s ok=1", requestId.c_str()));
-
-			nlohmann::json reply = {
-				{"type", "QueryResult"},
-				{"request_id", requestId},
-				{"ok", true},
-				{"result", result}
-			};
-			sendJsonLine(reply);
-		}
-
-		void sendQueryError(const std::string& requestId, const char* code, const char* reason)
-		{
-			DEBUG_LOG(("[AICTRL] query_result request_id=%s ok=0 code=%s reason=%s",
-				requestId.c_str(),
-				code != nullptr ? code : "",
-				reason != nullptr ? reason : ""));
-
-			nlohmann::json reply = {
-				{"type", "QueryResult"},
-				{"request_id", requestId},
-				{"ok", false},
-				{"code", code != nullptr ? code : "invalid_state"},
-				{"reason", reason != nullptr ? reason : "query_failed"}
-			};
-			sendJsonLine(reply);
-		}
-
 		void handleMessage(const std::string& line)
 		{
 			const nlohmann::json message = nlohmann::json::parse(line, nullptr, false);
@@ -187,7 +99,7 @@
 					{"ok", true},
 					{"protocol", "zh-ai-control-v1"},
 					{"adapter_version", "0.1.0"},
-					{"session_id", m_sessionId},
+					{"session_id", m_log.sessionId()},
 					{"capabilities", nlohmann::json::array({
 						"session",
 						"menu_click",
@@ -905,7 +817,7 @@
 					truncateExisting = truncateIt->get<bool>();
 				}
 
-				if (!configureAdapterLogPath(pathIt->get<std::string>(), truncateExisting))
+				if (!m_log.configurePath(pathIt->get<std::string>(), truncateExisting))
 				{
 					sendActionAck(requestId, false, "invalid_state", "log_configure_failed");
 					return;
@@ -927,7 +839,7 @@
 					}
 				}
 
-				if (!resetAdapterLogFile(truncateExisting))
+				if (!m_log.resetFile(truncateExisting))
 				{
 					sendActionAck(requestId, false, "invalid_state", "log_reset_failed");
 					return;
