@@ -350,6 +350,36 @@
 			return true;
 		}
 
+		/**
+		 * Execute Menu.SelectComboBox command to select a combo box item via UI callbacks.
+		 *
+		 * This command selects an item in a combo box control and triggers the same UI callbacks
+		 * that would fire when the user clicks on the combo box. This ensures internal game state
+		 * and UI state remain synchronized.
+		 *
+		 * Why callbacks matter:
+		 * - Direct API calls (e.g., setting TheSkirmishGameInfo fields) update internal state but
+		 *   don't trigger UI event handlers like handlePlayerTemplateSelection() or handlePlayerSelection()
+		 * - Without callbacks, the UI displays stale data and other game systems don't react to changes
+		 * - Triggering GCM_SELECTED mimics user interaction and keeps everything in sync
+		 *
+		 * Message flow:
+		 * 1. GadgetComboBoxSetSelectedPos() updates the combo box selection (visual state)
+		 * 2. winSendSystemMsg(parent, GCM_SELECTED, ...) sends the selection message to parent window
+		 * 3. Parent window's message handler (e.g., SkirmishGameOptionsMenuInput) processes GCM_SELECTED
+		 * 4. Handler calls appropriate callback (e.g., handlePlayerTemplateSelection for faction changes)
+		 * 5. Callback updates internal game state and refreshes dependent UI elements
+		 *
+		 * Example: Selecting faction combo box
+		 * - ComboBoxPlayerTemplate0 (player faction) index 3 = GLA (template 4)
+		 * - GCM_SELECTED triggers handlePlayerTemplateSelection(0)
+		 * - handlePlayerTemplateSelection() updates TheSkirmishGameInfo->getSlot(0)->setPlayerTemplate()
+		 * - UI updates to show correct faction icon and name
+		 *
+		 * @param message JSON message with args: { "controlId": "...", "index": N }
+		 * @param reason Output parameter for failure reason
+		 * @return true if successful, false with reason on failure
+		 */
 		bool executeMenuSelectComboBox(const nlohmann::json& message, std::string& reason)
 		{
 			if (TheShell == nullptr || !TheShell->isShellActive())
@@ -437,6 +467,42 @@
 			return true;
 		}
 
+	/**
+	 * Execute Menu.SetSlider command to set a slider value via UI callbacks.
+	 *
+	 * This command sets a slider to a specific value and triggers the same UI callbacks that
+	 * would fire when the user drags the slider. This ensures the slider visual position and
+	 * internal state remain synchronized.
+	 *
+	 * Why callbacks matter:
+	 * - Direct API calls can update internal values but don't move the slider thumb visually
+	 * - Without callbacks, UI elements like FPS text displays don't update
+	 * - Triggering GSM_SLIDER_TRACK mimics the user dragging the slider
+	 *
+	 * Message flow:
+	 * 1. GadgetSliderSetPosition() updates slider value and thumb position
+	 *    - Sends GSM_SET_SLIDER to the slider itself to update internal state
+	 *    - Slider validates value is within min/max range and positions the thumb
+	 * 2. winSendSystemMsg(owner, GSM_SLIDER_TRACK, ...) notifies the owner window
+	 *    - Owner is the window that created the slider (use winGetOwner, NOT winGetParent)
+	 *    - GSM_SLIDER_TRACK is sent continuously while dragging; we send it once
+	 * 3. Owner's message handler processes GSM_SLIDER_TRACK
+	 * 4. Handler updates dependent UI (e.g., setFPSTextBox() for game speed slider)
+	 *
+	 * Example: Setting game speed slider
+	 * - SliderGameSpeed has range 0-60 (values >60 would be unlimited FPS)
+	 * - Setting value to 60 positions thumb at rightmost position
+	 * - GSM_SLIDER_TRACK triggers setFPSTextBox(60) to display "60" or "--"
+	 *
+	 * Important: Value must be within slider's min/max range
+	 * - GadgetHorizontalSlider.cpp line 397-398 rejects out-of-range values
+	 * - If value < minVal or value > maxVal, GSM_SET_SLIDER does nothing
+	 * - Always verify slider range before calling (e.g., SliderGameSpeed max is 60, not 255)
+	 *
+	 * @param message JSON message with args: { "controlId": "...", "value": N }
+	 * @param reason Output parameter for failure reason
+	 * @return true if successful, false with reason on failure
+	 */
 	bool executeMenuSetSlider(const nlohmann::json& message, std::string& reason)
 	{
 		if (TheShell == nullptr || !TheShell->isShellActive())
