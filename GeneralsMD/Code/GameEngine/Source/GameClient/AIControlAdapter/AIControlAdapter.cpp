@@ -20,6 +20,8 @@
 #include "GameClient/GameWindowManager.h"
 #include "GameClient/Gadget.h"
 #include "GameClient/GadgetTextEntry.h"
+#include "GameClient/GadgetComboBox.h"
+#include "GameClient/GadgetSlider.h"
 #include "GameClient/LanguageFilter.h"
 #include "GameClient/KeyDefs.h"
 #include "GameClient/Shell.h"
@@ -42,6 +44,8 @@
 #include "Common/UnicodeString.h"
 
 #include <windows.h>
+
+extern void skirmishUpdateSlotList();
 
 #include <vector>
 #include <string>

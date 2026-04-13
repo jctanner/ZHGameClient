@@ -249,7 +249,7 @@
 			}
 
 			Money newCash;
-			newCash.setMoney(static_cast<UnsignedInt>(cashAmount));
+			newCash.setStartingCash(static_cast<UnsignedInt>(cashAmount));
 			TheSkirmishGameInfo->setStartingCash(newCash);
 			return true;
 		}
@@ -349,6 +349,18 @@
 			return true;
 		}
 
+		bool executeSkirmishRefreshUI(std::string& reason)
+		{
+			if (TheSkirmishGameInfo == nullptr)
+			{
+				reason = "skirmish_not_available";
+				return false;
+			}
+
+			skirmishUpdateSlotList();
+			return true;
+		}
+
 		bool executeSkirmishConfigure(const nlohmann::json& message, std::string& reason)
 		{
 			if (TheSkirmishGameInfo == nullptr)
@@ -383,7 +395,7 @@
 				if (cashAmount >= 0)
 				{
 					Money newCash;
-					newCash.setMoney(static_cast<UnsignedInt>(cashAmount));
+					newCash.setStartingCash(static_cast<UnsignedInt>(cashAmount));
 					TheSkirmishGameInfo->setStartingCash(newCash);
 				}
 			}

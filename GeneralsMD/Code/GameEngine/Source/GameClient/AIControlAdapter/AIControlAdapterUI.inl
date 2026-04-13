@@ -349,3 +349,162 @@
 			GadgetTextEntrySetText(control, unicodeText);
 			return true;
 		}
+
+		bool executeMenuSelectComboBox(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheShell == nullptr || !TheShell->isShellActive())
+			{
+				reason = "shell_not_active";
+				return false;
+			}
+
+			if (TheWindowManager == nullptr || TheNameKeyGenerator == nullptr)
+			{
+				reason = "ui_not_ready";
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			const std::string controlId = getJsonString(*argsIt, "controlId");
+			if (controlId.empty())
+			{
+				reason = "missing_controlId";
+				return false;
+			}
+
+			const auto indexIt = argsIt->find("index");
+			if (indexIt == argsIt->end() || !indexIt->is_number_integer())
+			{
+				reason = "missing_index";
+				return false;
+			}
+
+			const Int selectedIndex = indexIt->get<Int>();
+
+			const std::string normalizedControlId = normalizeControlId(controlId);
+			const NameKeyType key = TheNameKeyGenerator->nameToKey(normalizedControlId.c_str());
+			GameWindow* control = TheWindowManager->winGetWindowFromId(nullptr, key);
+			if (control == nullptr)
+			{
+				reason = "control_not_found";
+				return false;
+			}
+
+			const UnsignedInt status = control->winGetStatus();
+			if ((status & WIN_STATUS_HIDDEN) != 0u)
+			{
+				reason = "control_hidden";
+				return false;
+			}
+
+			if ((status & WIN_STATUS_ENABLED) == 0u)
+			{
+				reason = "control_disabled";
+				return false;
+			}
+
+			const UnsignedInt style = control->winGetStyle();
+			if ((style & GWS_COMBO_BOX) == 0u)
+			{
+				reason = "control_not_combo_box";
+				return false;
+			}
+
+			// Check if index is valid
+			const Int itemCount = GadgetComboBoxGetLength(control);
+			if (selectedIndex < 0 || selectedIndex >= itemCount)
+			{
+				reason = "index_out_of_range";
+				return false;
+			}
+
+			// Set the selection (updates UI)
+			GadgetComboBoxSetSelectedPos(control, selectedIndex, TRUE);
+
+			// Send GCM_SELECTED message to trigger the callback (same as user clicking)
+			GameWindow* parent = control->winGetParent();
+			if (parent != nullptr)
+			{
+				TheWindowManager->winSendSystemMsg(parent, GCM_SELECTED, (WindowMsgData)control, control->winGetWindowId());
+			}
+
+			return true;
+		}
+
+	bool executeMenuSetSlider(const nlohmann::json& message, std::string& reason)
+	{
+		if (TheShell == nullptr || !TheShell->isShellActive())
+		{
+			reason = "shell_not_active";
+			return false;
+		}
+
+		if (TheWindowManager == nullptr || TheNameKeyGenerator == nullptr)
+		{
+			reason = "ui_not_ready";
+			return false;
+		}
+
+		const auto argsIt = message.find("args");
+		if (argsIt == message.end() || !argsIt->is_object())
+		{
+			reason = "missing_args";
+			return false;
+		}
+
+		const std::string controlId = getJsonString(*argsIt, "controlId");
+		if (controlId.empty())
+		{
+			reason = "missing_controlId";
+			return false;
+		}
+
+		const auto valueIt = argsIt->find("value");
+		if (valueIt == argsIt->end() || !valueIt->is_number_integer())
+		{
+			reason = "missing_value";
+			return false;
+		}
+
+		const Int sliderValue = valueIt->get<Int>();
+
+		const std::string normalizedControlId = normalizeControlId(controlId);
+		const NameKeyType key = TheNameKeyGenerator->nameToKey(normalizedControlId.c_str());
+		GameWindow* control = TheWindowManager->winGetWindowFromId(nullptr, key);
+		if (control == nullptr)
+		{
+			reason = "control_not_found";
+			return false;
+		}
+
+		const UnsignedInt status = control->winGetStatus();
+		if ((status & WIN_STATUS_HIDDEN) != 0u)
+		{
+			reason = "control_hidden";
+			return false;
+		}
+
+		if ((status & WIN_STATUS_ENABLED) == 0u)
+		{
+			reason = "control_disabled";
+			return false;
+		}
+
+		// Set the slider position (sends GSM_SET_SLIDER to the slider)
+		GadgetSliderSetPosition(control, sliderValue);
+
+		// Send GSM_SLIDER_TRACK message to the owner (like the slider does when dragged)
+		GameWindow* owner = control->winGetOwner();
+		if (owner != nullptr)
+		{
+			TheWindowManager->winSendSystemMsg(owner, GSM_SLIDER_TRACK, (WindowMsgData)control, (WindowMsgData)sliderValue);
+		}
+
+		return true;
+	}
