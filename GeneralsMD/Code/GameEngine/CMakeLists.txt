@@ -1266,4 +1266,14 @@ if(BUILD_TESTING)
     )
 
     add_test(NAME z_gameengine_adapter_tests COMMAND z_gameengine_adapter_tests)
+
+    add_executable(z_gameengine_adapter_ui_tests
+        Tests/AIControlAdapter/AIControlAdapterUITests.cpp
+    )
+
+    target_link_libraries(z_gameengine_adapter_ui_tests PRIVATE
+        z_gameengine
+    )
+
+    add_test(NAME z_gameengine_adapter_ui_tests COMMAND z_gameengine_adapter_ui_tests)
 endif()
