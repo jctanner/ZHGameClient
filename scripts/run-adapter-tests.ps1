@@ -18,7 +18,7 @@ function Invoke-Step {
 }
 
 Invoke-Step "Configure" {
-    cmake -S . -B $BuildDir -DBUILD_TESTING=ON
+    cmake -S . -B $BuildDir -A Win32 -DBUILD_TESTING=ON
 }
 
 Invoke-Step "Build" {
