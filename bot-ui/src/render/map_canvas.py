@@ -49,6 +49,7 @@ class MapRenderer:
         bounds = self._resolve_bounds(store, active_objects, [], points + supply_sources + telemetry_points, player_positions)
         self._draw_map_bounds(width, height, bounds, store.map_width, store.map_height)
         self._draw_grid_overlay(store, width, height, bounds)
+        self._draw_autonomy_sprawl_axis(store, width, height, bounds)
         self._draw_autonomy_zones(store.autonomy_zones, width, height, bounds)
         self._draw_objects(active_objects, width, height, bounds, store, friendly=True)
         self._draw_supply_sources(supply_sources, width, height, bounds)
@@ -269,6 +270,20 @@ class MapRenderer:
                     outline=outline,
                     width=1,
                 )
+            if zone.front_point_x is not None and zone.front_point_y is not None:
+                fx, fy = self._world_to_canvas(zone.front_point_x, zone.front_point_y, canvas_w, canvas_h, bounds)
+                self.canvas.create_line(cx, cy, fx, fy, fill=outline, width=2 if zone.active else 1)
+                self.canvas.create_polygon(
+                    fx, fy - 6,
+                    fx + 6, fy,
+                    fx, fy + 6,
+                    fx - 6, fy,
+                    outline=outline,
+                    fill=self._darken_hex(outline, 0.35),
+                )
+            if zone.rear_point_x is not None and zone.rear_point_y is not None:
+                rx, ry = self._world_to_canvas(zone.rear_point_x, zone.rear_point_y, canvas_w, canvas_h, bounds)
+                self.canvas.create_oval(rx - 3, ry - 3, rx + 3, ry + 3, outline=outline, width=1)
             if zone.active and zone.is_main_base:
                 label = "ACTIVE MAIN"
             elif zone.active:
@@ -284,14 +299,39 @@ class MapRenderer:
             else:
                 status = "early"
             counts_text = f"S{zone.supply_stashes} B{zone.barracks} A{zone.arms_dealers} T{zone.tunnels} G{zone.stingers}"
+            front_source = zone.front_source or "-"
             self.canvas.create_text(
                 cx + 8,
                 cy - 10,
-                text=f"Z{idx + 1} {label}\n{status}  {counts_text}",
+                text=f"Z{idx + 1} {label}\n{status}  {counts_text}\nfront: {front_source}",
                 anchor="sw",
                 fill=outline,
                 font=("Segoe UI", 8, "bold" if zone.active else "normal"),
             )
+
+    def _draw_autonomy_sprawl_axis(
+        self,
+        store: UIStore,
+        canvas_w: int,
+        canvas_h: int,
+        bounds: tuple[float, float, float, float],
+    ) -> None:
+        if not store.autonomy_zones:
+            return
+        main_zone = next((zone for zone in store.autonomy_zones if zone.anchor_id == store.autonomy_main_zone_anchor_id), None)
+        furthest_zone = next((zone for zone in store.autonomy_zones if zone.anchor_id == store.autonomy_furthest_zone_anchor_id), None)
+        if main_zone is None or furthest_zone is None:
+            return
+        x0, y0 = self._world_to_canvas(main_zone.center_x, main_zone.center_y, canvas_w, canvas_h, bounds)
+        x1, y1 = self._world_to_canvas(furthest_zone.center_x, furthest_zone.center_y, canvas_w, canvas_h, bounds)
+        self.canvas.create_line(x0, y0, x1, y1, fill="#f6c453", width=2, dash=(8, 6))
+        self.canvas.create_text(
+            (x0 + x1) * 0.5,
+            (y0 + y1) * 0.5 - 6,
+            text="SPRAWL AXIS",
+            fill="#f6c453",
+            font=("Segoe UI", 8, "bold"),
+        )
 
     def _draw_autonomy_events(
         self,

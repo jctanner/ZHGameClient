@@ -149,6 +149,11 @@ class AutonomyZoneOverlay:
     radius: float
     is_main_base: bool = False
     active: bool = False
+    front_point_x: float | None = None
+    front_point_y: float | None = None
+    rear_point_x: float | None = None
+    rear_point_y: float | None = None
+    front_source: str = ""
     supply_stashes: int = 0
     barracks: int = 0
     arms_dealers: int = 0
@@ -192,6 +197,10 @@ class UIStore:
     autonomy_zone_radius: float = 0.0
     autonomy_zones: list[AutonomyZoneOverlay] = field(default_factory=list)
     autonomy_events: list[AutonomyEventOverlay] = field(default_factory=list)
+    autonomy_sprawl_axis_dx: float = 0.0
+    autonomy_sprawl_axis_dy: float = 0.0
+    autonomy_main_zone_anchor_id: int = 0
+    autonomy_furthest_zone_anchor_id: int = 0
 
     def update_grid_summary(self, payload: Any) -> None:
         if not isinstance(payload, dict):
@@ -568,6 +577,12 @@ class UIStore:
         radius = payload.get("zone_radius")
         if isinstance(radius, (int, float)):
             self.autonomy_zone_radius = float(radius)
+        axis_dx = payload.get("sprawl_axis_dx")
+        axis_dy = payload.get("sprawl_axis_dy")
+        self.autonomy_sprawl_axis_dx = float(axis_dx) if isinstance(axis_dx, (int, float)) else 0.0
+        self.autonomy_sprawl_axis_dy = float(axis_dy) if isinstance(axis_dy, (int, float)) else 0.0
+        self.autonomy_main_zone_anchor_id = int(payload.get("main_zone_anchor_id", 0)) if isinstance(payload.get("main_zone_anchor_id"), int) else 0
+        self.autonomy_furthest_zone_anchor_id = int(payload.get("furthest_zone_anchor_id", 0)) if isinstance(payload.get("furthest_zone_anchor_id"), int) else 0
 
         zones_payload = payload.get("zones")
         parsed_zones: list[AutonomyZoneOverlay] = []
@@ -588,6 +603,11 @@ class UIStore:
                         radius=self.autonomy_zone_radius,
                         is_main_base=bool(raw.get("is_main_base", False)),
                         active=bool(raw.get("active", False)),
+                        front_point_x=float(raw.get("front_point_x")) if isinstance(raw.get("front_point_x"), (int, float)) else None,
+                        front_point_y=float(raw.get("front_point_y")) if isinstance(raw.get("front_point_y"), (int, float)) else None,
+                        rear_point_x=float(raw.get("rear_point_x")) if isinstance(raw.get("rear_point_x"), (int, float)) else None,
+                        rear_point_y=float(raw.get("rear_point_y")) if isinstance(raw.get("rear_point_y"), (int, float)) else None,
+                        front_source=str(raw.get("front_source", "")),
                         supply_stashes=int(raw.get("supply_stashes", 0)) if isinstance(raw.get("supply_stashes"), int) else 0,
                         barracks=int(raw.get("barracks", 0)) if isinstance(raw.get("barracks"), int) else 0,
                         arms_dealers=int(raw.get("arms_dealers", 0)) if isinstance(raw.get("arms_dealers"), int) else 0,
