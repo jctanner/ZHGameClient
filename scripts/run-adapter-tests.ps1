@@ -1,7 +1,7 @@
 param(
     [string]$BuildDir = "build/win32",
     [string]$Config = "Release",
-    [string]$Target = "z_gameengine_adapter_tests z_gameengine_adapter_ui_tests",
+    [string]$Target = "z_gameengine_adapter_tests z_gameengine_adapter_ui_tests z_gameengine_adapter_telemetry_tests",
     [string]$CTestFilter = "z_gameengine_adapter"
 )
 

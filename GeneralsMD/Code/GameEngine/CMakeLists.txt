@@ -1276,4 +1276,14 @@ if(BUILD_TESTING)
     )
 
     add_test(NAME z_gameengine_adapter_ui_tests COMMAND z_gameengine_adapter_ui_tests)
+
+    add_executable(z_gameengine_adapter_telemetry_tests
+        Tests/AIControlAdapter/AIControlAdapterTelemetryCacheTests.cpp
+    )
+
+    target_link_libraries(z_gameengine_adapter_telemetry_tests PRIVATE
+        z_gameengine
+    )
+
+    add_test(NAME z_gameengine_adapter_telemetry_tests COMMAND z_gameengine_adapter_telemetry_tests)
 endif()
