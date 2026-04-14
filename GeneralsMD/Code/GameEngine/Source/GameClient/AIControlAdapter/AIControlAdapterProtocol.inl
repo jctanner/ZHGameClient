@@ -1,3 +1,89 @@
+		/**
+		 * AIControlAdapterProtocol.inl
+		 *
+		 * Named pipe protocol handling and message routing for AI Control Adapter.
+		 *
+		 * This file implements the communication protocol between external AI agents and the
+		 * game. It defines:
+		 * - Message format (JSON over named pipe)
+		 * - Protocol handshake (Hello/HelloAck)
+		 * - Command routing (type/cmd -> executor function)
+		 * - Response formatting (success/error acknowledgements)
+		 * - Capability negotiation (what commands are supported)
+		 *
+		 * PROTOCOL OVERVIEW
+		 * =================
+		 *
+		 * Transport: Windows named pipe (\\.\pipe\zh_ai_control)
+		 * - Line-delimited JSON messages (one JSON object per line)
+		 * - Non-blocking I/O (game polls pipe each frame)
+		 * - Client initiates connection, adapter accepts
+		 * - Connection persists across game sessions
+		 *
+		 * Message Types:
+		 * 1. Hello - Client handshake (get capabilities, session ID)
+		 * 2. Ping - Keep-alive / latency check
+		 * 3. SessionCommand - Execute a command (Menu, Game, Skirmish, etc.)
+		 *
+		 * SessionCommand Structure:
+		 * {
+		 *   "type": "SessionCommand",
+		 *   "request_id": "unique-string",  // Client-provided, echoed in response
+		 *   "cmd": "Category.Action",        // Command name (e.g., "Game.BuildWorker")
+		 *   "args": { ... }                  // Command-specific arguments
+		 * }
+		 *
+		 * Response Types:
+		 * 1. HelloAck - Protocol info, capabilities, session ID
+		 * 2. Pong - Ping response
+		 * 3. ActionAck - Command execution result (ok: true/false, reason on failure)
+		 * 4. QueryResult - Query response with data (ok: true, result: {...})
+		 * 5. QueryError - Query failure (ok: false, error_type, reason)
+		 * 6. ProtocolError - Protocol-level error (bad JSON, unknown command)
+		 *
+		 * Command Categories:
+		 * - Menu.*: UI navigation (Menu.Click, Menu.SetText, Menu.SelectComboBox)
+		 * - Chat.*: In-game chat (Chat.Send)
+		 * - Game.*: Game actions (Game.BuildWorker, Game.QueueUnit, Game.Query)
+		 * - Skirmish.*: Match setup (Skirmish.SetMap, Skirmish.Start)
+		 * - Automation.*: Rule configuration (Automation.WorkerRule)
+		 * - Autonomy.*: Autonomous mode control (Autonomy.Mode, Autonomy.Configure)
+		 * - Adapter.*: Adapter configuration (Adapter.LogConfigure)
+		 *
+		 * Error Handling:
+		 * - Protocol errors: Invalid JSON, missing fields, unknown command type
+		 * - State errors: Command not valid in current game state (e.g., build in menu)
+		 * - Execution errors: Command failed (e.g., not enough money, no producer)
+		 *
+		 * Capability Negotiation:
+		 * - HelloAck returns "capabilities" array listing supported commands
+		 * - Clients should check capabilities before sending commands
+		 * - New capabilities can be added without breaking existing clients
+		 *
+		 * Threading Model:
+		 * - All protocol handling runs on game's main thread
+		 * - handleMessage() called from AIControlAdapterUpdate() each frame
+		 * - Executor functions (executeMenuClick, executeGameQuery, etc.) are synchronous
+		 * - No locks needed (single-threaded execution)
+		 *
+		 * See also:
+		 * - scripts/configure-death-valley-final.ps1 for example PowerShell client
+		 * - AIControlAdapterUI.inl for Menu.* command implementations
+		 * - AIControlAdapterGameActions.inl for Game.* command implementations
+		 * - AIControlAdapterSkirmish.inl for Skirmish.* command implementations
+		 */
+
+		// =============================================================================
+		// JSON UTILITY FUNCTIONS
+		// =============================================================================
+
+		/**
+		 * Safely extract a string field from JSON object.
+		 *
+		 * @param obj JSON object to read from
+		 * @param key Field name to extract
+		 * @return String value if field exists and is string type, empty string otherwise
+		 */
 		static std::string getJsonString(const nlohmann::json& obj, const char* key)
 		{
 			const auto it = obj.find(key);
@@ -8,6 +94,25 @@
 			return it->get<std::string>();
 		}
 
+		/**
+		 * Normalize control IDs to handle backward compatibility and convenience aliases.
+		 *
+		 * Control IDs in the game UI are fully-qualified names like "MainMenu.wnd:ButtonSinglePlayer".
+		 * This function provides:
+		 * - Backward compatibility: Old names map to current names
+		 * - Convenience aliases: Short names for common controls
+		 * - Consistent naming: Ensures clients use canonical control IDs
+		 *
+		 * Aliases:
+		 * - "MainMenu.wnd:ButtonSoloPlay" -> "MainMenu.wnd:ButtonSinglePlayer" (renamed control)
+		 * - "ButtonBack" -> "LanLobbyMenu.wnd:ButtonBack" (convenience short name)
+		 * - "ButtonCreateGame" -> "LanLobbyMenu.wnd:ButtonHost" (convenience short name)
+		 * - "ButtonJoinGame" -> "LanLobbyMenu.wnd:ButtonJoin" (convenience short name)
+		 * - "ButtonDirectConnect" -> "LanLobbyMenu.wnd:ButtonDirectConnect" (convenience short name)
+		 *
+		 * @param controlId Raw control ID from client command
+		 * @return Normalized control ID (canonical form)
+		 */
 		static std::string normalizeControlId(const std::string& controlId)
 		{
 			// Backward-compatible alias: "SoloPlay" maps to the real single-player button.
@@ -35,6 +140,28 @@
 			return controlId;
 		}
 
+		/**
+		 * Find the first usable control from a list of control IDs.
+		 *
+		 * This function implements fallback logic for UI controls that may have different
+		 * names or positions depending on the menu. For example, "Back" buttons have
+		 * different control IDs in different menus:
+		 * - MainMenu.wnd:ButtonSingleBack (single player menu)
+		 * - MainMenu.wnd:ButtonMultiBack (multiplayer menu)
+		 * - LanLobbyMenu.wnd:ButtonBack (LAN lobby)
+		 *
+		 * The function searches the list in order and returns the first control that:
+		 * - Exists (found in window manager)
+		 * - Is visible (not hidden)
+		 * - Is enabled (clickable)
+		 * - Has a parent (valid window hierarchy)
+		 *
+		 * This enables context-aware UI commands where the same logical action (e.g., "go back")
+		 * works regardless of which menu the player is currently in.
+		 *
+		 * @param decoratedIds Vector of fully-qualified control IDs to try, in priority order
+		 * @return First usable control found, or nullptr if none are usable
+		 */
 		GameWindow* findFirstUsableControl(const std::vector<std::string>& decoratedIds) const
 		{
 			if (TheNameKeyGenerator == nullptr || TheWindowManager == nullptr)
@@ -71,6 +198,58 @@
 			return nullptr;
 		}
 
+		// =============================================================================
+		// MESSAGE HANDLING
+		// =============================================================================
+
+		/**
+		 * Handle a single line of JSON input from the named pipe.
+		 *
+		 * This is the main protocol entry point, called from AIControlAdapterUpdate() each frame
+		 * when data is available on the named pipe. It:
+		 *
+		 * 1. Parses JSON message
+		 * 2. Validates message structure (must be object with "type" field)
+		 * 3. Routes based on message type:
+		 *    - "Hello": Protocol handshake, returns capabilities and session ID
+		 *    - "Ping": Keep-alive, returns immediate Pong
+		 *    - "SessionCommand": Execute a command, route to handleSessionCommand()
+		 *
+		 * Message Format:
+		 * {
+		 *   "type": "Hello" | "Ping" | "SessionCommand",
+		 *   "request_id": "client-provided-string",  // Optional but recommended
+		 *   ... type-specific fields ...
+		 * }
+		 *
+		 * Error Handling:
+		 * - Invalid JSON: sendProtocolError("invalid_json")
+		 * - Missing type: sendProtocolError("missing_type")
+		 * - Unknown type: sendProtocolError("unsupported_type")
+		 *
+		 * Hello Response Format:
+		 * {
+		 *   "type": "HelloAck",
+		 *   "request_id": "<echoed from request>",
+		 *   "ok": true,
+		 *   "protocol": "zh-ai-control-v1",
+		 *   "adapter_version": "0.1.0",
+		 *   "session_id": "<unique session identifier>",
+		 *   "capabilities": ["capability1", "capability2", ...]
+		 * }
+		 *
+		 * The capabilities array lists all supported commands. Clients should check this
+		 * before sending commands to ensure compatibility. Example capabilities:
+		 * - "menu_click": Menu.Click command supported
+		 * - "game_query": Game.Query command supported
+		 * - "autonomy_mode": Autonomy.Mode command supported
+		 *
+		 * Ping/Pong:
+		 * Clients can send Ping to check connectivity and measure latency. The adapter
+		 * responds immediately with Pong (echoing request_id).
+		 *
+		 * @param line Raw JSON string from named pipe (line-delimited)
+		 */
 		void handleMessage(const std::string& line)
 		{
 			const nlohmann::json message = nlohmann::json::parse(line, nullptr, false);
@@ -185,6 +364,86 @@
 			handleSessionCommand(message, requestId);
 		}
 
+		/**
+		 * Handle a SessionCommand message by routing to the appropriate executor function.
+		 *
+		 * SessionCommand is the workhorse message type - it executes actions in the game.
+		 * This function:
+		 * 1. Extracts "cmd" field (command name)
+		 * 2. Routes to appropriate executor function based on cmd
+		 * 3. Sends response (ActionAck or QueryResult)
+		 *
+		 * SessionCommand Format:
+		 * {
+		 *   "type": "SessionCommand",
+		 *   "request_id": "client-string",
+		 *   "cmd": "Category.Action",  // e.g., "Game.BuildWorker", "Menu.Click"
+		 *   "args": { ... }             // Command-specific arguments
+		 * }
+		 *
+		 * Command Categories:
+		 *
+		 * Menu Commands (UI navigation):
+		 * - Menu.Click: Click a button (args: controlId)
+		 * - Menu.SetText: Set text entry value (args: controlId, text)
+		 * - Menu.SelectComboBox: Select combo box item (args: controlId, index)
+		 * - Menu.SetSlider: Set slider value (args: controlId, value)
+		 * - Menu.ListControls: Query available UI controls (args: kind, include_hidden)
+		 *
+		 * Chat Commands:
+		 * - Chat.Send: Send in-game chat message (args: text, scope)
+		 *
+		 * Game Query Commands (read game state):
+		 * - Game.Query: Get comprehensive game state snapshot (args: options)
+		 * - Game.Camera.Get: Get current camera position/zoom (args: none)
+		 *
+		 * Game Action Commands (modify game state):
+		 * - Game.QueueUnit: Queue unit production (args: template)
+		 * - Game.QueueUpgrade: Purchase upgrade (args: upgrade)
+		 * - Game.PurchaseScience: Research science (args: science)
+		 * - Game.SetMoney: Set cash (debug) (args: money)
+		 * - Game.DebugDeshroud: Remove fog of war (debug) (args: none)
+		 * - Game.BuildWorker: Build worker/rebel (args: none)
+		 * - Game.MoveArmy: Move combat units (args: position)
+		 * - ... many more (see capabilities list)
+		 *
+		 * Skirmish Commands (match setup):
+		 * - Skirmish.SetMap: Select map (args: map_name)
+		 * - Skirmish.SetSlot: Configure player slot (args: slot, faction, difficulty)
+		 * - Skirmish.Start: Start the match (args: none)
+		 * - ... more setup commands
+		 *
+		 * Automation Commands (configure rules):
+		 * - Automation.WorkerRule: Configure worker behavior (args: rule)
+		 * - Automation.AttackRule: Configure attack behavior (args: rule)
+		 * - ... more automation rules
+		 *
+		 * Autonomy Commands (autonomous mode control):
+		 * - Autonomy.Mode: Enable/disable autonomy (args: enabled)
+		 * - Autonomy.Configure: Set autonomy parameters (args: settings)
+		 * - Autonomy.Status: Query autonomy state (args: none)
+		 * - ... more autonomy controls
+		 *
+		 * Response Types:
+		 * - ActionAck: Command execution result
+		 *   {"type":"ActionAck", "request_id":"...", "ok":true|false, "reason":"..."}
+		 * - QueryResult: Query response with data
+		 *   {"type":"QueryResult", "request_id":"...", "ok":true, "result":{...}}
+		 * - QueryError: Query failed
+		 *   {"type":"QueryError", "request_id":"...", "ok":false, "error_type":"...", "reason":"..."}
+		 *
+		 * Error Reasons:
+		 * - "missing_cmd": No "cmd" field in message
+		 * - "bad_request": Invalid command syntax or missing required args
+		 * - "invalid_state": Command not valid in current game state (e.g., build in menu)
+		 * - "no_money": Not enough cash for purchase/build
+		 * - "no_producer": Required building doesn't exist
+		 * - "queue_full": Production queue is full
+		 * - ... command-specific reasons
+		 *
+		 * @param message SessionCommand JSON object
+		 * @param requestId Request ID from message (for response correlation)
+		 */
 		void handleSessionCommand(const nlohmann::json& message, const std::string& requestId)
 		{
 			const std::string cmd = getJsonString(message, "cmd");
@@ -194,6 +453,10 @@
 				sendActionAck(requestId, false, "bad_request", "missing_cmd");
 				return;
 			}
+
+			// =========================================================================
+			// MENU COMMANDS
+			// =========================================================================
 
 			if (cmd == "Menu.Click")
 			{
@@ -253,6 +516,10 @@
 				return;
 			}
 
+			// =========================================================================
+			// CHAT COMMANDS
+			// =========================================================================
+
 			if (cmd == "Chat.Send")
 			{
 				std::string reason;
@@ -265,6 +532,10 @@
 				sendActionAck(requestId, true);
 				return;
 			}
+
+			// =========================================================================
+			// GAME QUERY COMMANDS (read game state)
+			// =========================================================================
 
 			if (cmd == "Game.Query")
 			{
@@ -292,6 +563,10 @@
 				sendQueryResult(requestId, result);
 				return;
 			}
+
+			// =========================================================================
+			// GAME ACTION COMMANDS (unit production, purchases, debug)
+			// =========================================================================
 
 			if (cmd == "Game.QueueUnit")
 			{
@@ -449,6 +724,10 @@
 				return;
 			}
 
+			// =========================================================================
+			// AUTOMATION COMMANDS (configure automation rules)
+			// =========================================================================
+
 			if (cmd == "Automation.ConfigureWorkerRule")
 			{
 				std::string reason;
@@ -544,6 +823,10 @@
 				return;
 			}
 
+			// =========================================================================
+			// AUTONOMY COMMANDS (autonomous mode control)
+			// =========================================================================
+
 			if (cmd == "Autonomy.SetMode")
 			{
 				std::string reason;
@@ -600,6 +883,10 @@
 				sendActionAck(requestId, true);
 				return;
 			}
+
+			// =========================================================================
+			// GAME BUILDING COMMANDS (smart construction)
+			// =========================================================================
 
 			if (cmd == "Game.FindSupplySources")
 			{
@@ -747,6 +1034,10 @@
 				return;
 			}
 
+			// =========================================================================
+			// GAME SPECIAL POWER COMMANDS (superweapons, abilities)
+			// =========================================================================
+
 			if (cmd == "Game.ScudStormAtPosition")
 			{
 				std::string reason;
@@ -770,6 +1061,10 @@
 				sendActionAck(requestId, true);
 				return;
 			}
+
+			// =========================================================================
+			// GAME COMBAT COMMANDS (army movement, attacks)
+			// =========================================================================
 
 			if (cmd == "Game.AttackMove")
 			{
@@ -831,6 +1126,10 @@
 				return;
 			}
 
+			// =========================================================================
+			// ADAPTER COMMANDS (adapter configuration)
+			// =========================================================================
+
 			if (cmd == "Adapter.Log.Configure")
 			{
 				const auto argsIt = message.find("args");
@@ -885,6 +1184,10 @@
 				return;
 			}
 
+			// =========================================================================
+			// CAMERA COMMANDS (camera control)
+			// =========================================================================
+
 			if (cmd == "Game.Camera.Set")
 			{
 				std::string reason;
@@ -932,6 +1235,10 @@
 				sendActionAck(requestId, true);
 				return;
 			}
+
+			// =========================================================================
+			// SKIRMISH COMMANDS (match setup)
+			// =========================================================================
 
 			if (cmd == "Skirmish.SetSlot")
 			{
