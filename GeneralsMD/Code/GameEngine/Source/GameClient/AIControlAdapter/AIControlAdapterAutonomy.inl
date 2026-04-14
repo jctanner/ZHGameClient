@@ -171,6 +171,7 @@
 			state.lastDecisionCategory.clear();
 			state.lastDecisionCommand.clear();
 			state.lastDecisionReason.clear();
+			state.telemetryZonesDirty = true;
 			state.telemetryZones = nlohmann::json::array();
 			state.telemetryEvents = nlohmann::json::array();
 		}
