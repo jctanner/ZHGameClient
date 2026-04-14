@@ -1,3 +1,153 @@
+		/**
+		 * AIControlAdapterGameQuery.inl
+		 *
+		 * Game state query system for AI Control Adapter.
+		 *
+		 * This file implements the Game.Query command, which allows external AI agents to observe
+		 * the current game state. Queries return JSON snapshots of various aspects of the game:
+		 * - Player info (faction, resources, rank)
+		 * - Unit counts and composition
+		 * - Building status and production queues
+		 * - Map state (objects, positions, ownership)
+		 * - Combat events and attack history
+		 * - Worker assignments and economy state
+		 *
+		 * QUERY API
+		 * =========
+		 *
+		 * Game.Query command format:
+		 * {
+		 *   "type": "SessionCommand",
+		 *   "request_id": "query-1",
+		 *   "cmd": "Game.Query",
+		 *   "args": {
+		 *     "path": "game.status",      // What to query (see paths below)
+		 *     "player_index": 0            // Optional: query another player's state
+		 *   }
+		 * }
+		 *
+		 * Response format:
+		 * {
+		 *   "type": "QueryResult",
+		 *   "request_id": "query-1",
+		 *   "ok": true,
+		 *   "result": { ... }  // Query-specific data
+		 * }
+		 *
+		 * AVAILABLE QUERY PATHS
+		 * =====================
+		 *
+		 * game.local_player:
+		 * - Player index, name, faction, team, color, defeated status
+		 * - Use: Identify which player the adapter is controlling
+		 *
+		 * game.resources (player_index optional):
+		 * - money: Current cash balance
+		 * - skill_points: General's skill points
+		 * - science_purchase_points: Science research points
+		 * - rank_level: Player rank level
+		 * - Use: Check if player can afford purchases
+		 *
+		 * game.faction (player_index optional):
+		 * - side: Current faction (e.g., "FactionGLA")
+		 * - base_side: Base faction (e.g., "FactionGLA")
+		 * - template_name: Player template name
+		 * - player_index: Player slot index
+		 * - Use: Identify faction for faction-specific logic
+		 *
+		 * game.units (player_index optional):
+		 * - buildings: Count of buildings
+		 * - units_total: Total unit count (excluding buildings)
+		 * - infantry/vehicles/aircraft: Count by type
+		 * - dozers/harvesters: Worker counts
+		 * - Use: High-level army size tracking
+		 *
+		 * game.unit_composition (player_index optional):
+		 * - workers, rebels, rpg: Infantry counts by unit type
+		 * - radar_vans, quads, scorpions: Vehicle counts by type
+		 * - combat_units, ground_combat_units: Combat unit counts
+		 * - Use: Detailed army composition for production decisions
+		 *
+		 * game.objects (player_index optional):
+		 * - Detailed list of all owned units and buildings
+		 * - For each object: id, name, position, health, status flags
+		 * - buildings[]: All buildings with production queues
+		 * - units[]: All units with current orders
+		 * - Use: Full state observation for RL training
+		 *
+		 * game.objects_map (player_index optional):
+		 * - Compact grid-based representation of map state
+		 * - Truncated to reduce size (max 60 buildings, 60 units)
+		 * - Use: Faster queries when full detail not needed
+		 *
+		 * game.production_summary:
+		 * - Buildings by category (command_centers, barracks, arms_dealers, etc.)
+		 * - Production capacity and queue status
+		 * - Building counts (supply_stashes, black_markets, palaces, etc.)
+		 * - Use: Economy and production planning
+		 *
+		 * game.workers_summary:
+		 * - Worker assignments (idle, gathering, building, assigned to stashes)
+		 * - Supply stash coverage and worker distribution
+		 * - Use: Economy management and worker optimization
+		 *
+		 * game.combat_summary:
+		 * - Army composition breakdown
+		 * - Combat readiness metrics
+		 * - Unit production recommendations
+		 * - Use: Combat decision making
+		 *
+		 * game.status (default):
+		 * - Comprehensive snapshot combining all above
+		 * - Player info + resources + units + production + workers + combat
+		 * - Use: Single query for full game state
+		 *
+		 * game.recent_events:
+		 * - Recent attack events (who attacked, when, where)
+		 * - Object deaths and construction completions
+		 * - Use: Reactive decision making (respond to attacks)
+		 *
+		 * skirmish.setup:
+		 * - Skirmish match configuration (map, slots, settings)
+		 * - Use: Query match setup before game starts
+		 *
+		 * PLAYER INDEX PARAMETER
+		 * ======================
+		 *
+		 * Most queries support optional "player_index" parameter:
+		 * - Omit: Query local player (the player adapter controls)
+		 * - 0-7: Query specific player slot
+		 * - Use: Scout enemy resources, count enemy units, etc.
+		 *
+		 * Note: Can only query visible state (fog of war applies)
+		 * If enemy objects are hidden, they won't appear in queries
+		 *
+		 * QUERY FREQUENCY
+		 * ===============
+		 *
+		 * Queries are synchronous and execute immediately (no delay).
+		 * Performance considerations:
+		 * - game.status: ~1-2ms (comprehensive, slower)
+		 * - game.resources: ~0.1ms (fast, minimal data)
+		 * - game.objects: ~0.5-1ms (depends on object count)
+		 * - game.objects_map: ~0.3ms (truncated, faster than full objects)
+		 *
+		 * Recommended query patterns:
+		 * - Every frame: game.resources (check if can afford action)
+		 * - Every 100ms: game.unit_composition (production decisions)
+		 * - Every 500ms: game.status (full state snapshot)
+		 * - On demand: game.recent_events (after detecting attack)
+		 *
+		 * See also:
+		 * - AIControlAdapterObjectCache.inl for cached object tracking
+		 * - AIControlAdapterProtocol.inl for query command handling
+		 * - scripts/test-query-game-state.ps1 for example queries
+		 */
+
+		// =============================================================================
+		// PLAYER INFO BUILDERS
+		// =============================================================================
+
 		nlohmann::json buildPlayerDetails(Player* player) const
 		{
 			return nlohmann::json{
