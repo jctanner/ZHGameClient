@@ -201,4 +201,3 @@
 
 		AutonomyState state;  ///< Current autonomy configuration and runtime state
 	};
-	};
