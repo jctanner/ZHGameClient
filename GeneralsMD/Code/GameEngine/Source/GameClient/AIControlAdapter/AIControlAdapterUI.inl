@@ -467,6 +467,152 @@
 			return true;
 		}
 
+		/**
+		 * Execute Menu.GetListBoxContents command to get all items in a listbox.
+		 *
+		 * @param message JSON message with args: { "controlId": "..." }
+		 * @param result Output parameter for the list of items
+		 * @param reason Output parameter for failure reason
+		 * @return true if successful, false with reason on failure
+		 */
+		bool executeMenuGetListBoxContents(const nlohmann::json& message, nlohmann::json& result, std::string& reason)
+		{
+			if (TheShell == nullptr || !TheShell->isShellActive())
+			{
+				reason = "shell_not_active";
+				return false;
+			}
+
+			if (TheWindowManager == nullptr || TheNameKeyGenerator == nullptr)
+			{
+				reason = "ui_not_ready";
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			const std::string controlId = getJsonString(*argsIt, "controlId");
+			if (controlId.empty())
+			{
+				reason = "missing_controlId";
+				return false;
+			}
+
+			const std::string normalizedControlId = normalizeControlId(controlId);
+			const NameKeyType key = TheNameKeyGenerator->nameToKey(normalizedControlId.c_str());
+			GameWindow* control = TheWindowManager->winGetWindowFromId(nullptr, key);
+			if (control == nullptr)
+			{
+				reason = "control_not_found";
+				return false;
+			}
+
+			// Get the number of populated items in the listbox (not the max capacity)
+			const Int itemCount = GadgetListBoxGetNumEntries(control);
+
+			// Build array of items
+			nlohmann::json items = nlohmann::json::array();
+			for (Int i = 0; i < itemCount; ++i)
+			{
+				UnicodeString itemText = GadgetListBoxGetText(control, i, 0);
+				const char* itemData = (const char*)GadgetListBoxGetItemData(control, i, 0);
+
+				std::string mapName;
+				if (itemData != nullptr)
+				{
+					mapName = itemData;
+				}
+				else
+				{
+					mapName = unicodeToUtf8(itemText);
+				}
+
+				items.push_back(nlohmann::json{
+					{"index", i},
+					{"text", unicodeToUtf8(itemText)},
+					{"map", mapName}
+				});
+			}
+
+			result = nlohmann::json{
+				{"items", items},
+				{"count", itemCount}
+			};
+
+			return true;
+		}
+
+		/**
+		 * Execute Menu.SelectListBox command to select an item in a listbox.
+		 *
+		 * @param message JSON message with args: { "controlId": "...", "index": N }
+		 * @param reason Output parameter for failure reason
+		 * @return true if successful, false with reason on failure
+		 */
+		bool executeMenuSelectListBox(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheShell == nullptr || !TheShell->isShellActive())
+			{
+				reason = "shell_not_active";
+				return false;
+			}
+
+			if (TheWindowManager == nullptr || TheNameKeyGenerator == nullptr)
+			{
+				reason = "ui_not_ready";
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			const std::string controlId = getJsonString(*argsIt, "controlId");
+			if (controlId.empty())
+			{
+				reason = "missing_controlId";
+				return false;
+			}
+
+			const auto indexIt = argsIt->find("index");
+			if (indexIt == argsIt->end() || !indexIt->is_number_integer())
+			{
+				reason = "missing_index";
+				return false;
+			}
+
+			const Int selectedIndex = indexIt->get<Int>();
+
+			const std::string normalizedControlId = normalizeControlId(controlId);
+			const NameKeyType key = TheNameKeyGenerator->nameToKey(normalizedControlId.c_str());
+			GameWindow* control = TheWindowManager->winGetWindowFromId(nullptr, key);
+			if (control == nullptr)
+			{
+				reason = "control_not_found";
+				return false;
+			}
+
+			// Set the selected item in the listbox
+			GadgetListBoxSetSelected(control, selectedIndex);
+
+			// Send GBM_SELECTED message to trigger the callback
+			GameWindow* parent = control->winGetParent();
+			if (parent != nullptr)
+			{
+				TheWindowManager->winSendSystemMsg(parent, GBM_SELECTED, (WindowMsgData)control, control->winGetWindowId());
+			}
+
+			return true;
+		}
+
 	/**
 	 * Execute Menu.SetSlider command to set a slider value via UI callbacks.
 	 *

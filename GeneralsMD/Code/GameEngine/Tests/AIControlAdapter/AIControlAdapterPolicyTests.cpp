@@ -863,6 +863,47 @@ int main()
 		expectNear(points.rearPoint.y, 16.0f, 0.0001f, "rear point y should be center minus direction times radius");
 	}
 
+	// Test zone expansion urgency (B031)
+	{
+		// Large gap scenario: 3 zones vs 30 desired
+		const AIControlAdapterZoneExpansionPolicyInputs inputs = {
+			3,   // currentZoneCount
+			30,  // desiredZoneCount
+			5    // zoneGapThreshold
+		};
+		expect(AIControlAdapterIsZoneExpansionUrgent(inputs), "zone expansion should be urgent when 27 zones below target");
+	}
+
+	{
+		// Small gap scenario: 8 zones vs 10 desired (gap = 2, below threshold of 5)
+		const AIControlAdapterZoneExpansionPolicyInputs inputs = {
+			8,   // currentZoneCount
+			10,  // desiredZoneCount
+			5    // zoneGapThreshold
+		};
+		expect(!AIControlAdapterIsZoneExpansionUrgent(inputs), "zone expansion should not be urgent when gap is small");
+	}
+
+	{
+		// At target scenario: 10 zones vs 10 desired
+		const AIControlAdapterZoneExpansionPolicyInputs inputs = {
+			10,  // currentZoneCount
+			10,  // desiredZoneCount
+			5    // zoneGapThreshold
+		};
+		expect(!AIControlAdapterIsZoneExpansionUrgent(inputs), "zone expansion should not be urgent when at target");
+	}
+
+	{
+		// Threshold boundary: exactly 5 zones gap
+		const AIControlAdapterZoneExpansionPolicyInputs inputs = {
+			5,   // currentZoneCount
+			10,  // desiredZoneCount
+			5    // zoneGapThreshold
+		};
+		expect(AIControlAdapterIsZoneExpansionUrgent(inputs), "zone expansion should be urgent when gap equals threshold");
+	}
+
 	std::cout << "AIControlAdapterPolicyTests passed\n";
 	return 0;
 }

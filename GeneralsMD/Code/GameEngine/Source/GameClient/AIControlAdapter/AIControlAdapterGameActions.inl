@@ -2442,63 +2442,22 @@
 				return false;
 			}
 
-			Object* nearbySite = nullptr;
-			Real nearbySiteDistSq = 3.4e38f;
-			if (TheGameLogic != nullptr)
-			{
-				for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
-				{
-					if (obj->isEffectivelyDead() || !obj->isKindOf(KINDOF_STRUCTURE) || !obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
-					{
-						continue;
-					}
-					if (obj->getControllingPlayer() != player)
-					{
-						continue;
-					}
-					const ThingTemplate* objTemplate = obj->getTemplate();
-					if (objTemplate == nullptr || objTemplate->getTemplateID() != templateId)
-					{
-						continue;
-					}
-					const Coord3D* objPos = obj->getPosition();
-					if (objPos == nullptr)
-					{
-						continue;
-					}
-					const Real dx = objPos->x - location.x;
-					const Real dy = objPos->y - location.y;
-					const Real distSq = dx * dx + dy * dy;
-					if (distSq < nearbySiteDistSq)
-					{
-						nearbySiteDistSq = distSq;
-						nearbySite = obj;
-					}
-				}
-			}
-
+			// For GLA workers, construction site creation takes time (worker must path to location and dig).
+			// Don't check for the site immediately - trust the command was sent successfully.
+			// The worker reservation and location reservation will prevent re-issuing the same command.
 			const Coord3D* workerPosAfter = worker->getPosition();
 			AIUpdateInterface* workerAiAfter = worker->getAI();
 			const bool workerIdleAfter = (workerAiAfter != nullptr && workerAiAfter->isIdle());
 			const bool workerBusyAfter = (workerAiAfter != nullptr && workerAiAfter->isBusy());
 			adapterLog(
-				"construct_issue_result player=%d worker=%d template=%s worker_pos=(%.1f,%.1f) ai_idle=%d ai_busy=%d site_found=%d site_id=%d site_dist=%.1f",
+				"construct_issue_result player=%d worker=%d template=%s worker_pos=(%.1f,%.1f) ai_idle=%d ai_busy=%d command_sent=1",
 				static_cast<int>(player->getPlayerIndex()),
 				static_cast<int>(workerId),
 				buildingTemplate->getName().str(),
 				workerPosAfter != nullptr ? workerPosAfter->x : 0.0f,
 				workerPosAfter != nullptr ? workerPosAfter->y : 0.0f,
 				workerIdleAfter ? 1 : 0,
-				workerBusyAfter ? 1 : 0,
-				nearbySite != nullptr ? 1 : 0,
-				nearbySite != nullptr ? static_cast<int>(nearbySite->getID()) : 0,
-				nearbySite != nullptr ? std::sqrt(nearbySiteDistSq) : -1.0f);
-
-			if (nearbySite == nullptr)
-			{
-				reason = "construct_site_not_created";
-				return false;
-			}
+				workerBusyAfter ? 1 : 0);
 
 			// Keep a worker out of selection for a while after issuing construction.
 			// This avoids repeatedly interrupting the same builder if AI idle/busy flags
