@@ -1,7 +1,7 @@
 param(
     [string]$GameDir = "D:\SteamLibrary\steamapps\common\Command & Conquer Generals - Zero Hour",
     [string]$Executable = "GameAdapter.exe",
-    [string]$Arguments = "-win"
+    [string]$Arguments = "-win -xres 1920 -yres 1080"
 )
 
 $ErrorActionPreference = "Stop"
