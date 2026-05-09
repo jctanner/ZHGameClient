@@ -39,6 +39,22 @@ try {
     }
     Start-Sleep -Milliseconds 500
 
+    # Set Player 1 to Medium AI
+    Write-Host "==> Setting Player 1 to Medium AI..." -ForegroundColor Magenta
+    # Slot state: 0=Open, 1=Closed, 2=Easy, 3=Medium, 4=Hard
+    $setAI1 = '{"type":"SessionCommand","request_id":"ai-1","cmd":"Menu.SelectComboBox","args":{"controlId":"SkirmishGameOptionsMenu.wnd:ComboBoxPlayer1","index":3}}'
+    $writer.WriteLine($setAI1)
+    $resp = $reader.ReadLine()
+    $respObj = ConvertFrom-Json $resp
+
+    if ($respObj.ok) {
+        Write-Host "    Player 1 set to Medium AI!" -ForegroundColor Green
+    } else {
+        Write-Host "    Failed: $($respObj.reason)" -ForegroundColor Red
+        exit 1
+    }
+    Start-Sleep -Milliseconds 500
+
     # Set Player 1 faction to China (template index 2)
     Write-Host "==> Setting Player 1 faction to China..." -ForegroundColor Magenta
     $setFaction1 = '{"type":"SessionCommand","request_id":"faction-1","cmd":"Menu.SelectComboBox","args":{"controlId":"SkirmishGameOptionsMenu.wnd:ComboBoxPlayerTemplate1","index":2}}'
@@ -87,7 +103,7 @@ try {
     Write-Host "1v1 setup complete!" -ForegroundColor Green
     Write-Host "========================================`n" -ForegroundColor Green
     Write-Host "Player 0 (You): GLA at position 4" -ForegroundColor Cyan
-    Write-Host "Player 1 (AI): China at position 0" -ForegroundColor Cyan
+    Write-Host "Player 1 (Medium AI): China at position 0" -ForegroundColor Cyan
     Write-Host "`n"
 
 } catch {
