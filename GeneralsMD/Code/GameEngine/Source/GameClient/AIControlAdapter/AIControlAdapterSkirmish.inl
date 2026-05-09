@@ -209,7 +209,35 @@
 				return false;
 			}
 
-			TheSkirmishGameInfo->setMap(AsciiString(mapName.c_str()));
+			AsciiString asciiMap(mapName.c_str());
+
+			// Verify the map exists in the cache
+			// Note: The cache must be populated first (e.g., by opening the map selection menu)
+			const MapMetaData *md = TheMapCache ? TheMapCache->findMap(asciiMap) : nullptr;
+			if (!md)
+			{
+				reason = "map_not_found_in_cache";
+				return false;
+			}
+
+			// Now it's safe to set the map
+			TheSkirmishGameInfo->setMap(asciiMap);
+
+			// Replicate what SkirmishMapSelectMenu does when OK is clicked:
+			// Set CRC/size from metadata and reset start positions
+			TheSkirmishGameInfo->setMapCRC(md->m_CRC);
+			TheSkirmishGameInfo->setMapSize(md->m_filesize);
+
+			// Reset all start positions (they'll be set explicitly if needed)
+			for (Int i = 0; i < MAX_SLOTS; ++i)
+			{
+				GameSlot* slot = TheSkirmishGameInfo->getSlot(i);
+				if (slot)
+				{
+					slot->setStartPos(-1);
+				}
+			}
+
 			return true;
 		}
 
@@ -385,7 +413,28 @@
 			const auto mapIt = argsIt->find("map");
 			if (mapIt != argsIt->end() && mapIt->is_string())
 			{
-				TheSkirmishGameInfo->setMap(AsciiString(mapIt->get<std::string>().c_str()));
+				AsciiString asciiMap(mapIt->get<std::string>().c_str());
+
+				// Verify map exists in cache before setting it
+				const MapMetaData *md = TheMapCache ? TheMapCache->findMap(asciiMap) : nullptr;
+				if (md != nullptr)
+				{
+					// Safe to set the map
+					TheSkirmishGameInfo->setMap(asciiMap);
+					TheSkirmishGameInfo->setMapCRC(md->m_CRC);
+					TheSkirmishGameInfo->setMapSize(md->m_filesize);
+
+					// Reset all start positions
+					for (Int i = 0; i < MAX_SLOTS; ++i)
+					{
+						GameSlot* slot = TheSkirmishGameInfo->getSlot(i);
+						if (slot)
+						{
+							slot->setStartPos(-1);
+						}
+					}
+				}
+				// If map not in cache, silently skip (Configure is best-effort)
 			}
 
 			const auto cashIt = argsIt->find("starting_cash");

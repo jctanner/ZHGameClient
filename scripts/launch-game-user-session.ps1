@@ -31,8 +31,12 @@ $Trigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddSeconds(10)
 # Create settings
 $Settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -StartWhenAvailable
 
-# Register the task (runs as SYSTEM but in interactive session)
-$Task = Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Force
+# Create principal to run as current user with highest privileges
+$CurrentUser = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+$Principal = New-ScheduledTaskPrincipal -UserId $CurrentUser -LogonType Interactive -RunLevel Highest
+
+# Register the task
+$Task = Register-ScheduledTask -TaskName $TaskName -Action $Action -Trigger $Trigger -Settings $Settings -Principal $Principal -Force
 
 Write-Host "Task registered: $TaskName"
 Write-Host "Waiting for execution (10 seconds)..."

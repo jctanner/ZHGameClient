@@ -667,6 +667,43 @@ bool AIControlAdapterShouldPrioritizeMarketsOverProductionBuildings(
 	const AIControlAdapterMarketGrowthPolicyInputs& inputs);
 
 /**
+ * Input state for zone expansion urgency policy.
+ *
+ * Used to decide whether zone expansion should override market growth priority.
+ */
+struct AIControlAdapterZoneExpansionPolicyInputs
+{
+	int currentZoneCount;   // Current number of developed zones
+	int desiredZoneCount;   // Target zone count for current phase
+	int zoneGapThreshold;   // Minimum gap to consider expansion urgent (typically 5)
+};
+
+/**
+ * Decide whether zone expansion is urgent and should override market growth.
+ *
+ * When the bot is significantly below its desired zone count, territorial expansion
+ * should take priority over economic optimization (Black Markets). This prevents
+ * the bot from getting stuck attempting failed Black Market placements when it
+ * should be expanding via Supply Stashes instead.
+ *
+ * Zone expansion is urgent when:
+ * - Current zone count is below desired count
+ * - The gap is >= threshold (typically 5 zones)
+ *
+ * This ensures:
+ * - Bot doesn't get stuck at low zone counts
+ * - Territorial expansion takes priority when significantly behind target
+ * - Economic optimization (markets) only happens when sprawl is progressing
+ *
+ * Related bugs:
+ * - B031: Zone expansion blocked by failed Black Market placement attempts
+ *
+ * @param inputs Current and desired zone counts
+ * @return True if zone expansion is urgent and should override markets
+ */
+bool AIControlAdapterIsZoneExpansionUrgent(const AIControlAdapterZoneExpansionPolicyInputs& inputs);
+
+/**
  * Decide whether to abort upgrade plan based on failure reason.
  *
  * Similar to AIControlAdapterShouldAbortUpgradePlanForTick() but takes reason as input.

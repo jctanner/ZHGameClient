@@ -497,6 +497,33 @@
 				return;
 			}
 
+			if (cmd == "Menu.GetListBoxContents")
+			{
+				std::string reason;
+				nlohmann::json result;
+				if (!executeMenuGetListBoxContents(message, result, reason))
+				{
+					sendQueryError(requestId, "query_failed", reason.c_str());
+					return;
+				}
+
+				sendQueryResult(requestId, result);
+				return;
+			}
+
+			if (cmd == "Menu.SelectListBox")
+			{
+				std::string reason;
+				if (!executeMenuSelectListBox(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendActionAck(requestId, true);
+				return;
+			}
+
 			if (cmd == "Menu.SetSlider")
 			{
 				std::string reason;

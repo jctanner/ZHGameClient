@@ -439,6 +439,17 @@ bool AIControlAdapterShouldPrioritizeMarketsOverProductionBuildings(
 	return inputs.totalBlackMarkets < inputs.desiredMarketCount && hasRoomForMoreProduction;
 }
 
+bool AIControlAdapterIsZoneExpansionUrgent(const AIControlAdapterZoneExpansionPolicyInputs& inputs)
+{
+	if (inputs.currentZoneCount >= inputs.desiredZoneCount)
+	{
+		return false;
+	}
+
+	const int zoneGap = inputs.desiredZoneCount - inputs.currentZoneCount;
+	return zoneGap >= inputs.zoneGapThreshold;
+}
+
 AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProductionCommand(
 	const AIControlAdapterProductionChoiceInputs& inputs)
 {

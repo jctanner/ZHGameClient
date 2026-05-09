@@ -21,6 +21,7 @@
 #include "GameClient/Gadget.h"
 #include "GameClient/GadgetTextEntry.h"
 #include "GameClient/GadgetComboBox.h"
+#include "GameClient/GadgetListBox.h"
 #include "GameClient/GadgetSlider.h"
 #include "GameClient/LanguageFilter.h"
 #include "GameClient/KeyDefs.h"
@@ -28,6 +29,7 @@
 #include "GameClient/TerrainVisual.h"
 #include "GameClient/InGameUI.h"
 #include "GameClient/View.h"
+#include "GameClient/MapUtil.h"
 #include "GameLogic/AI.h"
 #include "GameLogic/GameLogic.h"
 #include "GameLogic/PartitionManager.h"
@@ -301,12 +303,12 @@ namespace
 			}
 
 			m_transport.acceptClientIfAvailable();
-			if (!m_transport.hasClient())
+			if (m_transport.hasClient())
 			{
-				return;
+				m_transport.readIncomingData();
 			}
 
-			m_transport.readIncomingData();
+			// Autonomy should run even when no client is connected
 			evaluateAutomationRules();
 		}
 
@@ -1529,6 +1531,11 @@ namespace
 					}
 				}
 				const Int desiredZoneCount = std::max<Int>(1, sprawlSupplyCap);
+				const bool zoneExpansionIsUrgent = AIControlAdapterIsZoneExpansionUrgent({
+					stashZoneCount,
+					desiredZoneCount,
+					5  // zoneGapThreshold
+				});
 				const char* requiredOpeningBuild = AIControlAdapterGetRequiredOpeningBuild({
 					counts.supplyStashes,
 					counts.barracks,
@@ -1736,6 +1743,7 @@ namespace
 					recordBuildAttempt("Game.BuildBlackMarketSmart", issued, reason);
 				}
 				else if (shouldPrioritizeMarketGrowth
+					&& !zoneExpansionIsUrgent
 					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", counts.blackMarketsInProgress)
 					&& canAttemptBlackMarketNow)
 				{
@@ -1906,6 +1914,13 @@ namespace
 				{
 					m_autonomy.state.nextZoneIndex = (m_autonomy.state.nextZoneIndex + 1u) % zones.size();
 				}
+				adapterLog(
+					"autonomy_macro_decision player=%d command=%s issued=%d reason=%s money=%u",
+					player->getPlayerIndex(),
+					chosenCommand.c_str(),
+					issued ? 1 : 0,
+					reason.c_str(),
+					money);
 				m_autonomy.state.nextMacroTick = now + (issued ? 3000u : 2000u);
 			}
 
