@@ -46,10 +46,13 @@ if (-not $consoleSessionId) {
 Write-Host "Target session: $consoleSessionId (console)" -ForegroundColor Green
 Write-Host ""
 
-# Create a batch file to launch the game
+# Create a batch file to launch the game with NVIDIA GPU preference
 $tempBat = Join-Path $env:TEMP "game_launcher_$(Get-Random).bat"
 $batContent = @"
 @echo off
+REM Force NVIDIA GPU on Optimus systems
+set SHIM_RENDERING_MODE=0
+set SHIM_MCCOMPAT=0x800000001
 cd /d "$GameDir"
 start "" "$Executable" $Arguments
 "@

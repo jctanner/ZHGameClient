@@ -3,7 +3,8 @@ param(
     [ValidateSet("sprawl", "sprawl_balanced", "aggressive", "defensive", "economic", "tech", "standard")]
     [string]$Profile = "sprawl",
     [int]$SprawlMultiplier = 10,
-    [bool]$AttackEnabled = $true
+    [bool]$AttackEnabled = $true,
+    [bool]$DebugDraw = $false
     # Note: army_cap and produce_units control require C++ adapter changes
 )
 
@@ -99,9 +100,11 @@ try {
 
     # Configure autonomy
     $attackStatus = if ($AttackEnabled) { "enabled" } else { "disabled" }
-    Write-Host "`n==> Configuring autonomy ($Profile profile, ${SprawlMultiplier}x multiplier, attacks ${attackStatus})..." -ForegroundColor Magenta
+    $debugStatus = if ($DebugDraw) { "enabled" } else { "disabled" }
+    Write-Host "`n==> Configuring autonomy ($Profile profile, ${SprawlMultiplier}x multiplier, attacks ${attackStatus}, debug draw ${debugStatus})..." -ForegroundColor Magenta
     $attackEnabledJson = if ($AttackEnabled) { "true" } else { "false" }
-    $configAutonomy = "{`"type`":`"SessionCommand`",`"request_id`":`"config-1`",`"cmd`":`"Autonomy.Configure`",`"args`":{`"profile`":`"$Profile`",`"sprawl_multiplier`":$SprawlMultiplier,`"attack_enabled`":$attackEnabledJson}}"
+    $debugDrawJson = if ($DebugDraw) { "true" } else { "false" }
+    $configAutonomy = "{`"type`":`"SessionCommand`",`"request_id`":`"config-1`",`"cmd`":`"Autonomy.Configure`",`"args`":{`"profile`":`"$Profile`",`"sprawl_multiplier`":$SprawlMultiplier,`"attack_enabled`":$attackEnabledJson,`"debug_draw`":$debugDrawJson}}"
     $writer.WriteLine($configAutonomy)
     $resp = $reader.ReadLine()
 

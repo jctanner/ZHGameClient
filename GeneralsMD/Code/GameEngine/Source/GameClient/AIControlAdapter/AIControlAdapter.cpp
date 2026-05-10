@@ -229,6 +229,7 @@ namespace
 		Real expansionBias;
 		Real sprawlMultiplier;
 		Real zoneRadius;
+		bool debugDrawEnabled;
 		DWORD lastAppliedTick;
 		DWORD nextMacroTick;
 		DWORD nextProductionTick;
@@ -363,6 +364,7 @@ namespace
 			m_autonomy.state.expansionBias = 0.55f;
 			m_autonomy.state.sprawlMultiplier = 1.5f;
 			m_autonomy.state.zoneRadius = 450.0f;
+			m_autonomy.state.debugDrawEnabled = false;
 			m_autonomy.state.lastAppliedTick = 0u;
 			m_autonomy.state.nextMacroTick = 0u;
 			m_autonomy.state.nextProductionTick = 0u;
@@ -2498,6 +2500,18 @@ namespace
 				m_autonomy.state.attackAutomationEnabled = attackEnabledIt->get<bool>();
 			}
 
+			const auto debugDrawIt = argsIt->find("debug_draw");
+			if (debugDrawIt != argsIt->end())
+			{
+				if (!debugDrawIt->is_boolean())
+				{
+					reason = "invalid_debug_draw";
+					return false;
+				}
+				m_autonomy.state.debugDrawEnabled = debugDrawIt->get<bool>();
+				adapterLog("config_autonomy debug_draw=%d", m_autonomy.state.debugDrawEnabled ? 1 : 0);
+			}
+
 			const auto superIt = argsIt->find("allow_superweapons");
 			if (superIt != argsIt->end())
 			{
@@ -2599,6 +2613,7 @@ namespace
 			result["expansion_bias"] = m_autonomy.state.expansionBias;
 			result["sprawl_multiplier"] = m_autonomy.state.sprawlMultiplier;
 			result["zone_radius"] = m_autonomy.state.zoneRadius;
+			result["debug_draw"] = m_autonomy.state.debugDrawEnabled;
 			result["target_player_index"] = m_autonomy.state.hasExplicitTargetPlayerIndex ? m_autonomy.state.targetPlayerIndex : -1;
 			result["last_applied_tick"] = static_cast<UnsignedInt>(m_autonomy.state.lastAppliedTick);
 			result["selected_zone"] = nlohmann::json::object({
@@ -2839,6 +2854,183 @@ namespace
 
 		#include "AIControlAdapterProtocol.inl"
 
+		void drawDebugZones()
+		{
+			static int logCount = 0;
+			if (!m_autonomy.state.debugDrawEnabled)
+			{
+				if (logCount++ % 300 == 0) // Log every ~5 seconds at 60fps
+				{
+					adapterLog("debug_draw_disabled count=%d", logCount);
+				}
+				return;
+			}
+			adapterLog("debug_draw_active zones_check");
+			if (TheWindowManager == nullptr)
+			{
+				adapterLog("debug_draw_skip reason=no_window_manager");
+				return;
+			}
+			if (TheTacticalView == nullptr)
+			{
+				adapterLog("debug_draw_skip reason=no_tactical_view");
+				return;
+			}
+
+			Player* player = nullptr;
+			if (m_autonomy.state.hasExplicitPlayerIndex)
+			{
+				player = getPlayerByIndex(m_autonomy.state.playerIndex);
+			}
+			else if (ThePlayerList != nullptr)
+			{
+				player = ThePlayerList->getLocalPlayer();
+			}
+			if (player == nullptr)
+			{
+				return;
+			}
+
+			// Rebuild zones (same logic as in evaluateAutonomyMacro)
+			struct AutonomyZone
+			{
+				Coord3D center;
+				ObjectID anchorId;
+				bool isMainBase;
+			};
+			std::vector<AutonomyZone> zones;
+
+			player->iterateObjects([](Object* obj, void* userData)
+			{
+				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
+				{
+					return;
+				}
+				std::vector<AutonomyZone>* pZones = static_cast<std::vector<AutonomyZone>*>(userData);
+				if (!obj->isKindOf(KINDOF_STRUCTURE))
+				{
+					return;
+				}
+				if (obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+				{
+					return;
+				}
+				const ThingTemplate* tt = obj->getTemplate();
+				const std::string name = tt != nullptr ? tt->getName().str() : "";
+				if (name != "GLASupplyStash" && name != "GLABarracks" && name != "GLAArmsDealer")
+				{
+					return;
+				}
+
+				// Found a zone anchor (supply, barracks, or arms dealer)
+				Object* anchor = obj;
+				const Coord3D* anchorPos = anchor->getPosition();
+				if (anchorPos == nullptr)
+				{
+					return;
+				}
+
+				// Check if too close to existing zone
+				const Real minZoneDistSq = 200.0f * 200.0f;
+				for (std::size_t i = 0; i < pZones->size(); ++i)
+				{
+					const Real dx = (*pZones)[i].center.x - anchorPos->x;
+					const Real dy = (*pZones)[i].center.y - anchorPos->y;
+					if ((dx * dx) + (dy * dy) < minZoneDistSq)
+					{
+						return; // Too close to existing zone
+					}
+				}
+
+				AutonomyZone zone = {};
+				zone.center = *anchorPos;
+				zone.anchorId = anchor->getID();
+				zone.isMainBase = false; // We'll mark main base later
+				pZones->push_back(zone);
+			}, &zones);
+
+			if (zones.empty())
+			{
+				adapterLog("debug_draw_skip reason=no_zones");
+				return;
+			}
+
+			// Mark main base
+			zones[0].isMainBase = true;
+
+			adapterLog("debug_draw zones=%d radius=%.1f", static_cast<int>(zones.size()), m_autonomy.state.zoneRadius);
+
+			const Real zoneRadius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius);
+			const Int numSegments = 32; // Circle segments for smoothness
+			const Real angleStep = (2.0f * 3.14159265f) / static_cast<Real>(numSegments);
+
+			// Draw each zone
+			for (std::size_t i = 0; i < zones.size(); ++i)
+			{
+				const AutonomyZone& zone = zones[i];
+
+				// Color: green for main base, cyan for expansion zones
+				Color zoneColor = zone.isMainBase
+					? TheWindowManager->winMakeColor(0, 255, 0, 200)    // Green
+					: TheWindowManager->winMakeColor(0, 200, 255, 180); // Cyan
+
+				// Draw circle as line segments
+				for (Int seg = 0; seg < numSegments; ++seg)
+				{
+					const Real angle1 = static_cast<Real>(seg) * angleStep;
+					const Real angle2 = static_cast<Real>(seg + 1) * angleStep;
+
+					Coord3D worldPos1 = zone.center;
+					worldPos1.x += zoneRadius * std::cos(angle1);
+					worldPos1.y += zoneRadius * std::sin(angle1);
+
+					Coord3D worldPos2 = zone.center;
+					worldPos2.x += zoneRadius * std::cos(angle2);
+					worldPos2.y += zoneRadius * std::sin(angle2);
+
+					ICoord2D screenPos1;
+					ICoord2D screenPos2;
+
+					if (TheTacticalView->worldToScreen(&worldPos1, &screenPos1) &&
+						TheTacticalView->worldToScreen(&worldPos2, &screenPos2))
+					{
+						TheWindowManager->winDrawLine(
+							zoneColor,
+							2.0f,
+							screenPos1.x,
+							screenPos1.y,
+							screenPos2.x,
+							screenPos2.y);
+					}
+				}
+
+				// Draw center marker (crosshair)
+				Coord3D centerPos = zone.center;
+				const Real markerSize = zoneRadius * 0.15f;
+
+				Coord3D markerLeft = centerPos;
+				markerLeft.x -= markerSize;
+				Coord3D markerRight = centerPos;
+				markerRight.x += markerSize;
+				Coord3D markerTop = centerPos;
+				markerTop.y -= markerSize;
+				Coord3D markerBottom = centerPos;
+				markerBottom.y += markerSize;
+
+				ICoord2D screenLeft, screenRight, screenTop, screenBottom;
+				if (TheTacticalView->worldToScreen(&markerLeft, &screenLeft) &&
+					TheTacticalView->worldToScreen(&markerRight, &screenRight))
+				{
+					TheWindowManager->winDrawLine(zoneColor, 3.0f, screenLeft.x, screenLeft.y, screenRight.x, screenRight.y);
+				}
+				if (TheTacticalView->worldToScreen(&markerTop, &screenTop) &&
+					TheTacticalView->worldToScreen(&markerBottom, &screenBottom))
+				{
+					TheWindowManager->winDrawLine(zoneColor, 3.0f, screenTop.x, screenTop.y, screenBottom.x, screenBottom.y);
+				}
+			}
+		}
+
 		void evaluateAutomationRules()
 		{
 			evaluateAutonomyMacro();
@@ -2847,6 +3039,7 @@ namespace
 			evaluateRadarVanAutomationRule();
 			evaluateAttackAutomationRule();
 			evaluateCaptureAutomationRule();
+			drawDebugZones();
 		}
 
 		void collectCombatUnitsForRaid(Player* player, std::vector<Object*>& outUnits) const
@@ -2937,11 +3130,15 @@ namespace
 			return AIControlAdapterIsTickInFuture(it->second, now);
 		}
 
-		void collectCaptureSourcesForPlayer(Player* player, bool preferIdle, std::vector<Object*>& outSources) const
+		void collectCaptureSourcesForPlayer(Player* player, bool preferIdle, std::vector<Object*>& outSources)
 		{
 			outSources.clear();
+			adapterLog("collect_capture_sources_enter player=%d prefer_idle=%d",
+				player != nullptr ? player->getPlayerIndex() : -1, preferIdle ? 1 : 0);
 			if (player == nullptr || TheActionManager == nullptr)
 			{
+				adapterLog("collect_capture_sources_early_return player_null=%d action_mgr_null=%d",
+					player == nullptr ? 1 : 0, TheActionManager == nullptr ? 1 : 0);
 				return;
 			}
 
@@ -2950,7 +3147,12 @@ namespace
 				const AIControlAdapterState* self;
 				bool preferIdle;
 				std::vector<Object*>* outSources;
-			} ctx = { this, preferIdle, &outSources };
+				int unitCount;
+				int withCapturePower;
+				int reserved;
+				int underConstruction;
+				int notIdle;
+			} ctx = { this, preferIdle, &outSources, 0, 0, 0, 0, 0 };
 
 			player->iterateObjects([](Object* obj, void* userData)
 			{
@@ -2963,16 +3165,22 @@ namespace
 				{
 					return;
 				}
+				ctx->unitCount++;
+
 				if (!obj->hasSpecialPower(SPECIAL_INFANTRY_CAPTURE_BUILDING) && !obj->hasSpecialPower(SPECIAL_BLACKLOTUS_CAPTURE_BUILDING))
 				{
 					return;
 				}
+				ctx->withCapturePower++;
+
 				if (ctx->self->isCaptureSourceTemporarilyReserved(obj))
 				{
+					ctx->reserved++;
 					return;
 				}
 				if (obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
 				{
+					ctx->underConstruction++;
 					return;
 				}
 
@@ -2980,18 +3188,26 @@ namespace
 				const bool isIdle = (ai != nullptr && ai->isIdle() && !ai->isBusy());
 				if (ctx->preferIdle && !isIdle)
 				{
+					ctx->notIdle++;
 					return;
 				}
 
 				ctx->outSources->push_back(obj);
 			}, &ctx);
 
+			adapterLog("capture_source_search player=%d prefer_idle=%d units=%d with_power=%d reserved=%d under_construction=%d not_idle=%d found=%d",
+				player->getPlayerIndex(), preferIdle ? 1 : 0, ctx.unitCount, ctx.withCapturePower,
+				ctx.reserved, ctx.underConstruction, ctx.notIdle, (int)outSources.size());
+
 			if (!outSources.empty() || !preferIdle)
 			{
 				return;
 			}
 
+			// Retry without idle preference
 			ctx.preferIdle = false;
+			ctx.reserved = 0;
+			ctx.underConstruction = 0;
 			player->iterateObjects([](Object* obj, void* userData)
 			{
 				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
@@ -3009,14 +3225,19 @@ namespace
 				}
 				if (ctx->self->isCaptureSourceTemporarilyReserved(obj))
 				{
+					ctx->reserved++;
 					return;
 				}
 				if (obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
 				{
+					ctx->underConstruction++;
 					return;
 				}
 				ctx->outSources->push_back(obj);
 			}, &ctx);
+
+			adapterLog("capture_source_search_retry player=%d reserved=%d under_construction=%d found=%d",
+				player->getPlayerIndex(), ctx.reserved, ctx.underConstruction, (int)outSources.size());
 		}
 
 		void pruneCaptureAutomationPendingTargets()
@@ -3507,6 +3728,7 @@ namespace
 		{
 			if (!m_automation.captureRule.enabled)
 			{
+				adapterLog("automation_capture_rule_disabled");
 				return;
 			}
 
@@ -3537,6 +3759,7 @@ namespace
 			const Int pendingCount = static_cast<Int>(m_automation.captureRule.pendingTargetsUntilTick.size());
 			if (pendingCount >= m_automation.captureRule.maxConcurrent)
 			{
+				adapterLog("automation_capture_rule_skip player=%d reason=pending_limit pending=%d max_concurrent=%d", player->getPlayerIndex(), pendingCount, m_automation.captureRule.maxConcurrent);
 				return;
 			}
 
@@ -3544,6 +3767,7 @@ namespace
 			collectCapturableTargetsForPlayer(player, targets);
 			if (targets.empty())
 			{
+				adapterLog("automation_capture_rule_skip player=%d reason=no_targets", player->getPlayerIndex());
 				return;
 			}
 

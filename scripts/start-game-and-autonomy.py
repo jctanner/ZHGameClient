@@ -121,9 +121,11 @@ def main():
     parser.add_argument('--profile', default='sprawl', help='Autonomy profile')
     parser.add_argument('--sprawl-multiplier', type=int, default=10, help='Sprawl multiplier')
     parser.add_argument('--no-attacks', action='store_true', help='Disable attacks')
+    parser.add_argument('--debug-draw', action='store_true', help='Enable debug zone drawing')
     args = parser.parse_args()
 
     attack_enabled = not args.no_attacks
+    debug_draw = args.debug_draw
 
     print("\n========================================")
     print("Start Game and Enable Autonomy")
@@ -201,7 +203,8 @@ def main():
 
         # Configure autonomy
         attack_status = "enabled" if attack_enabled else "disabled"
-        print(f"\n==> Configuring autonomy ({args.profile} profile, {args.sprawl_multiplier}x multiplier, attacks {attack_status})...")
+        debug_status = "enabled" if debug_draw else "disabled"
+        print(f"\n==> Configuring autonomy ({args.profile} profile, {args.sprawl_multiplier}x multiplier, attacks {attack_status}, debug draw {debug_status})...")
 
         config_resp = send_command(
             handle,
@@ -211,7 +214,8 @@ def main():
             args={
                 "profile": args.profile,
                 "sprawl_multiplier": args.sprawl_multiplier,
-                "attack_enabled": attack_enabled
+                "attack_enabled": attack_enabled,
+                "debug_draw": debug_draw
             }
         )
 
