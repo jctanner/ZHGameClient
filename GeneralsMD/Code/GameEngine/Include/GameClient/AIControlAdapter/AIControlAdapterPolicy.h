@@ -453,6 +453,7 @@ struct AIControlAdapterProductionChoiceInputs
 	int barracks;                // Count of Barracks (build infantry)
 	int armsDealers;             // Count of Arms Dealers (build vehicles)
 	int palaces;                 // Count of Palaces (build Scud Launchers)
+	bool hasScudLauncherScience; // Whether the player has purchased SCIENCE_ScudLauncher
 	int soldiers;                // Current count of Rebel/Worker infantry
 	int rpg;                     // Current count of RPG Troopers
 	int quads;                   // Current count of Quads (fast attack vehicle)

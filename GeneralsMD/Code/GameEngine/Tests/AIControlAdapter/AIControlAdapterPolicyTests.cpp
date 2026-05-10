@@ -557,6 +557,7 @@ int main()
 			1,
 			1,
 			0,
+			false,
 			4,
 			0,
 			0,
@@ -581,6 +582,7 @@ int main()
 			1,
 			1,
 			0,
+			false,
 			6,
 			0,
 			0,
@@ -604,6 +606,7 @@ int main()
 			1,
 			1,
 			0,
+			false,
 			12,
 			8,
 			0,
@@ -627,6 +630,7 @@ int main()
 			1,
 			1,
 			0,
+			false,
 			6,
 			0,
 			4,
@@ -650,6 +654,7 @@ int main()
 			0,
 			1,
 			0,
+			false,
 			0,
 			0,
 			0,
@@ -673,6 +678,7 @@ int main()
 			2,
 			2,
 			1,
+			true,
 			20,
 			20,
 			10,
@@ -697,6 +703,7 @@ int main()
 			2,
 			2,
 			1,
+			true,
 			28,
 			10,
 			24,
@@ -721,6 +728,7 @@ int main()
 			2,
 			2,
 			1,
+			true,
 			12,
 			10,
 			18,
@@ -731,6 +739,30 @@ int main()
 			100
 		});
 		expect(std::string(result.command) == "Game.QueueRpgTroopersAllBarracks", "balanced sprawl should refill infantry when vehicles are already ahead and infantry is the larger end-state deficit");
+	}
+
+	{
+		const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
+			false,
+			"",
+			false,
+			true,
+			"sprawl_balanced",
+			2000u,
+			2,
+			2,
+			1,
+			false,
+			12,
+			10,
+			4,
+			0,
+			0,
+			3,
+			26,
+			100
+		});
+		expect(std::string(result.command) == "Game.QueueScorpionsAllWarFactories", "balanced sprawl should not choose Scud Launchers before SCIENCE_ScudLauncher is owned");
 	}
 
 	expect(AIControlAdapterHasTickElapsed(0u, 0u), "zero deadline should be ready immediately at tick zero");

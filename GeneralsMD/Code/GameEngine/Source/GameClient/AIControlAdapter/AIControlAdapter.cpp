@@ -2183,6 +2183,11 @@ namespace
 					return issued;
 				};
 				const char* pauseReason = openingInfrastructureReady ? "reserve_cash_recovery" : "opening_not_ready";
+				const ScienceType scudLauncherScience = TheScienceStore != nullptr
+					? TheScienceStore->getScienceFromInternalName("SCIENCE_ScudLauncher")
+					: SCIENCE_INVALID;
+				const bool hasScudLauncherScience = scudLauncherScience != SCIENCE_INVALID
+					&& player->hasScience(scudLauncherScience);
 				const AIControlAdapterProductionChoiceResult preferredProduction = AIControlAdapterChoosePreferredProductionCommand({
 					shouldPauseCombatProduction,
 					pauseReason,
@@ -2193,6 +2198,7 @@ namespace
 					counts.barracks,
 					counts.armsDealers,
 					counts.palaces,
+					hasScudLauncherScience,
 					counts.soldiers,
 					counts.rpg,
 					counts.quads,
@@ -4740,6 +4746,4 @@ void AIControlAdapterReset()
 {
 	g_adapterState.reset();
 }
-
-
 
