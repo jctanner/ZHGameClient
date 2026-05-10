@@ -510,6 +510,7 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 		{
 			if (techy
 				&& inputs.palaces > 0
+				&& inputs.hasScudLauncherScience
 				&& inputs.scudLaunchers < ((inputs.quads + inputs.scorpions) / 10 > 1 ? (inputs.quads + inputs.scorpions) / 10 : 1)
 				&& inputs.money >= 1200u)
 			{
@@ -538,6 +539,7 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 		{
 			if (techy
 				&& inputs.palaces > 0
+				&& inputs.hasScudLauncherScience
 				&& inputs.scudLaunchers < ((inputs.quads + inputs.scorpions) / 10 > 1 ? (inputs.quads + inputs.scorpions) / 10 : 1)
 				&& inputs.money >= 1200u)
 			{
@@ -569,6 +571,7 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 	{
 		if (techy
 			&& inputs.palaces > 0
+			&& inputs.hasScudLauncherScience
 			&& inputs.scudLaunchers < ((inputs.quads + inputs.scorpions) / 10 > 1 ? (inputs.quads + inputs.scorpions) / 10 : 1)
 			&& inputs.money >= 1200u)
 		{
@@ -594,6 +597,7 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 	{
 		if (techy
 			&& inputs.palaces > 0
+			&& inputs.hasScudLauncherScience
 			&& inputs.scudLaunchers < ((inputs.quads + inputs.scorpions) / 10 > 1 ? (inputs.quads + inputs.scorpions) / 10 : 1)
 			&& inputs.money >= 1200u)
 		{
