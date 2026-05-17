@@ -421,6 +421,14 @@
 			{
 				return isPalaceTemplateName(name);
 			}
+			if (producerKind == "barracks")
+			{
+				return containsIgnoreCase(name, "barracks");
+			}
+			if (producerKind == "arms_dealer" || producerKind == "armsdealer" || producerKind == "war_factory")
+			{
+				return containsIgnoreCase(name, "arms") && containsIgnoreCase(name, "dealer");
+			}
 			if (producerKind == "black_market" || producerKind == "blackmarket" || producerKind == "market")
 			{
 				return containsIgnoreCase(name, "black") && containsIgnoreCase(name, "market");
@@ -2838,6 +2846,15 @@
 
 			const std::string producerKind = getJsonString(*argsIt, "producer_kind");
 			const bool requireCommandCenter = producerKind.empty() || producerKind == "command_center";
+			const bool requireStructuredProducerKind =
+				producerKind == "barracks"
+				|| producerKind == "arms_dealer"
+				|| producerKind == "armsdealer"
+				|| producerKind == "war_factory"
+				|| producerKind == "palace"
+				|| producerKind == "black_market"
+				|| producerKind == "blackmarket"
+				|| producerKind == "market";
 
 			Player* player = resolvePlayerFromArgs(message, reason);
 			if (player == nullptr)
@@ -2845,7 +2862,9 @@
 				return false;
 			}
 
-			Object* producer = resolveProducerFromArgs(player, message, requireCommandCenter, reason);
+			Object* producer = requireStructuredProducerKind
+				? resolveUpgradeProducerFromArgs(player, message, reason)
+				: resolveProducerFromArgs(player, message, requireCommandCenter, reason);
 			if (producer == nullptr)
 			{
 				return false;
@@ -2865,9 +2884,30 @@
 				return false;
 			}
 
+			const ThingTemplate* producerTemplate = producer->getTemplate();
+			const std::string producerTemplateName = producerTemplate != nullptr ? producerTemplate->getName().str() : std::string();
+			if (containsIgnoreCase(unitTemplateName, "scudlauncher"))
+			{
+				adapterLog(
+					"queue_unit_attempt player=%d producer_id=%d producer_template=%s producer_kind=%s unit_template=%s",
+					player->getPlayerIndex(),
+					static_cast<Int>(producer->getID()),
+					producerTemplateName.c_str(),
+					producerKind.c_str(),
+					unitTemplateName.c_str());
+			}
+
 			const CanMakeType canMake = TheBuildAssistant->canMakeUnit(producer, unitTemplate);
 			if (canMake != CANMAKE_OK)
 			{
+				adapterLog(
+					"queue_unit_prereq_probe player=%d producer_id=%d producer_template=%s producer_kind=%s unit_template=%s can_make=%d",
+					player->getPlayerIndex(),
+					static_cast<Int>(producer->getID()),
+					producerTemplateName.c_str(),
+					producerKind.c_str(),
+					unitTemplateName.c_str(),
+					static_cast<Int>(canMake));
 				switch (canMake)
 				{
 				case CANMAKE_NO_PREREQ:
@@ -3018,15 +3058,39 @@
 				}
 			}
 
+			const ThingTemplate* producerTemplate = producer->getTemplate();
+			const std::string producerTemplateName = producerTemplate != nullptr ? producerTemplate->getName().str() : std::string();
+			adapterLog(
+				"queue_upgrade_attempt player=%d producer_id=%d producer_template=%s producer_kind=%s upgrade=%s",
+				player->getPlayerIndex(),
+				static_cast<Int>(producer->getID()),
+				producerTemplateName.c_str(),
+				producerKind.c_str(),
+				upgradeName.c_str());
+
 			ProductionUpdateInterface* production = producer->getProductionUpdateInterface();
 			if (production == nullptr)
 			{
+				adapterLog(
+					"queue_upgrade_probe player=%d producer_id=%d producer_template=%s producer_kind=%s upgrade=%s producer_not_factory=1",
+					player->getPlayerIndex(),
+					static_cast<Int>(producer->getID()),
+					producerTemplateName.c_str(),
+					producerKind.c_str(),
+					upgradeName.c_str());
 				reason = "producer_not_factory";
 				return false;
 			}
 
 			if (!producer->canProduceUpgrade(upgradeT))
 			{
+				adapterLog(
+					"queue_upgrade_probe player=%d producer_id=%d producer_template=%s producer_kind=%s upgrade=%s can_produce=0",
+					player->getPlayerIndex(),
+					static_cast<Int>(producer->getID()),
+					producerTemplateName.c_str(),
+					producerKind.c_str(),
+					upgradeName.c_str());
 				reason = "producer_cannot_make_upgrade";
 				return false;
 			}

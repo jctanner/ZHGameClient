@@ -14,7 +14,11 @@ function Invoke-Step {
     )
 
     Write-Host "==> $Name"
+    $script:LASTEXITCODE = $null
     & $Action
+    if ($null -ne $LASTEXITCODE -and $LASTEXITCODE -ne 0) {
+        throw "Step '$Name' failed with exit code $LASTEXITCODE"
+    }
 }
 
 Invoke-Step "Configure" {

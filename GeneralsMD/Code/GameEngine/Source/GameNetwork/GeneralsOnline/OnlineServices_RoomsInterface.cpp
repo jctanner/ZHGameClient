@@ -1518,5 +1518,5 @@ void NGMP_OnlineServices_RoomsInterface::OnRosterUpdated(std::unordered_map<uint
 		m_RosterNeedsRefreshCallback();
 	}
 }
-
+
 
