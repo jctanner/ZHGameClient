@@ -90,7 +90,7 @@ const char* AIControlAdapterGetRequiredOpeningBuild(const AIControlAdapterOpenin
 
 bool AIControlAdapterCanAttemptBlackMarket(const AIControlAdapterBlackMarketPolicyInputs& inputs)
 {
-	if (!inputs.palaceExists)
+	if (!inputs.hasCompletedPalace)
 	{
 		return false;
 	}
@@ -509,7 +509,7 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 				|| vehicleDeficit > infantryDeficit))
 		{
 			if (techy
-				&& inputs.palaces > 0
+				&& inputs.hasCompletedPalace
 				&& inputs.hasScudLauncherScience
 				&& inputs.scudLaunchers < ((inputs.quads + inputs.scorpions) / 10 > 1 ? (inputs.quads + inputs.scorpions) / 10 : 1)
 				&& inputs.money >= 1200u)
@@ -528,6 +528,10 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 				|| infantryDeficit > 0
 				|| inputs.armyCount < (inputs.armyCap / 2)))
 		{
+			if (inputs.hasCaptureUpgrade && inputs.captureSources < 1)
+			{
+				return { "Game.QueueSoldiersAllBarracks", "" };
+			}
 			if (aggressive || inputs.rpg < inputs.soldiers)
 			{
 				return { "Game.QueueRpgTroopersAllBarracks", "" };
@@ -538,7 +542,7 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 		if (canQueueVehicles)
 		{
 			if (techy
-				&& inputs.palaces > 0
+				&& inputs.hasCompletedPalace
 				&& inputs.hasScudLauncherScience
 				&& inputs.scudLaunchers < ((inputs.quads + inputs.scorpions) / 10 > 1 ? (inputs.quads + inputs.scorpions) / 10 : 1)
 				&& inputs.money >= 1200u)
@@ -554,6 +558,10 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 
 		if (canQueueInfantry)
 		{
+			if (inputs.hasCaptureUpgrade && inputs.captureSources < 1)
+			{
+				return { "Game.QueueSoldiersAllBarracks", "" };
+			}
 			if (aggressive || inputs.rpg < inputs.soldiers)
 			{
 				return { "Game.QueueRpgTroopersAllBarracks", "" };
@@ -570,7 +578,7 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 		&& preferVehicleReplenishment)
 	{
 		if (techy
-			&& inputs.palaces > 0
+			&& inputs.hasCompletedPalace
 			&& inputs.hasScudLauncherScience
 			&& inputs.scudLaunchers < ((inputs.quads + inputs.scorpions) / 10 > 1 ? (inputs.quads + inputs.scorpions) / 10 : 1)
 			&& inputs.money >= 1200u)
@@ -586,6 +594,10 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 
 	if (inputs.barracks > 0 && inputs.money >= 300u)
 	{
+		if (inputs.hasCaptureUpgrade && inputs.captureSources < 1)
+		{
+			return { "Game.QueueSoldiersAllBarracks", "" };
+		}
 		if (aggressive || inputs.rpg < inputs.soldiers)
 		{
 			return { "Game.QueueRpgTroopersAllBarracks", "" };
@@ -596,7 +608,7 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 	if (inputs.armsDealers > 0 && inputs.money >= 700u)
 	{
 		if (techy
-			&& inputs.palaces > 0
+			&& inputs.hasCompletedPalace
 			&& inputs.hasScudLauncherScience
 			&& inputs.scudLaunchers < ((inputs.quads + inputs.scorpions) / 10 > 1 ? (inputs.quads + inputs.scorpions) / 10 : 1)
 			&& inputs.money >= 1200u)

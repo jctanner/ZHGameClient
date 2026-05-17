@@ -212,7 +212,7 @@ int main()
 			10000u,
 			0
 		};
-		expect(!AIControlAdapterCanAttemptBlackMarket(inputs), "black market should require a palace");
+		expect(!AIControlAdapterCanAttemptBlackMarket(inputs), "black market should require a finished palace");
 	}
 
 	{
@@ -547,20 +547,23 @@ int main()
 	}
 
 	{
-		const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
-			true,
-			"reserve_cash_recovery",
-			false,
+			const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
+				true,
+				"reserve_cash_recovery",
+				false,
 			true,
 			"sprawl_balanced",
 			9000u,
 			1,
 			1,
-			0,
-			false,
-			4,
-			0,
-			0,
+				0,
+				false,
+				false,
+				false,
+				0,
+				4,
+				0,
+				0,
 			0,
 			0,
 			0,
@@ -572,20 +575,23 @@ int main()
 	}
 
 	{
-		const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
-			false,
-			"",
-			false,
+			const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
+				false,
+				"",
+				false,
 			true,
 			"sprawl_balanced",
 			2000u,
 			1,
 			1,
-			0,
-			false,
-			6,
-			0,
-			0,
+				0,
+				false,
+				false,
+				false,
+				0,
+				6,
+				0,
+				0,
 			0,
 			0,
 			0,
@@ -596,20 +602,23 @@ int main()
 	}
 
 	{
-		const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
-			false,
-			"",
-			false,
+			const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
+				false,
+				"",
+				false,
 			true,
 			"sprawl_balanced",
 			2000u,
 			1,
 			1,
-			0,
-			false,
-			12,
-			8,
-			0,
+				0,
+				false,
+				false,
+				false,
+				0,
+				12,
+				8,
+				0,
 			0,
 			0,
 			0,
@@ -620,20 +629,23 @@ int main()
 	}
 
 	{
-		const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
-			false,
-			"",
-			false,
+			const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
+				false,
+				"",
+				false,
 			true,
 			"sprawl_balanced",
 			2000u,
 			1,
 			1,
-			0,
-			false,
-			6,
-			0,
-			4,
+				0,
+				false,
+				false,
+				false,
+				0,
+				6,
+				0,
+				4,
 			0,
 			0,
 			0,
@@ -644,20 +656,23 @@ int main()
 	}
 
 	{
-		const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
-			false,
-			"",
-			false,
+			const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
+				false,
+				"",
+				false,
 			false,
 			"standard",
 			2000u,
 			0,
 			1,
-			0,
-			false,
-			0,
-			0,
-			0,
+				0,
+				false,
+				false,
+				false,
+				0,
+				0,
+				0,
+				0,
 			0,
 			0,
 			0,
@@ -668,20 +683,23 @@ int main()
 	}
 
 	{
-		const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
-			false,
-			"",
-			true,
+			const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
+				false,
+				"",
+				true,
 			true,
 			"sprawl_balanced",
 			2000u,
 			2,
 			2,
-			1,
-			true,
-			20,
-			20,
-			10,
+				1,
+				true,
+				true,
+				false,
+				0,
+				20,
+				20,
+				10,
 			6,
 			0,
 			0,
@@ -693,20 +711,23 @@ int main()
 	}
 
 	{
-		const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
-			false,
-			"",
-			false,
+			const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
+				false,
+				"",
+				false,
 			true,
 			"sprawl_balanced",
 			2000u,
 			2,
 			2,
-			1,
-			true,
-			28,
-			10,
-			24,
+				1,
+				true,
+				true,
+				false,
+				0,
+				28,
+				10,
+				24,
 			20,
 			2,
 			4,
@@ -718,44 +739,104 @@ int main()
 	}
 
 	{
-		const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
-			false,
-			"",
-			false,
+			const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
+				false,
+				"",
+				false,
 			true,
 			"sprawl_balanced",
 			2000u,
 			2,
 			2,
-			1,
-			true,
-			12,
-			10,
-			18,
+				1,
+				true,
+				true,
+				false,
+				0,
+				12,
+				10,
+				18,
 			14,
 			0,
 			3,
 			57,
 			100
 		});
-		expect(std::string(result.command) == "Game.QueueRpgTroopersAllBarracks", "balanced sprawl should refill infantry when vehicles are already ahead and infantry is the larger end-state deficit");
-	}
+			expect(std::string(result.command) == "Game.QueueRpgTroopersAllBarracks", "balanced sprawl should refill infantry when vehicles are already ahead and infantry is the larger end-state deficit");
+		}
 
-	{
-		const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
-			false,
-			"",
-			false,
+		{
+			const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
+				false,
+				"",
+				false,
+				true,
+				"sprawl_balanced",
+				2000u,
+				2,
+				2,
+				1,
+				true,
+				true,
+				true,
+				0,
+				12,
+				10,
+				18,
+				14,
+				0,
+				3,
+				57,
+				100
+			});
+			expect(std::string(result.command) == "Game.QueueSoldiersAllBarracks", "balanced sprawl should force Rebel-capable infantry when capture upgrade is ready but no capture sources exist");
+		}
+
+		{
+			const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
+				false,
+				"",
+				false,
 			true,
 			"sprawl_balanced",
 			2000u,
 			2,
 			2,
-			1,
-			false,
-			12,
-			10,
-			4,
+				1,
+				false,
+				true,
+				false,
+				0,
+				12,
+				10,
+				4,
+			0,
+			0,
+			3,
+			26,
+			100
+		});
+		expect(std::string(result.command) == "Game.QueueScorpionsAllWarFactories", "balanced sprawl should not choose Scud Launchers before the Palace prerequisite is actually completed");
+	}
+
+	{
+			const AIControlAdapterProductionChoiceResult result = AIControlAdapterChoosePreferredProductionCommand({
+				false,
+				"",
+				false,
+			true,
+			"sprawl_balanced",
+			2000u,
+			2,
+			2,
+				1,
+				true,
+				false,
+				false,
+				0,
+				12,
+				10,
+				4,
 			0,
 			0,
 			3,

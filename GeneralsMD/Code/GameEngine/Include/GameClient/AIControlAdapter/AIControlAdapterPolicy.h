@@ -163,7 +163,7 @@ const char* AIControlAdapterGetRequiredOpeningBuild(const AIControlAdapterOpenin
  */
 struct AIControlAdapterBlackMarketPolicyInputs
 {
-	bool palaceExists;           // True if Palace (tech building) exists
+	bool hasCompletedPalace;     // True if a finished Palace (tech prerequisite) exists
 	bool isBalancedSprawl;       // True if using "Balanced Sprawl" build order
 	unsigned int money;          // Current cash balance
 	unsigned int reserveCash;    // Cash reserved for emergency economy
@@ -452,8 +452,11 @@ struct AIControlAdapterProductionChoiceInputs
 	unsigned int money;          // Current cash balance
 	int barracks;                // Count of Barracks (build infantry)
 	int armsDealers;             // Count of Arms Dealers (build vehicles)
-	int palaces;                 // Count of Palaces (build Scud Launchers)
+	int palaces;                 // Total count of Palaces, including in-progress
+	bool hasCompletedPalace;     // True if a finished Palace exists for live unit prerequisites
 	bool hasScudLauncherScience; // Whether the player has purchased SCIENCE_ScudLauncher
+	bool hasCaptureUpgrade;      // Whether infantry capture upgrade is complete
+	int captureSources;          // Current count of live units with capture power
 	int soldiers;                // Current count of Rebel/Worker infantry
 	int rpg;                     // Current count of RPG Troopers
 	int quads;                   // Current count of Quads (fast attack vehicle)
