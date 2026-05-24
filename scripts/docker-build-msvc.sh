@@ -7,6 +7,7 @@
 #
 # Usage:
 #   ./scripts/docker-build-msvc.sh                        # Full build of Zero Hour (z_generals)
+#   ./scripts/docker-build-msvc.sh --tests                # Build and run adapter tests
 #   ./scripts/docker-build-msvc.sh --clean                # Clean build directory
 #   ./scripts/docker-build-msvc.sh --cmake                # Force CMake reconfiguration
 #   ./scripts/docker-build-msvc.sh --interactive          # Enter container shell
@@ -23,11 +24,22 @@ PRESET="msvc-wine"
 MAKE_TARGET=""
 FORCE_CMAKE="false"
 INTERACTIVE="false"
+RUN_TESTS="false"
+CTEST_FILTER="z_gameengine_adapter.*_tests$"
 
 while [[ $# -gt 0 ]]; do
 	case "$1" in
 	--target)
 		MAKE_TARGET="$2"
+		shift 2
+		;;
+	--tests)
+		RUN_TESTS="true"
+		MAKE_TARGET="${MAKE_TARGET:-z_gameengine_adapter_tests z_gameengine_adapter_techmanager_tests z_gameengine_adapter_productionmanager_tests z_gameengine_adapter_zonedefense_tests z_gameengine_adapter_scheduler_tests z_gameengine_adapter_economymanager_tests z_gameengine_adapter_distributedplacement_tests}"
+		shift
+		;;
+	--ctest-filter)
+		CTEST_FILTER="$2"
 		shift 2
 		;;
 	--clean)
@@ -64,6 +76,8 @@ DOCKER_ARGS=(
 	-e "PRESET=$PRESET"
 	-e "FORCE_CMAKE=$FORCE_CMAKE"
 	-e "MAKE_TARGET=${MAKE_TARGET}"
+	-e "RUN_TESTS=${RUN_TESTS}"
+	-e "CTEST_FILTER=${CTEST_FILTER}"
 )
 
 if [ "$INTERACTIVE" = "true" ]; then

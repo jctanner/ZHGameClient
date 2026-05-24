@@ -3,6 +3,7 @@
 #include "GameClient/AIControlAdapter/AIControlAdapterPolicy.h"
 
 #include <windows.h>
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 
@@ -68,6 +69,22 @@ bool AIControlAdapterShouldHoldArmyCap(const AIControlAdapterCombatProductionPol
 	return false;
 }
 
+int AIControlAdapterGetEffectiveArmyCap(const AIControlAdapterEffectiveArmyCapPolicyInputs& inputs)
+{
+	const int baseArmyCap = inputs.baseArmyCap > 0 ? inputs.baseArmyCap : 0;
+	if (!inputs.isBalancedSprawl || inputs.money < 100000u)
+	{
+		return baseArmyCap;
+	}
+
+	const int productionCapacity = std::max(0, inputs.barracks) + std::max(0, inputs.armsDealers);
+	const int productionCapacityCap = 100 + (productionCapacity * 3);
+	const int incomeSupportedCap = 100 + (std::max(0, inputs.incomePerMinute) / 500);
+	const int surplusCap = std::min(productionCapacityCap, incomeSupportedCap);
+	const int cappedSurplusCap = std::min(300, surplusCap);
+	return std::max(baseArmyCap, cappedSurplusCap);
+}
+
 const char* AIControlAdapterGetRequiredOpeningBuild(const AIControlAdapterOpeningPolicyInputs& inputs)
 {
 	if (inputs.completedSupplyStashes < 1)
@@ -103,6 +120,11 @@ bool AIControlAdapterCanAttemptBlackMarket(const AIControlAdapterBlackMarketPoli
 	if (inputs.blackMarketsInProgress > 0)
 	{
 		return false;
+	}
+
+	if (inputs.completedBlackMarkets < 1)
+	{
+		return inputs.money >= inputs.reserveCash;
 	}
 
 	return inputs.money >= (inputs.reserveCash + 2500u);
@@ -243,10 +265,8 @@ bool AIControlAdapterShouldAbortUpgradePlanForTick(const char* reason)
 	}
 
 	return std::strcmp(reason, "queue_full") == 0
-		|| std::strcmp(reason, "producer_cannot_make_upgrade") == 0
 		|| std::strcmp(reason, "palace_not_found") == 0
-		|| std::strcmp(reason, "black_market_not_found") == 0
-		|| std::strcmp(reason, "upgrade_already_in_production") == 0;
+		|| std::strcmp(reason, "black_market_not_found") == 0;
 }
 
 bool AIControlAdapterShouldAbortUpgradePlanForReason(const char* reason)
