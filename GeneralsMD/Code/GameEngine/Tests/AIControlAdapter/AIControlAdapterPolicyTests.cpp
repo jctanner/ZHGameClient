@@ -203,6 +203,54 @@ int main()
 		100,
 		100
 	}), "non-balanced profiles should not use the balanced army-cap hold rule");
+	expect(AIControlAdapterGetEffectiveArmyCap({
+		true,
+		99999u,
+		100000,
+		20,
+		42,
+		100
+	}) == 100, "balanced sprawl should keep the normal army cap below surplus-cash pressure");
+	expect(AIControlAdapterGetEffectiveArmyCap({
+		true,
+		100000u,
+		93000,
+		20,
+		42,
+		100
+	}) == 286, "balanced sprawl should scale army cap with production capacity under surplus-cash pressure");
+	expect(AIControlAdapterGetEffectiveArmyCap({
+		true,
+		100000u,
+		10000,
+		20,
+		42,
+		100
+	}) == 120, "balanced sprawl should limit surplus army cap when net income is modest");
+	expect(AIControlAdapterGetEffectiveArmyCap({
+		true,
+		100000u,
+		-1000,
+		20,
+		42,
+		100
+	}) == 100, "balanced sprawl should not raise army cap while net cash flow is negative");
+	expect(AIControlAdapterGetEffectiveArmyCap({
+		true,
+		500000u,
+		200000,
+		100,
+		100,
+		100
+	}) == 300, "balanced sprawl surplus army cap should stay bounded");
+	expect(AIControlAdapterGetEffectiveArmyCap({
+		false,
+		500000u,
+		0,
+		20,
+		42,
+		9999
+	}) == 9999, "non-balanced profiles should keep their configured army cap");
 
 	{
 		const AIControlAdapterBlackMarketPolicyInputs inputs = {
@@ -210,6 +258,7 @@ int main()
 			true,
 			30000u,
 			10000u,
+			0,
 			0
 		};
 		expect(!AIControlAdapterCanAttemptBlackMarket(inputs), "black market should require a finished palace");
@@ -221,9 +270,22 @@ int main()
 			true,
 			11000u,
 			10000u,
+			1,
 			0
 		};
-		expect(!AIControlAdapterCanAttemptBlackMarket(inputs), "balanced sprawl should not start a black market below reserve plus cost");
+		expect(!AIControlAdapterCanAttemptBlackMarket(inputs), "balanced sprawl should not start additional black markets below reserve plus cost");
+	}
+
+	{
+		const AIControlAdapterBlackMarketPolicyInputs inputs = {
+			true,
+			true,
+			10000u,
+			10000u,
+			0,
+			0
+		};
+		expect(AIControlAdapterCanAttemptBlackMarket(inputs), "balanced sprawl should allow the first black market at reserve");
 	}
 
 	{
@@ -232,9 +294,10 @@ int main()
 			true,
 			12500u,
 			10000u,
+			1,
 			0
 		};
-		expect(AIControlAdapterCanAttemptBlackMarket(inputs), "balanced sprawl should allow a black market at reserve plus cost");
+		expect(AIControlAdapterCanAttemptBlackMarket(inputs), "balanced sprawl should allow additional black markets at reserve plus cost");
 	}
 
 	{
@@ -243,6 +306,7 @@ int main()
 			true,
 			20000u,
 			10000u,
+			1,
 			1
 		};
 		expect(!AIControlAdapterCanAttemptBlackMarket(inputs), "balanced sprawl should not start another black market while one is in progress");
@@ -313,10 +377,10 @@ int main()
 	expect(AIControlAdapterShouldAbortSciencePlanForTick("science_not_purchasable"), "science_not_purchasable should stop science attempts for the current tick");
 	expect(!AIControlAdapterShouldAbortSciencePlanForTick("no_money"), "other science errors should not necessarily stop the science plan");
 	expect(AIControlAdapterShouldAbortUpgradePlanForTick("queue_full"), "queue_full should stop upgrade attempts for the current tick");
-	expect(AIControlAdapterShouldAbortUpgradePlanForTick("producer_cannot_make_upgrade"), "producer_cannot_make_upgrade should stop upgrade attempts for the current tick");
+	expect(!AIControlAdapterShouldAbortUpgradePlanForTick("producer_cannot_make_upgrade"), "producer_cannot_make_upgrade should skip the current upgrade and allow later upgrades in the plan");
 	expect(AIControlAdapterShouldAbortUpgradePlanForTick("palace_not_found"), "palace_not_found should stop upgrade attempts for the current tick");
 	expect(AIControlAdapterShouldAbortUpgradePlanForTick("black_market_not_found"), "black_market_not_found should stop upgrade attempts for the current tick");
-	expect(AIControlAdapterShouldAbortUpgradePlanForTick("upgrade_already_in_production"), "upgrade_already_in_production should stop upgrade attempts for the current tick");
+	expect(!AIControlAdapterShouldAbortUpgradePlanForTick("upgrade_already_in_production"), "upgrade_already_in_production should skip the current upgrade and allow later upgrades in the plan");
 	expect(!AIControlAdapterShouldAbortUpgradePlanForTick("upgrade_already_complete"), "upgrade_already_complete should still allow later upgrades in the plan");
 	expect(AIControlAdapterShouldAbortUpgradePlanForReason("upgrade_already_complete"), "upgrade_already_complete should abort the current upgrade scan to avoid repeated redundant requests");
 	expect(AIControlAdapterGetTechRetryDelayMs(true, "ok") == 6000u, "successful tech actions should keep the short cadence");
@@ -1015,6 +1079,36 @@ int main()
 			5    // zoneGapThreshold
 		};
 		expect(AIControlAdapterIsZoneExpansionUrgent(inputs), "zone expansion should be urgent when gap equals threshold");
+	}
+
+	{
+		// Phase 5.7 scenario: live run stalled at 7 zones vs 30 desired
+		const AIControlAdapterZoneExpansionPolicyInputs inputs = {
+			7,   // currentZoneCount (matches live run)
+			30,  // desiredZoneCount (sprawl_balanced target)
+			5    // zoneGapThreshold
+		};
+		expect(AIControlAdapterIsZoneExpansionUrgent(inputs), "zone expansion should be urgent when 23 zones below target (Phase 5.7 scenario)");
+	}
+
+	{
+		// Zone gap just below threshold: 4 zones gap
+		const AIControlAdapterZoneExpansionPolicyInputs inputs = {
+			11,  // currentZoneCount
+			15,  // desiredZoneCount
+			5    // zoneGapThreshold
+		};
+		expect(!AIControlAdapterIsZoneExpansionUrgent(inputs), "zone expansion should not be urgent when gap is just below threshold");
+	}
+
+	{
+		// High zone count but still below target: 25 zones vs 30 desired
+		const AIControlAdapterZoneExpansionPolicyInputs inputs = {
+			25,  // currentZoneCount
+			30,  // desiredZoneCount
+			5    // zoneGapThreshold
+		};
+		expect(AIControlAdapterIsZoneExpansionUrgent(inputs), "zone expansion should be urgent even at high absolute counts when gap >= threshold");
 	}
 
 	std::cout << "AIControlAdapterPolicyTests passed\n";

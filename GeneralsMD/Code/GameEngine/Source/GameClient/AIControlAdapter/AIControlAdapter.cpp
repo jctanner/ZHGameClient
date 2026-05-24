@@ -2,6 +2,12 @@
 
 #include "GameClient/AIControlAdapter/AIControlAdapter.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterPolicy.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterTechManager.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterProductionManager.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterZoneManager.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterDefenseManager.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterEconomyManager.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterScheduler.h"
 
 #include "Common/NameKeyGenerator.h"
 #include "Common/ActionManager.h"
@@ -35,6 +41,7 @@
 #include "GameLogic/PartitionManager.h"
 #include "GameLogic/TerrainLogic.h"
 #include "GameLogic/Module/AIUpdate.h"
+#include "GameLogic/Module/BodyModule.h"
 #include "GameLogic/Module/ProductionUpdate.h"
 #include "GameLogic/Module/SpecialPowerModule.h"
 #include "GameLogic/Module/SupplyTruckAIUpdate.h"
@@ -46,6 +53,10 @@
 #include "Common/UnicodeString.h"
 
 #include <windows.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#pragma comment(lib, "Ws2_32.lib")
 
 extern void skirmishUpdateSlotList();
 
@@ -66,11 +77,28 @@ namespace
 {
 	static const char* const kAIControlAdapterBuildMarker = "codex-2026-05-10-capture-scud-upgrade-v2";
 
+	// GLA science purchase plan (priority order)
+	// See projects/docs/gla-science-analysis.md for full prerequisite details
+	//
+	// Strategy: Purchase ScudLauncher at Rank 1, then save all points for Cash Bounty chain at Rank 3+
+	// Note: Rank 2 point will be intentionally unspent (saving for Cash Bounty)
 	static const char* const kAutonomySciencePlan[] = {
-		"SCIENCE_ScudLauncher",
-		"SCIENCE_CashBounty1",
-		"SCIENCE_CashBounty2",
-		"SCIENCE_CashBounty3"
+		// Rank 1 sciences (prerequisite: SCIENCE_GLA + SCIENCE_Rank1)
+		"SCIENCE_ScudLauncher",      // Unlocks Scud Launcher vehicle
+
+		// Rank 3 sciences (prerequisite: SCIENCE_GLA + SCIENCE_Rank3)
+		"SCIENCE_CashBounty1",       // Cash Bounty level 1
+		"SCIENCE_CashBounty2",       // Requires CashBounty1 + Rank3
+		"SCIENCE_CashBounty3"        // Requires CashBounty2 + Rank3
+
+		// Skipped sciences (not currently prioritized):
+		// - SCIENCE_MarauderTank (Rank 1) - Unlocks Marauder Tank
+		// - SCIENCE_TechnicalTraining (Rank 1) - Technical Training upgrade
+		// - SCIENCE_Hijacker (Rank 3) - Unlocks Hijacker infantry
+		// - SCIENCE_RebelAmbush1/2/3 (Rank 3+) - Rebel Ambush chain
+		// - SCIENCE_EmergencyRepair1/2/3 (Rank 3+) - Emergency Repair chain
+		// - SCIENCE_AnthraxBomb (Rank 5) - Anthrax Bomb special power
+		// - SCIENCE_SneakAttack (Rank 5) - Sneak Attack special power
 	};
 
 	struct AutonomyUpgradePlanEntry
@@ -318,6 +346,22 @@ namespace
 		std::set<Int> servicedStashIds;
 	};
 
+	struct AutonomyTrackedObjectHealth
+	{
+		Real health;
+		DWORD tick;
+	};
+
+	struct AutonomyZoneThreatState
+	{
+		DWORD lastSeenTick;
+		UnsignedInt damagedObjectId;
+		Real positionX;
+		Real positionY;
+		Real damageDelta;
+		std::string level;
+	};
+
 	struct AutonomyState
 	{
 		std::string mode;
@@ -360,8 +404,21 @@ namespace
 		std::string lastDecisionCommand;
 		std::string lastDecisionReason;
 		bool telemetryZonesDirty;
+		UnsignedInt zonesSnapshotVersion;
+		DWORD zonesSnapshotTick;
+		bool hasCashRateSample;
+		UnsignedInt lastCashRateMoney;
+		DWORD lastCashRateTick;
+		Real smoothedNetCashPerMinute;
 		nlohmann::json telemetryZones;
 		nlohmann::json telemetryEvents;
+		std::unordered_map<UnsignedInt, AutonomyTrackedObjectHealth> trackedStructureHealth;
+		std::unordered_map<UnsignedInt, AutonomyZoneThreatState> zoneThreats;
+
+		// Phase 7: Zone Defense Response state
+		UnsignedInt lastDefendedZoneAnchor = 0;
+		DWORD lastDefenseResponseTick = 0;
+		int lastDefendedThreatSeverity = 0;
 	};
 
 	#include "AIControlAdapterLog.inl"
@@ -375,6 +432,8 @@ namespace
 	#include "AIControlAdapterAutomation.inl"
 
 	#include "AIControlAdapterAutonomy.inl"
+
+	#include "AIControlAdapterSchedulerIntegration.inl"
 
 	class AIControlAdapterState
 	{
@@ -410,7 +469,8 @@ namespace
 		void update()
 		{
 			m_transport.ensurePipeCreated();
-			if (m_transport.pipe() == INVALID_HANDLE_VALUE)
+			m_transport.ensureTcpCreated();
+			if (!m_transport.hasListener())
 			{
 				return;
 			}
@@ -499,8 +559,16 @@ namespace
 			m_autonomy.state.lastDecisionCommand.clear();
 			m_autonomy.state.lastDecisionReason.clear();
 			m_autonomy.state.telemetryZonesDirty = true;
+			m_autonomy.state.zonesSnapshotVersion = 0u;
+			m_autonomy.state.zonesSnapshotTick = 0u;
+			m_autonomy.state.hasCashRateSample = false;
+			m_autonomy.state.lastCashRateMoney = 0u;
+			m_autonomy.state.lastCashRateTick = 0u;
+			m_autonomy.state.smoothedNetCashPerMinute = 0.0f;
 			m_autonomy.state.telemetryZones = nlohmann::json::array();
 			m_autonomy.state.telemetryEvents = nlohmann::json::array();
+			m_autonomy.state.trackedStructureHealth.clear();
+			m_autonomy.state.zoneThreats.clear();
 		}
 
 		bool isAutonomyModeActive() const
@@ -968,6 +1036,27 @@ namespace
 			{
 				money = wallet->countMoney();
 			}
+			if (!m_autonomy.state.hasCashRateSample)
+			{
+				m_autonomy.state.hasCashRateSample = true;
+				m_autonomy.state.lastCashRateMoney = money;
+				m_autonomy.state.lastCashRateTick = now;
+				m_autonomy.state.smoothedNetCashPerMinute = 0.0f;
+			}
+			else
+			{
+				const DWORD elapsedMs = now - m_autonomy.state.lastCashRateTick;
+				if (elapsedMs >= 2000u)
+				{
+					const int moneyDelta = static_cast<int>(money) - static_cast<int>(m_autonomy.state.lastCashRateMoney);
+					const Real sampleNetCashPerMinute =
+						(static_cast<Real>(moneyDelta) * 60000.0f) / static_cast<Real>(elapsedMs);
+					m_autonomy.state.smoothedNetCashPerMinute =
+						(m_autonomy.state.smoothedNetCashPerMinute * 0.7f) + (sampleNetCashPerMinute * 0.3f);
+					m_autonomy.state.lastCashRateMoney = money;
+					m_autonomy.state.lastCashRateTick = now;
+				}
+			}
 
 			struct AutonomyMacroCounts
 			{
@@ -1431,6 +1520,213 @@ namespace
 				Int stingers;
 				Int stingersInProgress;
 			};
+
+			// Phase 5.5: Strategic placement helpers for high-value structures
+			enum class StrategicStructureRole
+			{
+				Income,
+				Tech,
+				Superweapon
+			};
+
+			struct StrategicPlacementChoice
+			{
+				bool hasPlacement = false;
+				unsigned int zoneAnchorId = 0;
+				bool isMainBase = false;
+				float zoneCenterX = 0.0f;
+				float zoneCenterY = 0.0f;
+				float zoneRadius = 0.0f;
+				std::string source;
+				std::string reason;
+				int score = 0;                      // Phase 5.7: Zone score for this placement
+				unsigned int zoneMarketCount = 0;   // Phase 5.7: Black Markets in selected zone
+				unsigned int totalMarkets = 0;      // Phase 5.7: Total completed Black Markets
+			};
+
+			// Phase 5.7: Distributed safe economy placement with zone scoring
+			auto chooseStrategicPlacement = [&](
+				const std::vector<AutonomyZone>& zones,
+				const std::vector<AutonomyZoneCounts>& zoneCounts,
+				Int activeZoneIndex,
+				StrategicStructureRole role,
+				Real zoneRadius,
+				unsigned int completedBlackMarkets) -> StrategicPlacementChoice
+			{
+				StrategicPlacementChoice choice;
+
+				if (zones.empty())
+				{
+					choice.hasPlacement = false;
+					choice.source = "unavailable";
+					choice.reason = "no_zones";
+					return choice;
+				}
+
+				// Helper to apply rear-side bias for income/tech structures
+				auto applyRearBias = [&](const AutonomyZone& zone, float& centerX, float& centerY, Real radius) -> void
+				{
+					// Income and tech structures should prefer rear placement
+					if (role == StrategicStructureRole::Income || role == StrategicStructureRole::Tech)
+					{
+						Real zoneFrontDx = sprawlAxisDx;
+						Real zoneFrontDy = sprawlAxisDy;
+						const char* ignoredSource = "sprawl_axis";
+						resolveZoneFrontDirection(zone, zoneFrontDx, zoneFrontDy, ignoredSource);
+
+						const bool hasAxis = (std::fabs(zoneFrontDx) > 0.0001f) || (std::fabs(zoneFrontDy) > 0.0001f);
+						if (hasAxis)
+						{
+							// Push toward rear (negative offset from front direction)
+							const Real rearOffset = zone.isMainBase ? -0.25f : -0.35f;
+							centerX += zoneFrontDx * radius * rearOffset;
+							centerY += zoneFrontDy * radius * rearOffset;
+						}
+					}
+				};
+
+				// Phase 5.7: Count Black Markets per zone
+				std::vector<unsigned int> marketsPerZone(zones.size(), 0u);
+				for (std::size_t i = 0; i < zones.size() && i < zoneCounts.size(); ++i)
+				{
+					marketsPerZone[i] = zoneCounts[i].blackMarkets;
+				}
+
+				// Phase 5.7: Score all zones and choose the best one
+				int bestScore = -999999;
+				int bestZoneIndex = -1;
+
+				const unsigned int mainBaseMarketThreshold = 6u; // Prefer main base for first 6 markets
+
+				for (std::size_t i = 0; i < zones.size(); ++i)
+				{
+					const AutonomyZone& zone = zones[i];
+					const AutonomyZoneCounts& counts = (i < zoneCounts.size()) ? zoneCounts[i] : AutonomyZoneCounts{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+					const unsigned int zoneMarkets = marketsPerZone[i];
+
+					int score = 0;
+
+					// Main base bonus for first few markets
+					if (zone.isMainBase && completedBlackMarkets < mainBaseMarketThreshold)
+					{
+						score += 100; // Strong preference for early markets
+					}
+					else if (zone.isMainBase)
+					{
+						score += 30; // Moderate preference after threshold
+					}
+
+					// Heavy penalty for active zone (avoid forward placement)
+					if (activeZoneIndex >= 0 && static_cast<Int>(i) == activeZoneIndex)
+					{
+						score -= 200;
+					}
+
+					// Penalty per existing Black Market in this zone (distribute markets)
+					score -= static_cast<int>(zoneMarkets) * 40;
+
+					// Bonus for developed zone (has infrastructure)
+					const bool isDeveloped = (counts.barracks > 0 || counts.armsDealers > 0 || counts.supplyStashes > 0);
+					if (isDeveloped)
+					{
+						score += 50;
+					}
+
+					// Bonus for defensive structures (tunnels, stingers)
+					if (counts.tunnels > 0 || counts.stingers > 0)
+					{
+						score += 20;
+					}
+
+					// Update best zone
+					if (score > bestScore)
+					{
+						bestScore = score;
+						bestZoneIndex = static_cast<int>(i);
+					}
+				}
+
+				// If we found a zone with non-terrible score, use it
+				if (bestZoneIndex >= 0 && bestScore > -200)
+				{
+					const AutonomyZone& zone = zones[static_cast<std::size_t>(bestZoneIndex)];
+					const unsigned int zoneMarkets = marketsPerZone[static_cast<std::size_t>(bestZoneIndex)];
+
+					choice.hasPlacement = true;
+					choice.zoneAnchorId = zone.anchorId;
+					choice.isMainBase = zone.isMainBase;
+					choice.zoneCenterX = zone.center.x;
+					choice.zoneCenterY = zone.center.y;
+					choice.zoneRadius = zoneRadius;
+					choice.score = bestScore;
+					choice.zoneMarketCount = zoneMarkets;
+					choice.totalMarkets = completedBlackMarkets;
+
+					// Apply rear-side bias
+					applyRearBias(zone, choice.zoneCenterX, choice.zoneCenterY, zoneRadius);
+
+					// Determine source based on zone type
+					if (zone.isMainBase)
+					{
+						choice.source = "main_base_scored";
+						if (completedBlackMarkets < mainBaseMarketThreshold)
+						{
+							choice.reason = "main_base_early_market";
+						}
+						else
+						{
+							choice.reason = "main_base_best_score";
+						}
+					}
+					else
+					{
+						choice.source = "rear_zone_scored";
+						choice.reason = "distributed_placement";
+					}
+
+					return choice;
+				}
+
+				// Fallback: all zones have terrible scores, use first available with least markets
+				int fallbackZone = -1;
+				unsigned int minMarkets = 999999u;
+				for (std::size_t i = 0; i < zones.size(); ++i)
+				{
+					if (marketsPerZone[i] < minMarkets)
+					{
+						minMarkets = marketsPerZone[i];
+						fallbackZone = static_cast<int>(i);
+					}
+				}
+
+				if (fallbackZone >= 0)
+				{
+					const AutonomyZone& zone = zones[static_cast<std::size_t>(fallbackZone)];
+					choice.hasPlacement = true;
+					choice.zoneAnchorId = zone.anchorId;
+					choice.isMainBase = zone.isMainBase;
+					choice.zoneCenterX = zone.center.x;
+					choice.zoneCenterY = zone.center.y;
+					choice.zoneRadius = zoneRadius;
+					choice.score = bestScore;
+					choice.zoneMarketCount = marketsPerZone[static_cast<std::size_t>(fallbackZone)];
+					choice.totalMarkets = completedBlackMarkets;
+
+					// Apply rear-side bias (even for fallback)
+					applyRearBias(zone, choice.zoneCenterX, choice.zoneCenterY, zoneRadius);
+
+					choice.source = "fallback_least_saturated";
+					choice.reason = "all_zones_poor_score_using_fallback";
+					return choice;
+				}
+
+				// No placement available
+				choice.hasPlacement = false;
+				choice.source = "unavailable";
+				choice.reason = "no_zones_available";
+				return choice;
+			};
+
 			std::vector<AutonomyZoneCounts> zoneCounts(zones.size(), AutonomyZoneCounts{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
 			if (!zones.empty())
 			{
@@ -1496,6 +1792,157 @@ namespace
 				? zoneCounts[static_cast<std::size_t>(activeZoneIndex)]
 				: AutonomyZoneCounts{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
 
+			if (!zones.empty() && !m_autonomy.state.zoneThreats.empty())
+			{
+				const DWORD zonePriorityNow = ::GetTickCount();
+				Int threatenedZoneIndex = -1;
+				DWORD newestThreatTick = 0u;
+				for (std::size_t zoneIdx = 0; zoneIdx < zones.size(); ++zoneIdx)
+				{
+					const UnsignedInt zoneAnchorId = static_cast<UnsignedInt>(zones[zoneIdx].anchorId);
+					const auto threatIt = m_autonomy.state.zoneThreats.find(zoneAnchorId);
+					if (threatIt == m_autonomy.state.zoneThreats.end())
+					{
+						continue;
+					}
+					if (zonePriorityNow - threatIt->second.lastSeenTick > 45000u)
+					{
+						continue;
+					}
+					if (threatenedZoneIndex < 0 || static_cast<LONG>(threatIt->second.lastSeenTick - newestThreatTick) > 0)
+					{
+						threatenedZoneIndex = static_cast<Int>(zoneIdx);
+						newestThreatTick = threatIt->second.lastSeenTick;
+					}
+				}
+				if (threatenedZoneIndex >= 0)
+				{
+					activeZoneIndex = threatenedZoneIndex;
+					activeZone = zones[static_cast<std::size_t>(activeZoneIndex)];
+					hasActiveZone = true;
+					m_autonomy.state.nextZoneIndex = static_cast<std::size_t>(activeZoneIndex);
+					m_autonomy.state.hasLastZone = true;
+					m_autonomy.state.lastZoneAnchorId = static_cast<UnsignedInt>(activeZone.anchorId);
+					m_autonomy.state.lastZoneIsMainBase = activeZone.isMainBase;
+					m_autonomy.state.lastZoneCenterX = activeZone.center.x;
+					m_autonomy.state.lastZoneCenterY = activeZone.center.y;
+					activeZoneCounts = zoneCounts[static_cast<std::size_t>(activeZoneIndex)];
+				}
+			}
+
+			bool zoneThreatsChanged = false;
+			std::set<UnsignedInt> visibleStructureIds;
+			const DWORD threatNowTick = ::GetTickCount();
+			const Real threatAssociationRadius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius) * 1.25f;
+			const Real threatAssociationRadiusSq = threatAssociationRadius * threatAssociationRadius;
+			if (!zones.empty())
+			{
+				for (std::size_t i = 0; i < ownedObjects.size(); ++i)
+				{
+					const AutonomyOwnedObjectSnapshot& owned = ownedObjects[i];
+					if (!owned.isStructure || owned.object == nullptr || owned.object->getPosition() == nullptr)
+					{
+						continue;
+					}
+
+					BodyModuleInterface* body = owned.object->getBodyModule();
+					if (body == nullptr)
+					{
+						continue;
+					}
+
+					const UnsignedInt objectId = static_cast<UnsignedInt>(owned.object->getID());
+					const Real health = body->getHealth();
+					const Real maxHealth = body->getMaxHealth();
+					if (maxHealth <= 0.0f)
+					{
+						continue;
+					}
+					visibleStructureIds.insert(objectId);
+
+					auto trackedIt = m_autonomy.state.trackedStructureHealth.find(objectId);
+					if (trackedIt != m_autonomy.state.trackedStructureHealth.end())
+					{
+						const Real damageDelta = trackedIt->second.health - health;
+						const Real meaningfulDamage = std::max<Real>(25.0f, maxHealth * 0.02f);
+						if (damageDelta >= meaningfulDamage)
+						{
+							Int nearestZoneIndex = -1;
+							Real nearestDistSq = threatAssociationRadiusSq;
+							for (std::size_t zoneIdx = 0; zoneIdx < zones.size(); ++zoneIdx)
+							{
+								const Real dx = owned.object->getPosition()->x - zones[zoneIdx].center.x;
+								const Real dy = owned.object->getPosition()->y - zones[zoneIdx].center.y;
+								const Real distSq = (dx * dx) + (dy * dy);
+								if (distSq <= nearestDistSq)
+								{
+									nearestDistSq = distSq;
+									nearestZoneIndex = static_cast<Int>(zoneIdx);
+								}
+							}
+
+							if (nearestZoneIndex >= 0)
+							{
+								const Real healthFraction = health / maxHealth;
+								const Real damageFraction = damageDelta / maxHealth;
+								const char* level = "low";
+								if (healthFraction <= 0.35f || damageFraction >= 0.15f)
+								{
+									level = "high";
+								}
+								else if (damageFraction >= 0.05f)
+								{
+									level = "medium";
+								}
+
+								const AutonomyZone& threatZone = zones[static_cast<std::size_t>(nearestZoneIndex)];
+								AutonomyZoneThreatState& threat = m_autonomy.state.zoneThreats[static_cast<UnsignedInt>(threatZone.anchorId)];
+								threat.lastSeenTick = threatNowTick;
+								threat.damagedObjectId = objectId;
+								threat.positionX = owned.object->getPosition()->x;
+								threat.positionY = owned.object->getPosition()->y;
+								threat.damageDelta = damageDelta;
+								threat.level = level;
+								zoneThreatsChanged = true;
+							}
+						}
+					}
+
+					m_autonomy.state.trackedStructureHealth[objectId] = AutonomyTrackedObjectHealth{ health, threatNowTick };
+				}
+			}
+
+			for (auto it = m_autonomy.state.trackedStructureHealth.begin(); it != m_autonomy.state.trackedStructureHealth.end(); )
+			{
+				if (visibleStructureIds.find(it->first) == visibleStructureIds.end())
+				{
+					it = m_autonomy.state.trackedStructureHealth.erase(it);
+				}
+				else
+				{
+					++it;
+				}
+			}
+
+			for (auto it = m_autonomy.state.zoneThreats.begin(); it != m_autonomy.state.zoneThreats.end(); )
+			{
+				if (threatNowTick - it->second.lastSeenTick > 45000u)
+				{
+					it = m_autonomy.state.zoneThreats.erase(it);
+					zoneThreatsChanged = true;
+				}
+				else
+				{
+					++it;
+				}
+			}
+
+			if (zoneThreatsChanged)
+			{
+				++m_autonomy.state.zonesSnapshotVersion;
+				m_autonomy.state.zonesSnapshotTick = threatNowTick;
+			}
+
 			// Detect zone count changes (new zones created or destroyed)
 			if (m_autonomy.state.telemetryZones.is_array() && m_autonomy.state.telemetryZones.size() != zones.size())
 			{
@@ -1555,6 +2002,8 @@ namespace
 						{"needs_followup", zoneNeedsFollowup}
 					}));
 				}
+				++m_autonomy.state.zonesSnapshotVersion;
+				m_autonomy.state.zonesSnapshotTick = ::GetTickCount();
 				m_autonomy.state.telemetryZonesDirty = false;
 			}
 			adapterLog(
@@ -1690,6 +2139,10 @@ namespace
 				else if (cmdString == "Game.GuardAllIdleGroundCombat")
 				{
 					ok = executeGameGuardAllIdleGroundCombat(message, outReason);
+				}
+				else if (cmdString == "Game.AttackMove.DefendZoneSmart")
+				{
+					ok = executeGameAttackMoveDefendZoneSmart(message, outReason);
 				}
 				else
 				{
@@ -1975,6 +2428,46 @@ namespace
 					desiredZoneCount,
 					5  // zoneGapThreshold
 				});
+				const Int zoneGap = desiredZoneCount - stashZoneCount;
+				const bool reserveProtected = money >= reserveCash;
+				const unsigned int cashAboveReserve = reserveProtected ? (money - reserveCash) : 0;
+				const bool cashFloatHigh = cashAboveReserve >= 10000u;  // Significant cash float above reserve
+				const bool allowUrgentExpansionDespiteReserve = zoneExpansionIsUrgent && cashFloatHigh;
+
+				// Log zone expansion policy before macro decisions
+				const char* expansionMode = zoneExpansionIsUrgent ? "urgent" : (stashZoneCount < desiredZoneCount ? "normal" : "hold");
+				std::string expansionReason;
+				if (stashZoneCount >= desiredZoneCount)
+				{
+					expansionReason = "target_reached";
+				}
+				else if (zoneExpansionIsUrgent && cashFloatHigh)
+				{
+					expansionReason = "large_gap_high_cash";
+				}
+				else if (zoneExpansionIsUrgent && !cashFloatHigh)
+				{
+					expansionReason = "large_gap_low_cash";
+				}
+				else if (shouldPreserveReserve)
+				{
+					expansionReason = "below_target_reserve_hold";
+				}
+				else
+				{
+					expansionReason = "below_target_normal";
+				}
+				adapterLog(
+					"zone_expansion_policy mode=%s current=%d developed=%d desired=%d gap=%d reserve_protected=%d cash_float=%lu reason=%s",
+					expansionMode,
+					stashZoneCount,
+					developedZoneCount,
+					desiredZoneCount,
+					zoneGap,
+					reserveProtected ? 1 : 0,
+					static_cast<unsigned long>(cashAboveReserve),
+					expansionReason.c_str());
+
 				const char* requiredOpeningBuild = AIControlAdapterGetRequiredOpeningBuild({
 					counts.supplyStashes,
 					counts.barracks,
@@ -1985,8 +2478,15 @@ namespace
 					isBalancedSprawl,
 					money,
 					reserveCash,
+					counts.blackMarkets,
 					counts.blackMarketsInProgress
 				});
+				const bool shouldBuildFirstMarket =
+					isSprawlStyle
+					&& hasCompletedPalace
+					&& totalBlackMarkets < 1
+					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", counts.blackMarketsInProgress)
+					&& canAttemptBlackMarketNow;
 				const char* ecoRecoveryBuild = AIControlAdapterGetEcoRecoveryBuild({
 					isBalancedSprawl,
 					totalSupplyStashes,
@@ -2098,6 +2598,12 @@ namespace
 						issued = tryMacroBuildWithFallback("Game.BuildPalaceSmart", false, reason);
 						recordBuildAttempt("Game.BuildPalaceSmart", issued, reason);
 					}
+				}
+				else if (shouldBuildFirstMarket)
+				{
+					chosenCommand = "Game.BuildBlackMarketSmart";
+					issued = tryMacroBuildWithFallback("Game.BuildBlackMarketSmart", false, reason);
+					recordBuildAttempt("Game.BuildBlackMarketSmart", issued, reason);
 				}
 				else if (shouldForceEcoRecovery && ecoRecoveryBuild != nullptr)
 				{
@@ -2276,7 +2782,7 @@ namespace
 					issued = tryMacroBuildWithFallback("Game.BuildStingerSite", true, reason);
 					recordBuildAttempt("Game.BuildStingerSite", issued, reason);
 				}
-				else if (!shouldPreserveReserve
+				else if ((!shouldPreserveReserve || allowUrgentExpansionDespiteReserve)
 					&& isSprawlStyle
 					&& !shouldThrottleExtraStashGrowth
 					&& totalSupplyStashes < sprawlSupplyCap
@@ -2290,9 +2796,26 @@ namespace
 				}
 				if (!issued && reason.empty())
 				{
-					if (shouldPreserveReserve)
+					if (shouldPreserveReserve && !allowUrgentExpansionDespiteReserve)
 					{
 						reason = "macro_hold_reserve";
+					}
+					else if (allowUrgentExpansionDespiteReserve && stashZoneCount < desiredZoneCount)
+					{
+						// Expansion was urgent and cash was high, but expansion was not issued
+						// Report a concrete blocker instead of macro_hold_reserve
+						if (counts.supplyStashesInProgress > 0)
+						{
+							reason = "macro_wait_expansion_in_progress";
+						}
+						else if (shouldThrottleExtraStashGrowth)
+						{
+							reason = "macro_wait_expansion_throttle";
+						}
+						else
+						{
+							reason = "macro_wait_expansion_placement";
+						}
 					}
 					else if (shouldForceEcoRecovery)
 					{
@@ -2383,344 +2906,563 @@ namespace
 				m_autonomy.state.nextMacroTick = now + (issued ? 3000u : 2000u);
 			}
 
-			if (productionDue)
+			// Economy policy assessment: determines income health, reserve pressure, and spending mode
+			const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
+			const bool isBalancedSprawl = (profile == "sprawl_balanced");
+			const UnsignedInt reserveCash = isBalancedSprawl ? 10000u : 0u;
+
+			// Count Black Markets
+			unsigned int completedBlackMarkets = 0;
+			unsigned int inProgressBlackMarkets = 0;
+			for (std::size_t i = 0; i < ownedObjects.size(); ++i)
 			{
-				std::string reason;
-				bool issued = false;
-				const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
-				const bool isBalancedSprawl = (profile == "sprawl_balanced");
-				const Int armyCap = isBalancedSprawl ? 100 : 9999;
-				const Int armyCount = std::max<Int>(0, counts.mobileUnits - counts.workers);
-				const UnsignedInt reserveCash = isBalancedSprawl ? 10000u : 0u;
-				const bool openingInfrastructureReady = totalSupplyStashes >= 1 && totalBarracks >= 1 && totalArmsDealers >= 1;
-				const bool openingEconomyReady = totalSupplyStashes >= 2 || totalBlackMarkets >= 1;
-				const bool wasRecoveringFromReserve =
-					(m_autonomy.state.lastDecisionCategory == "production" && m_autonomy.state.lastDecisionReason == "reserve_cash_recovery");
-				const bool shouldPauseCombatProduction = AIControlAdapterShouldPauseCombatProduction({
-					isBalancedSprawl,
-					openingInfrastructureReady,
-					openingEconomyReady,
-					wasRecoveringFromReserve,
-					money,
-					reserveCash,
-					counts.blackMarketsInProgress,
-					counts.supplyStashesInProgress
-				});
-				const bool wasArmyCapReached =
-					(m_autonomy.state.lastDecisionCategory == "production" && m_autonomy.state.lastDecisionReason == "army_cap_reached");
-				const bool shouldHoldArmyCap = AIControlAdapterShouldHoldArmyCap({
-					shouldPauseCombatProduction,
-					isBalancedSprawl,
-					wasArmyCapReached,
-					armyCount,
-					armyCap
-				});
-				const Real zoneRadiusSq = std::max<Real>(160.0f, m_autonomy.state.zoneRadius) * std::max<Real>(160.0f, m_autonomy.state.zoneRadius);
-				std::string chosenCommand = "none";
-
-				auto queueAtPreferredZoneProducer = [&](bool wantBarracks, const std::string& unitTemplateName, const char* cmdName, std::string& outReason) -> bool
+				const AutonomyOwnedObjectSnapshot& owned = ownedObjects[i];
+				if (!owned.isStructure || owned.object == nullptr)
 				{
-					if (!hasActiveZone || unitTemplateName.empty())
+					continue;
+				}
+				const ThingTemplate* templ = owned.object->getTemplate();
+				if (templ != nullptr)
+				{
+					const std::string templName = templ->getName().str();
+					if (templName == "GLABlackMarket")
 					{
-						outReason = "no_zone_producer";
-						return false;
-					}
-
-					std::vector<Object*> candidates;
-					for (std::size_t i = 0; i < ownedObjects.size(); ++i)
-					{
-						const AutonomyOwnedObjectSnapshot& owned = ownedObjects[i];
-						if (!owned.isStructure || owned.object == nullptr || owned.object->getPosition() == nullptr)
-						{
-							continue;
-						}
 						if (owned.underConstruction)
 						{
-							continue;
-						}
-						const Real dx = owned.object->getPosition()->x - activeZone.center.x;
-						const Real dy = owned.object->getPosition()->y - activeZone.center.y;
-						if ((dx * dx) + (dy * dy) > zoneRadiusSq)
-						{
-							continue;
-						}
-						if (wantBarracks)
-						{
-							if (!owned.isBarracks)
-							{
-								continue;
-							}
+							inProgressBlackMarkets++;
 						}
 						else
 						{
-							if (!owned.isWarFactoryLike)
-							{
-								continue;
-							}
+							completedBlackMarkets++;
 						}
-						candidates.push_back(owned.object);
-					}
-
-					if (candidates.empty())
-					{
-						outReason = "no_zone_producer";
-						return false;
-					}
-
-					std::sort(candidates.begin(), candidates.end(), [&](Object* lhs, Object* rhs) -> bool
-					{
-						const Real ldx = lhs->getPosition()->x - activeZone.center.x;
-						const Real ldy = lhs->getPosition()->y - activeZone.center.y;
-						const Real rdx = rhs->getPosition()->x - activeZone.center.x;
-						const Real rdy = rhs->getPosition()->y - activeZone.center.y;
-						return (ldx * ldx) + (ldy * ldy) < (rdx * rdx) + (rdy * rdy);
-					});
-
-					nlohmann::json queuedMessage = {
-						{"type", "SessionCommand"},
-						{"request_id", std::string(cmdName)},
-						{"cmd", "Game.QueueUnit"},
-						{"args", nlohmann::json::object({
-							{"producer_kind", "any"},
-							{"unit_template", unitTemplateName}
-						})}
-					};
-					if (m_autonomy.state.hasExplicitPlayerIndex)
-					{
-						queuedMessage["args"]["player_index"] = m_autonomy.state.playerIndex;
-					}
-
-					for (Object* producer : candidates)
-					{
-						queuedMessage["args"]["producer_object_id"] = static_cast<Int>(producer->getID());
-						std::string queueReason;
-						if (executeGameQueueUnit(queuedMessage, queueReason))
-						{
-							return true;
-						}
-						outReason = queueReason;
-						if (queueReason == "no_money")
-						{
-							break;
-						}
-					}
-					return false;
-				};
-
-				auto tryChosenProduction = [&](const char* preferredCommand) -> bool
-				{
-					if (preferredCommand == nullptr || *preferredCommand == '\0')
-					{
-						return false;
-					}
-
-					if (std::strcmp(preferredCommand, "Game.QueueScudLauncher") == 0)
-					{
-						chosenCommand = "Game.QueueScudLauncher";
-						issued = tryCommand("auto_prod", "Game.QueueScudLauncher", nlohmann::json::object({ {"count", 1} }), reason);
-						return issued;
-					}
-
-					if (std::strcmp(preferredCommand, "Game.QueueQuadsAllWarFactories") == 0)
-					{
-						chosenCommand = "Game.QueueQuadsAllWarFactories";
-						if (isBalancedSprawl)
-						{
-							Object* referenceFactory = nullptr;
-							for (std::size_t i = 0; i < ownedObjects.size(); ++i)
-							{
-								const AutonomyOwnedObjectSnapshot& owned = ownedObjects[i];
-								if (!owned.isWarFactoryLike || owned.underConstruction)
-								{
-									continue;
-								}
-								referenceFactory = owned.object;
-								break;
-							}
-							issued = queueAtPreferredZoneProducer(false, inferQuadTemplateForProducer(referenceFactory), "auto_prod_zone_quad", reason);
-						}
-						if (!issued)
-						{
-							issued = tryCommand("auto_prod", "Game.QueueQuadsAllWarFactories", nlohmann::json::object({ {"count", 1} }), reason);
-						}
-						return issued;
-					}
-
-					if (std::strcmp(preferredCommand, "Game.QueueScorpionsAllWarFactories") == 0)
-					{
-						chosenCommand = "Game.QueueScorpionsAllWarFactories";
-						if (isBalancedSprawl)
-						{
-							Object* referenceFactory = nullptr;
-							for (std::size_t i = 0; i < ownedObjects.size(); ++i)
-							{
-								const AutonomyOwnedObjectSnapshot& owned = ownedObjects[i];
-								if (!owned.isWarFactoryLike || owned.underConstruction)
-								{
-									continue;
-								}
-								referenceFactory = owned.object;
-								break;
-							}
-							issued = queueAtPreferredZoneProducer(false, inferScorpionTemplateForProducer(referenceFactory), "auto_prod_zone_scorpion", reason);
-						}
-						if (!issued)
-						{
-							issued = tryCommand("auto_prod", "Game.QueueScorpionsAllWarFactories", nlohmann::json::object({ {"count", 1} }), reason);
-						}
-						return issued;
-					}
-
-					if (std::strcmp(preferredCommand, "Game.QueueRpgTroopersAllBarracks") == 0)
-					{
-						chosenCommand = "Game.QueueRpgTroopersAllBarracks";
-						if (isBalancedSprawl)
-						{
-							Object* referenceBarracks = nullptr;
-							for (std::size_t i = 0; i < ownedObjects.size(); ++i)
-							{
-								const AutonomyOwnedObjectSnapshot& owned = ownedObjects[i];
-								if (!owned.isBarracks || owned.underConstruction)
-								{
-									continue;
-								}
-								referenceBarracks = owned.object;
-								break;
-							}
-							issued = queueAtPreferredZoneProducer(true, inferRpgTemplateForProducer(referenceBarracks), "auto_prod_zone_rpg", reason);
-						}
-						if (!issued)
-						{
-							issued = tryCommand("auto_prod", "Game.QueueRpgTroopersAllBarracks", nlohmann::json::object({ {"count", 1} }), reason);
-						}
-						return issued;
-					}
-
-					if (std::strcmp(preferredCommand, "Game.QueueSoldiersAllBarracks") == 0)
-					{
-						chosenCommand = "Game.QueueSoldiersAllBarracks";
-						if (isBalancedSprawl)
-						{
-							Object* referenceBarracks = nullptr;
-							for (std::size_t i = 0; i < ownedObjects.size(); ++i)
-							{
-								const AutonomyOwnedObjectSnapshot& owned = ownedObjects[i];
-								if (!owned.isBarracks || owned.underConstruction)
-								{
-									continue;
-								}
-								referenceBarracks = owned.object;
-								break;
-							}
-							issued = queueAtPreferredZoneProducer(true, inferSoldierTemplateForPlayer(player, referenceBarracks), "auto_prod_zone_soldier", reason);
-						}
-						if (!issued)
-						{
-							issued = tryCommand("auto_prod", "Game.QueueSoldiersAllBarracks", nlohmann::json::object({ {"count", 1} }), reason);
-						}
-						return issued;
-					}
-					return issued;
-				};
-				const char* pauseReason = openingInfrastructureReady ? "reserve_cash_recovery" : "opening_not_ready";
-					const ScienceType scudLauncherScience = TheScienceStore != nullptr
-						? TheScienceStore->getScienceFromInternalName("SCIENCE_ScudLauncher")
-						: SCIENCE_INVALID;
-					const bool hasScudLauncherScience = scudLauncherScience != SCIENCE_INVALID
-						&& player->hasScience(scudLauncherScience);
-					const UpgradeTemplate* captureUpgrade = TheUpgradeCenter != nullptr
-						? TheUpgradeCenter->findUpgrade("Upgrade_InfantryCaptureBuilding")
-						: nullptr;
-					const bool hasCaptureUpgrade = captureUpgrade != nullptr && player->hasUpgradeComplete(captureUpgrade);
-					Int captureSources = 0;
-					for (std::size_t i = 0; i < ownedObjects.size(); ++i)
-					{
-						const auto& owned = ownedObjects[i];
-						if (owned.object == nullptr || owned.underConstruction || !owned.hasCapturePower)
-						{
-							continue;
-						}
-						++captureSources;
-					}
-					const AIControlAdapterProductionChoiceResult preferredProduction = AIControlAdapterChoosePreferredProductionCommand({
-						shouldPauseCombatProduction,
-						pauseReason,
-						shouldHoldArmyCap,
-						isBalancedSprawl,
-					profile.c_str(),
-					money,
-						counts.barracks,
-						counts.armsDealers,
-						counts.palaces,
-						hasCompletedPalace,
-						hasScudLauncherScience,
-						hasCaptureUpgrade,
-						captureSources,
-						counts.soldiers,
-						counts.rpg,
-						counts.quads,
-						counts.scorpions,
-					counts.scudLaunchers,
-					counts.radarVans,
-					armyCount,
-					armyCap
-				});
-
-				if (shouldPauseCombatProduction)
-				{
-					reason = preferredProduction.reason != nullptr ? preferredProduction.reason : pauseReason;
-				}
-				else if (shouldHoldArmyCap)
-				{
-					reason = preferredProduction.reason != nullptr ? preferredProduction.reason : "army_cap_reached";
-				}
-				else if (preferredProduction.command != nullptr)
-				{
-					tryChosenProduction(preferredProduction.command);
-					if (!issued
-						&& reason == "queue_full"
-						&& (std::strcmp(preferredProduction.command, "Game.QueueRpgTroopersAllBarracks") == 0
-							|| std::strcmp(preferredProduction.command, "Game.QueueSoldiersAllBarracks") == 0))
-					{
-						tryChosenProduction("Game.QueueQuadsAllWarFactories");
 					}
 				}
-				m_autonomy.state.lastDecisionCategory = "production";
-				m_autonomy.state.lastDecisionCommand = chosenCommand;
-				m_autonomy.state.lastDecisionReason = issued ? "ok" : reason;
-				if (!chosenCommand.empty())
+			}
+
+			EconomyManagerInput economyInput;
+			economyInput.currentMoney = money;
+			economyInput.smoothedNetCashPerMinute = static_cast<int>(std::floor(m_autonomy.state.smoothedNetCashPerMinute));
+			economyInput.reserveCash = reserveCash;
+			economyInput.completedBlackMarkets = completedBlackMarkets;
+			economyInput.inProgressBlackMarkets = inProgressBlackMarkets;
+			economyInput.hasPalace = counts.palaces > 0;
+			economyInput.profile = profile;
+
+			EconomyPolicy economyPolicy = m_autonomy.economyManager.AssessEconomyPolicy(economyInput);
+
+			// Calculate durable income capacity for telemetry
+			const unsigned int incomePerMarket = 225u;
+			const unsigned int durableIncome = completedBlackMarkets * incomePerMarket;
+
+			// Determine recovery hold reason (if income is sufficient but state is not Healthy)
+			const char* recoveryHold = "none";
+			if (economyInput.smoothedNetCashPerMinute >= static_cast<int>(economyPolicy.sufficientIncomePerMinute) &&
+			    economyPolicy.incomeState != EconomyIncomeState::Healthy)
+			{
+				if (economyPolicy.reserveState == EconomyReserveState::Depleted)
 				{
-					Coord3D zoneCenter = {};
-					zoneCenter.x = m_autonomy.state.lastZoneCenterX;
-					zoneCenter.y = m_autonomy.state.lastZoneCenterY;
-					zoneCenter.z = 0.0f;
-					recordAutonomyTelemetryEvent(
-						"production",
-						chosenCommand,
-						issued ? "ok" : reason,
-						m_autonomy.state.hasLastZone ? &zoneCenter : nullptr);
+					recoveryHold = "reserve_depleted";
 				}
+				else if (economyPolicy.reserveState == EconomyReserveState::Pressured && completedBlackMarkets < 2u)
+				{
+					recoveryHold = "possible_burst";
+				}
+				else if (inProgressBlackMarkets > 0)
+				{
+					recoveryHold = "in_recovery";
+				}
+				else
+				{
+					recoveryHold = "hysteresis";
+				}
+			}
+
+			// Log economy policy for telemetry
+			adapterLog(
+				"economy_policy income_state=%s reserve_state=%s spending_mode=%s "
+				"prioritize_income=%d allow_emergency=%d target_income=%u sufficient_income=%u "
+				"current_income=%d durable_income=%u market_count=%u recovery_hold=%s "
+				"markets[completed=%u in_progress=%u desired=%u max=%u] reason=%s tick=%u",
+				economyPolicy.incomeState == EconomyIncomeState::Healthy ? "healthy" :
+					economyPolicy.incomeState == EconomyIncomeState::Weak ? "weak" :
+					economyPolicy.incomeState == EconomyIncomeState::Critical ? "critical" : "recovering",
+				economyPolicy.reserveState == EconomyReserveState::Protected ? "protected" :
+					economyPolicy.reserveState == EconomyReserveState::Pressured ? "pressured" : "depleted",
+				economyPolicy.combatSpendingMode == CombatSpendingMode::Normal ? "normal" :
+					economyPolicy.combatSpendingMode == CombatSpendingMode::Conservative ? "conservative" : "blocked_except_defense",
+				economyPolicy.prioritizeIncomeBuild ? 1 : 0,
+				economyPolicy.allowEmergencyIncomeBuild ? 1 : 0,
+				economyPolicy.targetIncomePerMinute,
+				economyPolicy.sufficientIncomePerMinute,
+				economyInput.smoothedNetCashPerMinute,
+				durableIncome,
+				completedBlackMarkets,
+				recoveryHold,
+				completedBlackMarkets,
+				inProgressBlackMarkets,
+				economyPolicy.desiredBlackMarkets,
+				economyPolicy.maxBlackMarkets,
+				economyPolicy.reason.c_str(),
+				now);
+
+			// Log economy scaling telemetry (Phase 5.6)
+			adapterLog(
+				"economy_scaling mode=%s pressure=%d soft_markets=%u baseline_markets=%u hard_cap=%u "
+				"in_progress_limit=%u reason=%s tick=%u",
+				economyPolicy.scalingMode == EconomyScalingMode::Recovery ? "recovery" :
+					economyPolicy.scalingMode == EconomyScalingMode::Growth ? "growth" : "saturated",
+				economyPolicy.economyPressure,
+				economyPolicy.softRecoveryMarkets,
+				economyPolicy.baselineScalingMarkets,
+				economyPolicy.maxBlackMarkets,
+				economyPolicy.maxInProgressMarkets,
+				economyPolicy.scalingReason.c_str(),
+				now);
+
+			// Scheduler integration: collect intents from economy, production, and tech, then process together
+			bool schedulerHasIntents = false;
+
+			// Economy recovery request (Black Market construction during reserve pressure)
+			EconomyRecoveryRequest recoveryRequest = m_autonomy.economyManager.ChooseRecoveryAction(economyInput, economyPolicy);
+
+			if (recoveryRequest.shouldBuildIncome)
+			{
+				// Phase 5.7: Choose distributed safe strategic placement for recovery Black Markets
+				StrategicPlacementChoice placement = chooseStrategicPlacement(
+					zones,
+					zoneCounts,
+					activeZoneIndex,
+					StrategicStructureRole::Income,
+					m_autonomy.state.zoneRadius,
+					completedBlackMarkets);
+
+				// Log strategic placement decision (Phase 5.7: added score and zone_markets)
 				adapterLog(
-					"autonomy_tick category=production profile=%s money=%lu action=%s issued=%d reason=%s "
-					"units[soldiers=%d rpg=%d quads=%d scorpions=%d scuds=%d radar=%d] "
-					"queued[entries=%d producers=%d quads=%d scorpions=%d scuds=%d]",
-					profile.c_str(),
-					static_cast<unsigned long>(money),
-					chosenCommand.c_str(),
-					issued ? 1 : 0,
-					(issued ? "ok" : reason.c_str()),
-					counts.soldiers,
-					counts.rpg,
-					counts.quads,
-					counts.scorpions,
-					counts.scudLaunchers,
-					counts.radarVans,
-					counts.queuedProductionEntries,
-					counts.warFactoryLikeProducers,
-					counts.queuedQuads,
-					counts.queuedScorpions,
-					counts.queuedScudLaunchers);
-				m_autonomy.state.nextProductionTick = now + AIControlAdapterGetProductionRetryDelayMs(issued, reason.c_str());
+					"strategic_placement command=%s template=%s role=income source=%s zone_anchor=%u "
+					"zone_center=(%.1f,%.1f) zone_radius=%.1f strict_zone=%d has_placement=%d "
+					"score=%d zone_markets=%u total_markets=%u reason=%s tick=%u",
+					recoveryRequest.buildingCommand.c_str(),
+					recoveryRequest.buildingTemplate.c_str(),
+					placement.source.c_str(),
+					placement.zoneAnchorId,
+					placement.zoneCenterX,
+					placement.zoneCenterY,
+					placement.zoneRadius,
+					0, // Always use strict_zone=false for recovery (Phase 5.5)
+					placement.hasPlacement ? 1 : 0,
+					placement.score,
+					placement.zoneMarketCount,
+					placement.totalMarkets,
+					placement.reason.c_str(),
+					now);
+
+				Intent recoveryIntent;
+				recoveryIntent.category = IntentCategory::ECONOMY;
+				recoveryIntent.priority = economyPolicy.prioritizeIncomeBuild ? IntentPriority::HIGH : IntentPriority::NORMAL;
+				recoveryIntent.commandName = recoveryRequest.buildingCommand;
+				recoveryIntent.targetName = recoveryRequest.buildingTemplate;
+				recoveryIntent.reason = recoveryRequest.reason;
+
+				// Capture recovery execution in callback with strategic placement args
+				recoveryIntent.executeFunc = [&, recoveryRequest, placement](std::string& resultReason) -> bool {
+					nlohmann::json args = nlohmann::json::object();
+
+					// Pass explicit zone placement if available (Phase 5.5)
+					if (placement.hasPlacement)
+					{
+						// Use correct format: {"x": ..., "y": ...} not array
+						args["zone_center"] = nlohmann::json::object({
+							{"x", placement.zoneCenterX},
+							{"y", placement.zoneCenterY}
+						});
+						args["zone_radius"] = placement.zoneRadius;
+						// Use strict_zone=false to allow worker movement if placement fails
+						args["strict_zone"] = false;
+					}
+
+					return tryCommand("auto_recovery", recoveryRequest.buildingCommand.c_str(), args, resultReason);
+				};
+
+				m_autonomy.scheduler.SubmitIntent(recoveryIntent);
+				schedulerHasIntents = true;
+
+				adapterLog(
+					"economy_recovery_request command=%s template=%s markets[completed=%u in_progress=%u desired=%u max=%u] reason=%s tick=%u",
+					recoveryRequest.buildingCommand.c_str(),
+					recoveryRequest.buildingTemplate.c_str(),
+					recoveryRequest.completedMarkets,
+					recoveryRequest.inProgressMarkets,
+					recoveryRequest.desiredMarkets,
+					recoveryRequest.maxMarkets,
+					recoveryRequest.reason.c_str(),
+					now);
+			}
+
+			// Phase 7.1: Zone Defense Response
+			// Immediately mobilize idle combat units to defend threatened zones
+			const DWORD defenseResponseCooldownMs = 5000;  // 5 seconds
+
+			if (!m_autonomy.state.zoneThreats.empty())
+			{
+				// Always evaluate threats to find the best current threat
+				// Find highest severity threat (critical=3, high=2, medium/low fresh=1, low/medium stale=0)
+				// High/critical always rank above low/medium
+				// Fresh low/medium threats are treated as active under-attack for Phase 7.1
+				int highestSeverity = 0;
+				DWORD mostRecentTick = 0;
+				UnsignedInt threatenedZoneAnchor = 0;
+				Real threatPositionX = 0.0f;
+				Real threatPositionY = 0.0f;
+				std::string threatLevel;
+				bool foundThreat = false;
+
+				const DWORD threatFreshnessMs = 10000;  // 10 seconds
+				for (auto it = m_autonomy.state.zoneThreats.begin(); it != m_autonomy.state.zoneThreats.end(); ++it)
+				{
+					const UnsignedInt zoneAnchor = it->first;
+					const AutonomyZoneThreatState& threat = it->second;
+
+					// Check freshness: fresh means (now - lastSeenTick) <= freshness window
+					// Skip stale threats using wrap-safe tick comparison
+					const DWORD ageCutoff = now - threatFreshnessMs;
+					if (!AIControlAdapterHasTickElapsed(ageCutoff, threat.lastSeenTick))
+					{
+						continue;
+					}
+
+					int severity = 0;
+					if (threat.level == "critical")
+					{
+						severity = 3;
+					}
+					else if (threat.level == "high")
+					{
+						severity = 2;
+					}
+					else if (threat.level == "medium" || threat.level == "low")
+					{
+						// Fresh low/medium is treated as active under-attack
+						severity = 1;
+					}
+
+					// Respond to any severity >= 1 (fresh threats)
+					// Prefer higher severity, then most recent on tie
+					if (severity >= 1)
+					{
+						if (severity > highestSeverity || (severity == highestSeverity && threat.lastSeenTick > mostRecentTick))
+						{
+							highestSeverity = severity;
+							mostRecentTick = threat.lastSeenTick;
+							threatenedZoneAnchor = zoneAnchor;
+							threatPositionX = threat.positionX;
+							threatPositionY = threat.positionY;
+							threatLevel = threat.level;
+							foundThreat = true;
+						}
+					}
+				}
+
+				adapterLog(
+					"zone_defense_eval highest_severity=%d zone_anchor=%u threat_level=%s target_x=%.1f target_y=%.1f threats_scanned=%zu tick=%u",
+					highestSeverity,
+					threatenedZoneAnchor,
+					threatLevel.c_str(),
+					threatPositionX,
+					threatPositionY,
+					m_autonomy.state.zoneThreats.size(),
+					now);
+
+				if (foundThreat)
+				{
+					// Check if we should suppress this response due to cooldown
+					// Suppress only if cooldown is active AND severity is same/lower
+					// Higher-severity threats can override cooldown even for the same zone
+					const bool cooldownActive = !AIControlAdapterHasTickElapsed(m_autonomy.state.lastDefenseResponseTick, now);
+					const bool isLowerOrEqualSeverity = (highestSeverity <= m_autonomy.state.lastDefendedThreatSeverity);
+					const bool shouldSuppress = cooldownActive && isLowerOrEqualSeverity;
+
+					if (shouldSuppress)
+					{
+						adapterLog(
+							"zone_defense_skip zone_anchor=%u threat_level=%s reason=cooldown_active severity=%d last_severity=%d tick=%u",
+							threatenedZoneAnchor,
+							threatLevel.c_str(),
+							highestSeverity,
+							m_autonomy.state.lastDefendedThreatSeverity,
+							now);
+					}
+					else
+					{
+						// Create defense response intent
+						Intent defenseIntent;
+						defenseIntent.category = IntentCategory::DEFENSE_RESPONSE;
+						defenseIntent.priority = IntentPriority::CRITICAL;
+						defenseIntent.commandName = "Game.AttackMove.DefendZoneSmart";
+						defenseIntent.targetName = "threatened_zone";
+						defenseIntent.reason = "zone_under_attack";
+
+						// Capture defense execution in callback
+						// Update cooldown only on successful issue (not on submit)
+						defenseIntent.executeFunc = [&, threatenedZoneAnchor, threatPositionX, threatPositionY, threatLevel, highestSeverity, defenseResponseCooldownMs](std::string& resultReason) -> bool {
+							nlohmann::json args = nlohmann::json::object();
+							args["target_x"] = threatPositionX;
+							args["target_y"] = threatPositionY;
+							args["zone_anchor"] = threatenedZoneAnchor;
+
+							const bool issued = tryCommand("auto_defense", "Game.AttackMove.DefendZoneSmart", args, resultReason);
+
+							if (issued)
+							{
+								// Update cooldown state only after successful command issue
+								m_autonomy.state.lastDefenseResponseTick = now + defenseResponseCooldownMs;
+								m_autonomy.state.lastDefendedZoneAnchor = threatenedZoneAnchor;
+								m_autonomy.state.lastDefendedThreatSeverity = highestSeverity;
+
+								adapterLog(
+									"zone_defense_response zone_anchor=%u threat_level=%s severity=%d target_x=%.1f target_y=%.1f result=issued tick=%u",
+									threatenedZoneAnchor,
+									threatLevel.c_str(),
+									highestSeverity,
+									threatPositionX,
+									threatPositionY,
+									now);
+							}
+							else
+							{
+								adapterLog(
+									"zone_defense_skip zone_anchor=%u threat_level=%s reason=%s tick=%u",
+									threatenedZoneAnchor,
+									threatLevel.c_str(),
+									resultReason.c_str(),
+									now);
+							}
+
+							return issued;
+						};
+
+						m_autonomy.scheduler.SubmitIntent(defenseIntent);
+						schedulerHasIntents = true;
+					}
+				}
+			}
+
+			if (productionDue)
+			{
+				const Int armyCount = std::max<Int>(0, counts.mobileUnits - counts.workers);
+				const bool surplusProductionPressure = isBalancedSprawl && money >= 100000u;
+
+				// Prepare owned producers for zone selection
+				std::vector<ProductionProducerSnapshot> producerSnapshots;
+				producerSnapshots.reserve(ownedObjects.size());
+				for (std::size_t i = 0; i < ownedObjects.size(); ++i)
+				{
+					const AutonomyOwnedObjectSnapshot& owned = ownedObjects[i];
+					if (!owned.isStructure || owned.object == nullptr)
+					{
+						continue;
+					}
+
+					ProductionProducerSnapshot snapshot;
+					snapshot.object = owned.object;
+					snapshot.objectId = static_cast<int>(owned.object->getID());
+					snapshot.isStructure = owned.isStructure;
+					snapshot.underConstruction = owned.underConstruction;
+					snapshot.isBarracks = owned.isBarracks;
+					snapshot.isWarFactoryLike = owned.isWarFactoryLike;
+					if (owned.object->getPosition() != nullptr)
+					{
+						snapshot.positionX = owned.object->getPosition()->x;
+						snapshot.positionY = owned.object->getPosition()->y;
+					}
+					producerSnapshots.push_back(snapshot);
+				}
+
+				// Gather capability state
+				const ScienceType scudLauncherScience = TheScienceStore != nullptr
+					? TheScienceStore->getScienceFromInternalName("SCIENCE_ScudLauncher")
+					: SCIENCE_INVALID;
+				const bool hasScudLauncherScience = scudLauncherScience != SCIENCE_INVALID
+					&& player->hasScience(scudLauncherScience);
+				const UpgradeTemplate* captureUpgrade = TheUpgradeCenter != nullptr
+					? TheUpgradeCenter->findUpgrade("Upgrade_InfantryCaptureBuilding")
+					: nullptr;
+				const bool hasCaptureUpgrade = captureUpgrade != nullptr && player->hasUpgradeComplete(captureUpgrade);
+				Int captureSources = 0;
+				for (std::size_t i = 0; i < ownedObjects.size(); ++i)
+				{
+					const auto& owned = ownedObjects[i];
+					if (owned.object == nullptr || owned.underConstruction || !owned.hasCapturePower)
+					{
+						continue;
+					}
+					++captureSources;
+				}
+
+				// Build ProductionManager inputs
+				ProductionManagerInputs inputs;
+				inputs.money = money;
+				inputs.incomePerMinute = static_cast<int>(std::floor(m_autonomy.state.smoothedNetCashPerMinute));
+				inputs.reserveCash = reserveCash;
+				inputs.armyCount = armyCount;
+				inputs.soldiers = counts.soldiers;
+				inputs.rpg = counts.rpg;
+				inputs.quads = counts.quads;
+				inputs.scorpions = counts.scorpions;
+				inputs.scudLaunchers = counts.scudLaunchers;
+				inputs.radarVans = counts.radarVans;
+				inputs.barracks = counts.barracks;
+				inputs.armsDealers = counts.armsDealers;
+				inputs.palaces = counts.palaces;
+				inputs.hasCompletedPalace = hasCompletedPalace;
+				inputs.queuedProductionEntries = counts.queuedProductionEntries;
+				inputs.queuedQuads = counts.queuedQuads;
+				inputs.queuedScorpions = counts.queuedScorpions;
+				inputs.queuedScudLaunchers = counts.queuedScudLaunchers;
+				inputs.hasScudLauncherScience = hasScudLauncherScience;
+				inputs.hasCaptureUpgrade = hasCaptureUpgrade;
+				inputs.captureSources = captureSources;
+				inputs.hasActiveZone = hasActiveZone;
+				if (hasActiveZone)
+				{
+					inputs.activeZoneCenterX = activeZone.center.x;
+					inputs.activeZoneCenterY = activeZone.center.y;
+				}
+				inputs.zoneRadius = m_autonomy.state.zoneRadius;
+				inputs.openingInfrastructureReady = totalSupplyStashes >= 1 && totalBarracks >= 1 && totalArmsDealers >= 1;
+				inputs.openingEconomyReady = totalSupplyStashes >= 2 || totalBlackMarkets >= 1;
+				inputs.wasRecoveringFromReserve =
+					(m_autonomy.state.lastDecisionCategory == "production" && m_autonomy.state.lastDecisionReason == "reserve_cash_recovery");
+				inputs.wasArmyCapReached =
+					(m_autonomy.state.lastDecisionCategory == "production" && m_autonomy.state.lastDecisionReason == "army_cap_reached");
+				inputs.profile = profile.c_str();
+				inputs.isBalancedSprawl = isBalancedSprawl;
+				inputs.surplusProductionPressure = surplusProductionPressure;
+				inputs.ownedProducers = &producerSnapshots;
+
+				// Get production decision from ProductionManager
+				ProductionIntent prodIntent = m_autonomy.productionManager.ChooseProduction(inputs, now);
+
+				// Economy policy enforcement: block or suppress production based on spending mode
+				if (prodIntent.shouldProduce && economyPolicy.combatSpendingMode == CombatSpendingMode::BlockedExceptDefense)
+				{
+					// Block normal combat production during critical income/reserve pressure
+					// (Defense production would still be allowed via DefenseManager intents)
+					prodIntent.shouldProduce = false;
+					prodIntent.reason = "economy_policy_blocked";
+				}
+				else if (prodIntent.shouldProduce && economyPolicy.combatSpendingMode == CombatSpendingMode::Conservative)
+				{
+					// Conservative mode: reduce production pressure (could skip some production ticks)
+					// For now, allow production but note it in reason if it was reserve-related
+					if (prodIntent.reason == "reserve_cash_recovery")
+					{
+						// Already conservative, keep it
+					}
+				}
+
+				// Always submit production intent to scheduler (even for hold states)
+				Intent schedulerIntent;
+				schedulerIntent.category = IntentCategory::PRODUCTION;
+				schedulerIntent.priority = IntentPriority::NORMAL;
+				schedulerIntent.commandName = prodIntent.shouldProduce ? prodIntent.commandName : "none";
+				schedulerIntent.targetName = prodIntent.shouldProduce ? prodIntent.unitTemplate : "";
+				schedulerIntent.reason = prodIntent.reason;
+				schedulerIntent.producerObjectId = prodIntent.producerObjectId;
+				schedulerIntent.producerKind = prodIntent.producerKind;
+
+				if (prodIntent.shouldProduce)
+				{
+					// Capture production execution logic in callback
+					schedulerIntent.executeFunc = [&, prodIntent, producerSnapshots](std::string& resultReason) -> bool {
+						if (prodIntent.producerObjectId == -1)
+						{
+							// Use "all" command (all eligible producers)
+							return tryCommand("auto_prod", prodIntent.commandName.c_str(),
+								nlohmann::json::object({ {"count", 1} }), resultReason);
+						}
+						else
+						{
+							// Use specific producer via Game.QueueUnit
+							std::string unitTemplate;
+							Object* referenceProducer = nullptr;
+							for (std::size_t i = 0; i < producerSnapshots.size(); ++i)
+							{
+								if (producerSnapshots[i].objectId == prodIntent.producerObjectId)
+								{
+									referenceProducer = producerSnapshots[i].object;
+									break;
+								}
+							}
+
+							if (std::strcmp(prodIntent.commandName.c_str(), "Game.QueueQuadsAllWarFactories") == 0)
+							{
+								unitTemplate = inferQuadTemplateForProducer(referenceProducer);
+							}
+							else if (std::strcmp(prodIntent.commandName.c_str(), "Game.QueueScorpionsAllWarFactories") == 0)
+							{
+								unitTemplate = inferScorpionTemplateForProducer(referenceProducer);
+							}
+							else if (std::strcmp(prodIntent.commandName.c_str(), "Game.QueueRpgTroopersAllBarracks") == 0)
+							{
+								unitTemplate = inferRpgTemplateForProducer(referenceProducer);
+							}
+							else if (std::strcmp(prodIntent.commandName.c_str(), "Game.QueueSoldiersAllBarracks") == 0)
+							{
+								unitTemplate = inferSoldierTemplateForPlayer(player, referenceProducer);
+							}
+
+							if (!unitTemplate.empty())
+							{
+								nlohmann::json queuedMessage = {
+									{"type", "SessionCommand"},
+									{"request_id", "auto_prod_zone"},
+									{"cmd", "Game.QueueUnit"},
+									{"args", nlohmann::json::object({
+										{"producer_kind", prodIntent.producerKind},
+										{"unit_template", unitTemplate},
+										{"producer_object_id", prodIntent.producerObjectId}
+									})}
+								};
+								if (m_autonomy.state.hasExplicitPlayerIndex)
+								{
+									queuedMessage["args"]["player_index"] = m_autonomy.state.playerIndex;
+								}
+
+								bool issued = executeGameQueueUnit(queuedMessage, resultReason);
+
+								// Fallback to "all" command if zone producer failed
+								if (!issued && resultReason != "no_money")
+								{
+									const std::string zoneFailureReason = resultReason;
+									issued = tryCommand("auto_prod", prodIntent.commandName.c_str(),
+										nlohmann::json::object({ {"count", 1} }), resultReason);
+
+									// Phase 4 cleanup: If fallback succeeded, clear stale zone-specific failure reason
+									if (issued)
+									{
+										resultReason = "fallback_ok";
+									}
+								}
+								return issued;
+							}
+
+							resultReason = "no_unit_template";
+							return false;
+						}
+					};
+				}
+				else
+				{
+					// Hold state (no production): create no-op intent
+					schedulerIntent.executeFunc = [reason = prodIntent.reason](std::string& resultReason) -> bool {
+						resultReason = reason;
+						return false;
+					};
+				}
+
+				// Always submit production intent (executable or no-op)
+				m_autonomy.scheduler.SubmitIntent(schedulerIntent);
+				schedulerHasIntents = true;
 			}
 
 			if (techDue)
@@ -2728,34 +3470,66 @@ namespace
 				const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
 				if (profile == "sprawl" || profile == "sprawl_balanced" || profile == "tech")
 				{
-					bool issued = false;
-					std::string reason;
 					const bool hasScienceEconomy = totalSupplyStashes >= 2;
-					// Science and upgrade prereqs follow the engine's completed-object semantics.
 					const bool hasScienceAdvanced = counts.palaces > 0;
 
+					// TechManager wrapper functions
+					auto tryScienceCommand = [&](const char* category, const char* command, const char* scienceName, std::string& outReason) -> bool
+					{
+						nlohmann::json args = nlohmann::json::object({
+							{"science_name", std::string(scienceName)}
+						});
+						return tryCommand(category, command, args, outReason);
+					};
+
+					auto tryUpgradeCommand = [&](const char* category, const char* command, const char* producerKind, const char* upgradeName, std::string& outReason) -> bool
+					{
+						nlohmann::json args = nlohmann::json::object({
+							{"producer_kind", std::string(producerKind)},
+							{"upgrade_name", std::string(upgradeName)}
+						});
+						return tryCommand(category, command, args, outReason);
+					};
+
+					auto playerHasUpgrade = [&](const char* upgradeName) -> bool
+					{
+						const UpgradeTemplate* upgradeT = TheUpgradeCenter != nullptr
+							? TheUpgradeCenter->findUpgrade(upgradeName)
+							: nullptr;
+						return upgradeT != nullptr && player != nullptr && player->hasUpgradeComplete(upgradeT);
+					};
+
+					// Submit science intent to scheduler
 					if (money >= 1000u)
 					{
-						for (int i = 0; i < static_cast<int>(sizeof(kAutonomySciencePlan) / sizeof(kAutonomySciencePlan[0])); ++i)
-						{
-							const std::string scienceName = kAutonomySciencePlan[i];
-							if (scienceName == "SCIENCE_ScudLauncher" && !hasScienceAdvanced)
+						Intent scienceIntent;
+						scienceIntent.category = IntentCategory::TECH_SCIENCE;
+						scienceIntent.priority = IntentPriority::HIGH;
+						scienceIntent.commandName = "Game.PurchaseScience";
+						scienceIntent.targetName = "science_candidate";
+						scienceIntent.reason = "tech_science";
+
+						// Capture science execution in callback
+						scienceIntent.executeFunc = [&, tryScienceCommand, hasScienceEconomy, hasScienceAdvanced](std::string& resultReason) -> bool {
+							ScienceCandidateResult scienceResult = m_autonomy.techManager.ChooseAndAttemptScience(
+								kAutonomySciencePlan,
+								static_cast<int>(sizeof(kAutonomySciencePlan) / sizeof(kAutonomySciencePlan[0])),
+								hasScienceEconomy,
+								hasScienceAdvanced,
+								money,
+								tryScienceCommand,
+								now);
+
+							if (scienceResult.attempted)
 							{
-								continue;
-							}
-							if (scienceName.find("SCIENCE_CashBounty") == 0 && !hasScienceEconomy)
-							{
-								continue;
-							}
-							nlohmann::json args = nlohmann::json::object({
-								{"science_name", scienceName}
-							});
-							if (tryCommand("auto_tech", "Game.PurchaseScience", args, reason))
-							{
-								issued = true;
-								m_autonomy.state.lastDecisionCategory = "tech";
-								m_autonomy.state.lastDecisionCommand = "Game.PurchaseScience";
-								m_autonomy.state.lastDecisionReason = std::string("ok:") + scienceName;
+								resultReason = scienceResult.resultReason;
+
+								// Enhanced logging: show which candidate was attempted
+								adapterLog(
+									"autonomy_tech_science candidate=%s result=%s",
+									scienceResult.candidateName.c_str(),
+									scienceResult.resultReason.c_str());
+
 								Coord3D zoneCenter = {};
 								zoneCenter.x = m_autonomy.state.lastZoneCenterX;
 								zoneCenter.y = m_autonomy.state.lastZoneCenterY;
@@ -2763,62 +3537,69 @@ namespace
 								recordAutonomyTelemetryEvent(
 									"tech",
 									"Game.PurchaseScience",
-									m_autonomy.state.lastDecisionReason,
+									std::string("ok:") + scienceResult.candidateName,
 									m_autonomy.state.hasLastZone ? &zoneCenter : nullptr);
-								break;
+
+								return scienceResult.resultReason.empty() || scienceResult.resultReason == "ok" || scienceResult.resultReason.find("ok:") == 0;
 							}
-							if (AIControlAdapterShouldAbortSciencePlanForTick(reason.c_str()))
+							else if (!scienceResult.candidateName.empty())
 							{
-								break;
+								adapterLog(
+									"autonomy_tech_science_failed candidate=%s reason=%s",
+									scienceResult.candidateName.c_str(),
+									scienceResult.resultReason.c_str());
+								resultReason = scienceResult.resultReason;
 							}
-						}
+							else
+							{
+								resultReason = "no_science_candidate";
+							}
+							return false;
+						};
+
+						m_autonomy.scheduler.SubmitIntent(scienceIntent);
+						schedulerHasIntents = true;
 					}
 
-					if (!issued && money >= 1500u)
+					// Submit upgrade intent to scheduler
+					if (money >= 1500u)
 					{
-						for (int i = 0; i < static_cast<int>(sizeof(kAutonomyUpgradePlan) / sizeof(kAutonomyUpgradePlan[0])); ++i)
-						{
-							const std::string producerKind = kAutonomyUpgradePlan[i].producerKind;
-							const UpgradeTemplate* upgradeT = TheUpgradeCenter != nullptr
-								? TheUpgradeCenter->findUpgrade(kAutonomyUpgradePlan[i].upgradeName)
-								: nullptr;
-							if (upgradeT != nullptr && player != nullptr && player->hasUpgradeComplete(upgradeT))
+						Intent upgradeIntent;
+						upgradeIntent.category = IntentCategory::TECH_UPGRADE;
+						upgradeIntent.priority = IntentPriority::HIGH;
+						upgradeIntent.commandName = "Game.QueueUpgrade";
+						upgradeIntent.targetName = "upgrade_candidate";
+						upgradeIntent.reason = "tech_upgrade";
+
+						// Capture upgrade execution in callback
+						upgradeIntent.executeFunc = [&, tryUpgradeCommand, playerHasUpgrade](std::string& resultReason) -> bool {
+							std::map<std::string, int> producerCounts;
+							producerCounts["black_market"] = counts.blackMarkets;
+							producerCounts["palace"] = counts.palaces;
+							producerCounts["arms_dealer"] = counts.armsDealers;
+							producerCounts["barracks"] = counts.barracks;
+							producerCounts["any"] = (counts.barracks > 0 || counts.armsDealers > 0 || counts.palaces > 0) ? 1 : 0;
+
+							UpgradeCandidateResult upgradeResult = m_autonomy.techManager.ChooseAndAttemptUpgrade(
+								kAutonomyUpgradePlan,
+								static_cast<int>(sizeof(kAutonomyUpgradePlan) / sizeof(kAutonomyUpgradePlan[0])),
+								playerHasUpgrade,
+								producerCounts,
+								money,
+								tryUpgradeCommand,
+								now);
+
+							if (upgradeResult.attempted)
 							{
-								continue;
-							}
-							if (producerKind == "black_market" && counts.blackMarkets < 1)
-							{
-								continue;
-							}
-							if (producerKind == "palace" && counts.palaces < 1)
-							{
-								continue;
-							}
-							if (producerKind == "arms_dealer" && counts.armsDealers < 1)
-							{
-								continue;
-							}
-							if (producerKind == "barracks" && counts.barracks < 1)
-							{
-								continue;
-							}
-							if (producerKind == "any"
-								&& counts.barracks < 1
-								&& counts.armsDealers < 1
-								&& counts.palaces < 1)
-							{
-								continue;
-							}
-							nlohmann::json args = nlohmann::json::object({
-								{"producer_kind", producerKind},
-								{"upgrade_name", std::string(kAutonomyUpgradePlan[i].upgradeName)}
-							});
-							if (tryCommand("auto_tech", "Game.QueueUpgrade", args, reason))
-							{
-								issued = true;
-								m_autonomy.state.lastDecisionCategory = "tech";
-								m_autonomy.state.lastDecisionCommand = "Game.QueueUpgrade";
-								m_autonomy.state.lastDecisionReason = std::string("ok:") + kAutonomyUpgradePlan[i].upgradeName;
+								resultReason = upgradeResult.resultReason;
+
+								// Enhanced logging: show which upgrade and producer
+								adapterLog(
+									"autonomy_tech_upgrade candidate=%s producer=%s result=%s",
+									upgradeResult.candidateName.c_str(),
+									upgradeResult.producerKind.c_str(),
+									upgradeResult.resultReason.c_str());
+
 								Coord3D zoneCenter = {};
 								zoneCenter.x = m_autonomy.state.lastZoneCenterX;
 								zoneCenter.y = m_autonomy.state.lastZoneCenterY;
@@ -2826,25 +3607,153 @@ namespace
 								recordAutonomyTelemetryEvent(
 									"tech",
 									"Game.QueueUpgrade",
-									m_autonomy.state.lastDecisionReason,
+									std::string("ok:") + upgradeResult.candidateName,
 									m_autonomy.state.hasLastZone ? &zoneCenter : nullptr);
-								break;
+
+								return upgradeResult.resultReason.empty() || upgradeResult.resultReason == "ok" || upgradeResult.resultReason.find("ok:") == 0;
 							}
-							if (AIControlAdapterShouldAbortUpgradePlanForTick(reason.c_str()))
+							else if (!upgradeResult.candidateName.empty())
 							{
-								break;
+								adapterLog(
+									"autonomy_tech_upgrade_failed candidate=%s producer=%s reason=%s",
+									upgradeResult.candidateName.c_str(),
+									upgradeResult.producerKind.c_str(),
+									upgradeResult.resultReason.c_str());
+								resultReason = upgradeResult.resultReason;
 							}
+							else
+							{
+								resultReason = "no_upgrade_candidate";
+							}
+							return false;
+						};
+
+						m_autonomy.scheduler.SubmitIntent(upgradeIntent);
+						schedulerHasIntents = true;
+					}
+				}
+			}
+
+			// Process all scheduler intents (production + tech)
+			bool productionIssued = false;
+			bool techIssued = false;
+			std::string productionReason;
+			std::string techReason;
+
+			if (schedulerHasIntents)
+			{
+				std::vector<IntentResult> results = m_autonomy.scheduler.ProcessIntents(now);
+
+				// Log and update state from results
+				for (const IntentResult& result : results)
+				{
+					// Log intent result for telemetry
+					adapterLog(
+						"autonomy_scheduler_result category=%s priority=%s command=%s target=%s "
+						"state=%s attempted=%d issued=%d reason=%s tick=%u",
+						IntentCategoryToString(result.category),
+						IntentPriorityToString(result.priority),
+						result.commandName.c_str(),
+						result.targetName.c_str(),
+						result.state == IntentState::PENDING ? "pending" :
+							result.state == IntentState::ATTEMPTED ? "attempted" : "skipped",
+						result.attempted ? 1 : 0,
+						result.issued ? 1 : 0,
+						result.resultReason.c_str(),
+						result.tick);
+
+					// Update decision state based on scheduler results
+					if (result.attempted)
+					{
+						if (result.category == IntentCategory::PRODUCTION)
+						{
+							m_autonomy.state.lastDecisionCategory = "production";
+							m_autonomy.state.lastDecisionCommand = result.issued ? result.commandName : "none";
+							m_autonomy.state.lastDecisionReason = result.resultReason;
+						}
+						else if (result.category == IntentCategory::TECH_SCIENCE && result.issued)
+						{
+							m_autonomy.state.lastDecisionCategory = "tech";
+							m_autonomy.state.lastDecisionCommand = result.commandName;
+							m_autonomy.state.lastDecisionReason = std::string("ok:") + result.targetName;
+						}
+						else if (result.category == IntentCategory::TECH_UPGRADE && result.issued)
+						{
+							m_autonomy.state.lastDecisionCategory = "tech";
+							m_autonomy.state.lastDecisionCommand = result.commandName;
+							m_autonomy.state.lastDecisionReason = std::string("ok:") + result.targetName;
 						}
 					}
+				}
 
-					if (!issued)
+				// Extract result data for timer advancement
+				for (const IntentResult& result : results)
+				{
+					if (result.category == IntentCategory::PRODUCTION && result.attempted)
 					{
-						m_autonomy.state.lastDecisionCategory = "tech";
-						m_autonomy.state.lastDecisionCommand = "none";
-						m_autonomy.state.lastDecisionReason = reason.empty() ? "tech_prereq_missing" : reason;
-					}
+						productionIssued = result.issued;
+						productionReason = result.resultReason;
 
-					m_autonomy.state.nextTechTick = now + AIControlAdapterGetTechRetryDelayMs(issued, m_autonomy.state.lastDecisionReason.c_str());
+						// Update production telemetry (for all production decisions, including holds)
+						const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
+						const bool isBalancedSprawl = (profile == "sprawl_balanced");
+						const Int armyCap = AIControlAdapterGetEffectiveArmyCap({
+							isBalancedSprawl,
+							money,
+							static_cast<int>(std::floor(m_autonomy.state.smoothedNetCashPerMinute)),
+							counts.barracks,
+							counts.armsDealers,
+							isBalancedSprawl ? 100 : 9999
+						});
+
+						const std::string actionName = result.commandName.empty() ? "none" : result.commandName;
+
+						adapterLog(
+							"autonomy_tick category=production profile=%s money=%lu action=%s issued=%d reason=%s "
+							"income_per_min=%d army_cap=%d "
+							"units[soldiers=%d rpg=%d quads=%d scorpions=%d scuds=%d radar=%d] "
+							"queued[entries=%d producers=%d quads=%d scorpions=%d scuds=%d]",
+							profile.c_str(),
+							static_cast<unsigned long>(money),
+							actionName.c_str(),
+							result.issued ? 1 : 0,
+							result.resultReason.c_str(),
+							static_cast<int>(std::floor(m_autonomy.state.smoothedNetCashPerMinute)),
+							armyCap,
+							counts.soldiers,
+							counts.rpg,
+							counts.quads,
+							counts.scorpions,
+							counts.scudLaunchers,
+							counts.radarVans,
+							counts.queuedProductionEntries,
+							counts.warFactoryLikeProducers,
+							counts.queuedQuads,
+							counts.queuedScorpions,
+							counts.queuedScudLaunchers);
+					}
+					else if ((result.category == IntentCategory::TECH_SCIENCE ||
+							  result.category == IntentCategory::TECH_UPGRADE) && result.attempted)
+					{
+						techIssued = result.issued;
+						techReason = result.resultReason;
+					}
+				}
+			}
+
+			// Update next production tick (always advance when productionDue)
+			if (productionDue)
+			{
+				m_autonomy.state.nextProductionTick = now + AIControlAdapterGetProductionRetryDelayMs(productionIssued, productionReason.c_str());
+			}
+
+			// Update next tech tick (always advance when techDue)
+			if (techDue)
+			{
+				const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
+				if (profile == "sprawl" || profile == "sprawl_balanced" || profile == "tech")
+				{
+					m_autonomy.state.nextTechTick = now + AIControlAdapterGetTechRetryDelayMs(techIssued, techReason.c_str());
 				}
 				else
 				{
@@ -3333,6 +4242,114 @@ namespace
 				}
 			}
 			return result;
+		}
+
+		nlohmann::json buildAutonomyZonesSnapshot()
+		{
+			nlohmann::json zones = nlohmann::json::array();
+			const Real radius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius);
+
+			if (m_autonomy.state.telemetryZones.is_array())
+			{
+				for (const auto& zone : m_autonomy.state.telemetryZones)
+				{
+					if (!zone.is_object())
+					{
+						continue;
+					}
+
+					const UnsignedInt anchorId = zone.value("anchor_id", 0u);
+					const bool isMainBase = zone.value("is_main_base", false);
+					const Int supplyStashes = zone.value("supply_stashes", 0);
+					const Int barracks = zone.value("barracks", 0);
+					const Int armsDealers = zone.value("arms_dealers", 0);
+					const Int palaces = zone.value("palaces", 0);
+					const Int blackMarkets = zone.value("black_markets", 0);
+					const Int tunnels = zone.value("tunnels", 0);
+					const Int stingers = zone.value("stingers", 0);
+					const bool active =
+						m_autonomy.state.hasLastZone
+						&& anchorId == m_autonomy.state.lastZoneAnchorId
+						&& isMainBase == m_autonomy.state.lastZoneIsMainBase;
+					nlohmann::json threatJson = nlohmann::json::object({
+						{"level", "none"},
+						{"under_attack", false},
+						{"last_seen_tick", 0u},
+						{"position", nullptr}
+					});
+					const auto threatIt = m_autonomy.state.zoneThreats.find(anchorId);
+					if (threatIt != m_autonomy.state.zoneThreats.end())
+					{
+						const AutonomyZoneThreatState& threat = threatIt->second;
+						threatJson = nlohmann::json::object({
+							{"level", threat.level.empty() ? "low" : threat.level},
+							{"under_attack", true},
+							{"last_seen_tick", static_cast<UnsignedInt>(threat.lastSeenTick)},
+							{"damaged_object_id", threat.damagedObjectId},
+							{"damage_delta", threat.damageDelta},
+							{"position", nlohmann::json::object({
+								{"x", threat.positionX},
+								{"y", threat.positionY}
+							})}
+						});
+					}
+
+					zones.push_back(nlohmann::json::object({
+						{"id", std::string(isMainBase ? "main-" : "expansion-") + std::to_string(anchorId)},
+						{"anchor_id", anchorId},
+						{"kind", isMainBase ? "main_base" : "expansion"},
+						{"active", active},
+						{"developed", zone.value("developed", false)},
+						{"needs_followup", zone.value("needs_followup", false)},
+						{"center", nlohmann::json::object({
+							{"x", zone.value("center_x", 0.0f)},
+							{"y", zone.value("center_y", 0.0f)}
+						})},
+						{"radius", radius},
+						{"front_point", nlohmann::json::object({
+							{"x", zone.value("front_point_x", 0.0f)},
+							{"y", zone.value("front_point_y", 0.0f)}
+						})},
+						{"rear_point", nlohmann::json::object({
+							{"x", zone.value("rear_point_x", 0.0f)},
+							{"y", zone.value("rear_point_y", 0.0f)}
+						})},
+						{"front_source", zone.value("front_source", "")},
+						{"friendly", nlohmann::json::object({
+							{"structures", supplyStashes + barracks + armsDealers + palaces + blackMarkets + tunnels + stingers},
+							{"supply_stashes", supplyStashes},
+							{"barracks", barracks},
+							{"arms_dealers", armsDealers},
+							{"palaces", palaces},
+							{"black_markets", blackMarkets},
+							{"tunnels", tunnels},
+							{"stingers", stingers}
+						})},
+						{"threat", threatJson}
+					}));
+				}
+			}
+
+			return nlohmann::json::object({
+				{"version", m_autonomy.state.zonesSnapshotVersion},
+				{"tick", static_cast<UnsignedInt>(m_autonomy.state.zonesSnapshotTick)},
+				{"zone_radius", m_autonomy.state.zoneRadius},
+				{"selected_zone", nlohmann::json::object({
+					{"active", m_autonomy.state.hasLastZone},
+					{"anchor_id", m_autonomy.state.lastZoneAnchorId},
+					{"kind", m_autonomy.state.lastZoneIsMainBase ? "main_base" : "expansion"},
+					{"center", nlohmann::json::object({
+						{"x", m_autonomy.state.lastZoneCenterX},
+						{"y", m_autonomy.state.lastZoneCenterY}
+					})}
+				})},
+				{"decision", nlohmann::json::object({
+					{"category", m_autonomy.state.lastDecisionCategory},
+					{"command", m_autonomy.state.lastDecisionCommand},
+					{"reason", m_autonomy.state.lastDecisionReason}
+				})},
+				{"zones", zones}
+			});
 		}
 
 		#include "AIControlAdapterProtocol.inl"

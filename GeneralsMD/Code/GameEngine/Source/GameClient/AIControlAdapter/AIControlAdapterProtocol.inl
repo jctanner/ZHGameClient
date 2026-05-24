@@ -321,6 +321,7 @@
 						"autonomy_configure",
 						"autonomy_status",
 						"autonomy_telemetry",
+						"autonomy_zones_snapshot",
 						"autonomy_pause",
 						"autonomy_resume",
 						"autonomy_reset",
@@ -887,6 +888,12 @@
 			if (cmd == "Autonomy.Telemetry")
 			{
 				sendQueryResult(requestId, buildAutonomyTelemetry());
+				return;
+			}
+
+			if (cmd == "Autonomy.ZonesSnapshot")
+			{
+				sendQueryResult(requestId, buildAutonomyZonesSnapshot());
 				return;
 			}
 

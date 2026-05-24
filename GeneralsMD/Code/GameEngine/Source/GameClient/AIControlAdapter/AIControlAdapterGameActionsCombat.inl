@@ -646,3 +646,78 @@
 			return true;
 		}
 
+		bool executeGameAttackMoveDefendZoneSmart(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheGameLogic == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			const auto targetXIt = argsIt->find("target_x");
+			const auto targetYIt = argsIt->find("target_y");
+			if (targetXIt == argsIt->end() || targetYIt == argsIt->end() || !targetXIt->is_number() || !targetYIt->is_number())
+			{
+				reason = "missing_target_position";
+				return false;
+			}
+
+			Coord3D target;
+			target.x = targetXIt->get<Real>();
+			target.y = targetYIt->get<Real>();
+			target.z = 0.0f;
+
+			// Collect idle ground combat units (reuse raid collection logic)
+			std::vector<Object*> combatUnits;
+			collectCombatUnitsForRaid(player, combatUnits);
+
+			if (combatUnits.empty())
+			{
+				reason = "no_idle_combat_units";
+				return false;
+			}
+
+			// Select all idle combat units for defense
+			std::vector<ObjectID> selectedIds;
+			for (std::size_t i = 0; i < combatUnits.size(); ++i)
+			{
+				Object* obj = combatUnits[i];
+				if (obj == nullptr || obj->getAI() == nullptr)
+				{
+					continue;
+				}
+				selectedIds.push_back(obj->getID());
+			}
+
+			if (selectedIds.empty())
+			{
+				reason = "no_valid_objects";
+				return false;
+			}
+
+			return executeScopedSelectionCommand(player, selectedIds, reason, [&]() -> bool
+			{
+				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_ATTACKMOVETO);
+				if (msg == nullptr)
+				{
+					reason = "message_stream_not_ready";
+					return false;
+				}
+				msg->appendLocationArgument(target);
+				return true;
+			});
+		}
+

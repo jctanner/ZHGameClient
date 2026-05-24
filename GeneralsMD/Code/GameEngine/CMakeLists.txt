@@ -139,7 +139,13 @@ set(GAMEENGINE_SRC
 #    Include/Common/XferSave.h
     Include/GameClient/Anim2D.h
     Include/GameClient/AIControlAdapter/AIControlAdapter.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterDefenseManager.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterEconomyManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterPolicy.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterProductionManager.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterScheduler.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterTechManager.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterZoneManager.h
     Include/GameClient/AnimateWindowManager.h
     Include/GameClient/CampaignManager.h
 #    Include/GameClient/ChallengeGenerals.h
@@ -688,7 +694,13 @@ set(GAMEENGINE_SRC
 #    Source/GameClient/Color.cpp
 #    Source/GameClient/Credits.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapter.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterDefenseManager.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterEconomyManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterPolicy.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterProductionManager.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterScheduler.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterTechManager.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterZoneManager.cpp
     Source/GameClient/Display.cpp
 #    Source/GameClient/DisplayString.cpp
 #    Source/GameClient/DisplayStringManager.cpp
@@ -1267,6 +1279,26 @@ if(BUILD_TESTING)
 
     add_test(NAME z_gameengine_adapter_tests COMMAND z_gameengine_adapter_tests)
 
+    add_executable(z_gameengine_adapter_techmanager_tests
+        Tests/AIControlAdapter/AIControlAdapterTechManagerTests.cpp
+    )
+
+    target_link_libraries(z_gameengine_adapter_techmanager_tests PRIVATE
+        z_gameengine
+    )
+
+    add_test(NAME z_gameengine_adapter_techmanager_tests COMMAND z_gameengine_adapter_techmanager_tests)
+
+    add_executable(z_gameengine_adapter_productionmanager_tests
+        Tests/AIControlAdapter/AIControlAdapterProductionManagerTests.cpp
+    )
+
+    target_link_libraries(z_gameengine_adapter_productionmanager_tests PRIVATE
+        z_gameengine
+    )
+
+    add_test(NAME z_gameengine_adapter_productionmanager_tests COMMAND z_gameengine_adapter_productionmanager_tests)
+
     add_executable(z_gameengine_adapter_ui_tests
         Tests/AIControlAdapter/AIControlAdapterUITests.cpp
     )
@@ -1286,4 +1318,44 @@ if(BUILD_TESTING)
     )
 
     add_test(NAME z_gameengine_adapter_telemetry_tests COMMAND z_gameengine_adapter_telemetry_tests)
+
+    add_executable(z_gameengine_adapter_zonedefense_tests
+        Tests/AIControlAdapter/AIControlAdapterZoneDefenseTests.cpp
+    )
+
+    target_link_libraries(z_gameengine_adapter_zonedefense_tests PRIVATE
+        z_gameengine
+    )
+
+    add_test(NAME z_gameengine_adapter_zonedefense_tests COMMAND z_gameengine_adapter_zonedefense_tests)
+
+    add_executable(z_gameengine_adapter_scheduler_tests
+        Tests/AIControlAdapter/AIControlAdapterSchedulerTests.cpp
+    )
+
+    target_link_libraries(z_gameengine_adapter_scheduler_tests PRIVATE
+        z_gameengine
+    )
+
+    add_test(NAME z_gameengine_adapter_scheduler_tests COMMAND z_gameengine_adapter_scheduler_tests)
+
+    add_executable(z_gameengine_adapter_economymanager_tests
+        Tests/AIControlAdapter/AIControlAdapterEconomyManagerTests.cpp
+    )
+
+    target_link_libraries(z_gameengine_adapter_economymanager_tests PRIVATE
+        z_gameengine
+    )
+
+    add_test(NAME z_gameengine_adapter_economymanager_tests COMMAND z_gameengine_adapter_economymanager_tests)
+
+    add_executable(z_gameengine_adapter_distributedplacement_tests
+        Tests/AIControlAdapter/AIControlAdapterDistributedPlacementTests.cpp
+    )
+
+    target_link_libraries(z_gameengine_adapter_distributedplacement_tests PRIVATE
+        z_gameengine
+    )
+
+    add_test(NAME z_gameengine_adapter_distributedplacement_tests COMMAND z_gameengine_adapter_distributedplacement_tests)
 endif()

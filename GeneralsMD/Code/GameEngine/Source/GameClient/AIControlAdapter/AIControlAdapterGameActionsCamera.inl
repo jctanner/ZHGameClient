@@ -146,7 +146,8 @@
 				return false;
 			}
 
-			TheTacticalView->setAngleAndPitchToDefault();
+			TheTacticalView->setAngleToDefault();
+			TheTacticalView->setPitchToDefault();
 			TheTacticalView->setZoomToDefault();
 			return true;
 		}
@@ -232,4 +233,3 @@
 			});
 			return true;
 		}
-

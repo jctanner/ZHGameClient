@@ -148,6 +148,7 @@
 			state.aggressionBias = 0.5f;
 			state.defenseBias = 0.5f;
 			state.expansionBias = 0.5f;
+			techManager.Reset();
 			state.sprawlMultiplier = 1.0f;
 			state.zoneRadius = 300.0f;
 			state.lastAppliedTick = 0u;
@@ -200,4 +201,10 @@
 		}
 
 		AutonomyState state;  ///< Current autonomy configuration and runtime state
+		AIControlAdapterTechManager techManager;  ///< Technology (science/upgrade) management
+		AIControlAdapterProductionManager productionManager;  ///< Combat unit production management
+		AIControlAdapterZoneManager zoneManager;  ///< Zone threat tracking and management
+		AIControlAdapterDefenseManager defenseManager;  ///< Defense request management
+		AIControlAdapterEconomyManager economyManager;  ///< Economy recovery and income scaling management
+		AIControlAdapterScheduler scheduler;  ///< Intent scheduler for action arbitration
 	};

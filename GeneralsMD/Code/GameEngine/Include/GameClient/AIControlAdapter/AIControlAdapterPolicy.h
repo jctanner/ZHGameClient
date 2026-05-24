@@ -98,6 +98,36 @@ struct AIControlAdapterCombatProductionPolicyInputs
 };
 
 /**
+ * Input state for dynamic army cap policy.
+ *
+ * Used to raise the practical combat-unit target when the economy has scaled far
+ * beyond the normal reserve and production capacity is already large.
+ */
+struct AIControlAdapterEffectiveArmyCapPolicyInputs
+{
+	bool isBalancedSprawl;       // True if using "Balanced Sprawl" build order
+	unsigned int money;          // Current cash balance
+	int incomePerMinute;         // Smoothed net cash change per minute
+	int barracks;                // Count of Barracks
+	int armsDealers;             // Count of Arms Dealers
+	int baseArmyCap;             // Baseline desired combat unit cap
+};
+
+/**
+ * Decide the effective combat-unit cap for the current economy state.
+ *
+ * Balanced Sprawl normally keeps a conservative cap to avoid pathfinding and
+ * control issues. Once cash is far above reserve, that cap becomes counterproductive:
+ * idle production buildings sit unused while the economy floats. In that surplus
+ * mode, scale the cap with available production capacity and sustainable net cash
+ * flow so late-game spending can convert into units without draining the economy.
+ *
+ * @param inputs Current economy and production capacity
+ * @return Effective combat-unit cap
+ */
+int AIControlAdapterGetEffectiveArmyCap(const AIControlAdapterEffectiveArmyCapPolicyInputs& inputs);
+
+/**
  * Decide whether to hold production at army cap limit.
  *
  * This policy prevents overproduction by stopping combat unit production when the army
@@ -167,6 +197,7 @@ struct AIControlAdapterBlackMarketPolicyInputs
 	bool isBalancedSprawl;       // True if using "Balanced Sprawl" build order
 	unsigned int money;          // Current cash balance
 	unsigned int reserveCash;    // Cash reserved for emergency economy
+	int completedBlackMarkets;   // Count of completed Black Markets
 	int blackMarketsInProgress;  // Count of Black Markets currently being built
 };
 
@@ -178,7 +209,7 @@ struct AIControlAdapterBlackMarketPolicyInputs
  *
  * Gating conditions:
  * - Palace must exist first (tech building prerequisite)
- * - Must have enough cash above reserve (reserve + $1500 minimum)
+ * - First Balanced Sprawl market can start at reserve; later markets require reserve plus cost
  * - Can only build one Black Market at a time (prevent multiple simultaneous)
  * - "Balanced Sprawl" has stricter requirements (prefers Supply Stashes first)
  *
@@ -300,19 +331,23 @@ const char* AIControlAdapterGetEcoRecoveryBuild(const AIControlAdapterEcoRecover
 bool AIControlAdapterShouldAbortSciencePlanForTick(const char* reason);
 
 /**
- * Decide whether to abort the current upgrade purchase for this tick.
+ * Decide whether to abort the remaining upgrade plan for this tick.
  *
  * Upgrades (AP bullets, worker shoes, junk repair) improve units and buildings.
- * This policy aborts upgrade attempts when:
+ * This policy aborts remaining upgrade attempts when:
  * - "no_producer": Required building destroyed (e.g., Black Market for AP bullets)
  * - "producer_busy": Building busy with another upgrade
  * - "already_purchased": Upgrade already owned (shouldn't happen, but safe to abort)
  *
- * Temporary failures that should retry:
+ * Failures that should not abort the whole plan:
  * - "no_money": Not enough cash (will retry when money available)
+ * - "producer_cannot_make_upgrade": Current producer cannot make this upgrade;
+ *   continue so later upgrades can still be considered.
+ * - "upgrade_already_in_production": Current upgrade is already underway;
+ *   continue scanning so later upgrades are not hidden behind it.
  *
  * @param reason Failure reason from upgrade purchase attempt
- * @return True if upgrade plan should abort (permanent failure), false to retry
+ * @return True if remaining upgrade plan should abort, false to continue scanning
  */
 bool AIControlAdapterShouldAbortUpgradePlanForTick(const char* reason);
 
