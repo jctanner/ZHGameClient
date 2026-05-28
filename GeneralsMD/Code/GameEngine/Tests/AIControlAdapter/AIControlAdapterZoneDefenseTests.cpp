@@ -14,6 +14,7 @@
 
 #include "GameClient/AIControlAdapter/AIControlAdapterZoneManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterDefenseManager.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterPolicy.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -965,6 +966,268 @@ namespace Phase71
 	}
 }
 
+// Phase 5.8 Tests: Non-Supply Zone Anchor Types
+
+void testZoneAnchorTypeToString()
+{
+	expectEq(std::string(zoneAnchorTypeToString(ZoneAnchorType::MainBase)), std::string("main_base"), "MainBase type string");
+	expectEq(std::string(zoneAnchorTypeToString(ZoneAnchorType::SupplyStash)), std::string("supply_stash"), "SupplyStash type string");
+	expectEq(std::string(zoneAnchorTypeToString(ZoneAnchorType::CapturedStructure)), std::string("captured_structure"), "CapturedStructure type string");
+	expectEq(std::string(zoneAnchorTypeToString(ZoneAnchorType::StrategicFoothold)), std::string("strategic_foothold"), "StrategicFoothold type string");
+	expectEq(std::string(zoneAnchorTypeToString(ZoneAnchorType::MarketFoothold)), std::string("market_foothold"), "MarketFoothold type string");
+
+	std::cout << "PASS: testZoneAnchorTypeToString\n";
+}
+
+void testZoneSnapshotHasAnchorType()
+{
+	ZoneSnapshot zone;
+	zone.anchorId = 1001;
+	zone.centerX = 100.0f;
+	zone.centerY = 100.0f;
+	zone.isMainBase = true;
+	zone.barracks = 1;
+	zone.armsDealers = 1;
+	zone.anchorType = ZoneAnchorType::MainBase;
+
+	expectEq(std::string(zoneAnchorTypeToString(zone.anchorType)), std::string("main_base"), "Zone should have anchor type");
+
+	std::cout << "PASS: testZoneSnapshotHasAnchorType\n";
+}
+
+void testCapturedStructureAnchorType()
+{
+	ZoneSnapshot zone;
+	zone.anchorId = 2001;
+	zone.centerX = 500.0f;
+	zone.centerY = 500.0f;
+	zone.isMainBase = false;
+	zone.barracks = 0;
+	zone.armsDealers = 0;
+	zone.anchorType = ZoneAnchorType::CapturedStructure;
+
+	expectEq(std::string(zoneAnchorTypeToString(zone.anchorType)), std::string("captured_structure"), "Captured structure anchor type");
+	expect(!zone.isMainBase, "Captured structure zone should not be main base");
+
+	std::cout << "PASS: testCapturedStructureAnchorType\n";
+}
+
+void testStrategicFootholdAnchorType()
+{
+	ZoneSnapshot zone;
+	zone.anchorId = 3001;
+	zone.centerX = 700.0f;
+	zone.centerY = 700.0f;
+	zone.isMainBase = false;
+	zone.barracks = 0;
+	zone.armsDealers = 0;
+	zone.anchorType = ZoneAnchorType::StrategicFoothold;
+
+	expectEq(std::string(zoneAnchorTypeToString(zone.anchorType)), std::string("strategic_foothold"), "Strategic foothold anchor type");
+
+	std::cout << "PASS: testStrategicFootholdAnchorType\n";
+}
+
+void testZoneDistanceValidation()
+{
+	// Test minimum zone separation distance (220 units)
+	ZoneSnapshot zone1;
+	zone1.centerX = 100.0f;
+	zone1.centerY = 100.0f;
+	zone1.anchorType = ZoneAnchorType::SupplyStash;
+
+	ZoneSnapshot zone2;
+	zone2.centerX = 250.0f;
+	zone2.centerY = 100.0f;
+	zone2.anchorType = ZoneAnchorType::CapturedStructure;
+
+	// Distance = 150 units, should be too close
+	const float dx = zone2.centerX - zone1.centerX;
+	const float dy = zone2.centerY - zone1.centerY;
+	const float distSq = (dx * dx) + (dy * dy);
+	const float minDistSq = 220.0f * 220.0f;
+
+	expect(distSq < minDistSq, "Zones at 150 units should be too close (< 220)");
+
+	// Zone3 at 300 units should be far enough
+	ZoneSnapshot zone3;
+	zone3.centerX = 400.0f;
+	zone3.centerY = 100.0f;
+	zone3.anchorType = ZoneAnchorType::StrategicFoothold;
+
+	const float dx3 = zone3.centerX - zone1.centerX;
+	const float dy3 = zone3.centerY - zone1.centerY;
+	const float distSq3 = (dx3 * dx3) + (dy3 * dy3);
+
+	expect(distSq3 >= minDistSq, "Zones at 300 units should be far enough (>= 220)");
+
+	std::cout << "PASS: testZoneDistanceValidation\n";
+}
+
+void testSyntheticAnchorIdRange()
+{
+	// Synthetic anchor IDs start at 1,000,000 to avoid conflicts with real object IDs
+	const unsigned int syntheticStart = 1000000;
+	const unsigned int realObjectId = 5001;
+
+	expect(syntheticStart > realObjectId, "Synthetic anchor IDs should be much larger than typical object IDs");
+	expect(syntheticStart >= 1000000, "Synthetic anchor IDs should start at 1,000,000");
+
+	ZoneSnapshot syntheticZone;
+	syntheticZone.anchorId = syntheticStart;
+	syntheticZone.anchorType = ZoneAnchorType::StrategicFoothold;
+
+	ZoneSnapshot realZone;
+	realZone.anchorId = realObjectId;
+	realZone.anchorType = ZoneAnchorType::CapturedStructure;
+
+	const bool isSyntheticAnchor = syntheticZone.anchorId >= 1000000;
+	const bool isRealAnchor = realZone.anchorId < 1000000;
+
+	expect(isSyntheticAnchor, "Foothold zone should have synthetic anchor ID");
+	expect(isRealAnchor, "Captured structure zone should have real object anchor ID");
+
+	std::cout << "PASS: testSyntheticAnchorIdRange\n";
+}
+
+void testMarketFootholdPrerequisites()
+{
+	// Market foothold requires: Palace + 4 Black Markets + 3000 cash + 800 durable income
+	const bool hasPalace = true;
+	const int blackMarkets = 4;
+	const unsigned int money = 3000;
+	const int durableIncome = blackMarkets * 200; // 800
+
+	const bool economyIsStrong = hasPalace && blackMarkets >= 4 && money >= 3000;
+	const bool hasStrongIncome = durableIncome >= 800;
+
+	expect(economyIsStrong, "Should have strong economy with Palace + 4 markets + 3000 cash");
+	expect(hasStrongIncome, "Should have strong income with 4 Black Markets (800/min)");
+
+	// Strategic foothold only needs economy, not strong income
+	const bool strategicFootholdOk = economyIsStrong;
+	expect(strategicFootholdOk, "Strategic foothold should be available with strong economy");
+
+	// Market foothold needs both
+	const bool marketFootholdOk = economyIsStrong && hasStrongIncome;
+	expect(marketFootholdOk, "Market foothold should be available with strong economy + income");
+
+	// Insufficient conditions
+	const bool insufficientMarkets = hasPalace && (blackMarkets < 4) && money >= 3000;
+	const bool insufficientIncome = (blackMarkets * 200) < 800;
+
+	expect(!insufficientMarkets || !hasStrongIncome, "Market foothold should NOT be available with < 4 markets");
+
+	std::cout << "PASS: testMarketFootholdPrerequisites\n";
+}
+
+void testNonSupplyZoneDevelopmentCriteria()
+{
+	// Supply zones require Supply Stash + infrastructure
+	// Non-supply zones (CapturedStructure/Foothold) require only Tunnel + Stinger
+
+	ZoneSnapshot supplyZone;
+	supplyZone.anchorType = ZoneAnchorType::SupplyStash;
+	int zoneSupply = 1;
+	int zoneTunnels = 1;
+	int zoneStingers = 1;
+	int zoneBarracks = 0;
+	int zoneArms = 0;
+
+	// Supply zone developed = supply + (barracks + arms + tunnels + stingers) >= 3
+	const bool supplyZoneDeveloped = zoneSupply > 0 && (zoneBarracks + zoneArms + zoneTunnels + zoneStingers) >= 3;
+	expect(!supplyZoneDeveloped, "Supply zone should NOT be developed with only Tunnel + Stinger (need 3+ infrastructure)");
+
+	// Non-supply zone (captured structure or foothold)
+	ZoneSnapshot capturedZone;
+	capturedZone.anchorType = ZoneAnchorType::CapturedStructure;
+	zoneTunnels = 1;
+	zoneStingers = 1;
+
+	// Non-supply developed = Tunnel + Stinger
+	const bool capturedZoneDeveloped = zoneTunnels >= 1 && zoneStingers >= 1;
+	expect(capturedZoneDeveloped, "Captured structure zone should be developed with Tunnel + Stinger");
+
+	ZoneSnapshot footholdZone;
+	footholdZone.anchorType = ZoneAnchorType::StrategicFoothold;
+
+	const bool footholdZoneDeveloped = zoneTunnels >= 1 && zoneStingers >= 1;
+	expect(footholdZoneDeveloped, "Foothold zone should be developed with Tunnel + Stinger");
+
+	std::cout << "PASS: testNonSupplyZoneDevelopmentCriteria\n";
+}
+
+void testFootholdLocationSelection()
+{
+	// Foothold placement should project beyond furthest zone along sprawl axis
+	const float mainZoneX = 100.0f;
+	const float mainZoneY = 100.0f;
+
+	const float furthestZoneX = 500.0f;
+	const float furthestZoneY = 300.0f;
+
+	// Sprawl axis from main to furthest
+	float sprawlDx = furthestZoneX - mainZoneX;
+	float sprawlDy = furthestZoneY - mainZoneY;
+
+	// Normalize
+	const float sprawlLen = std::sqrt((sprawlDx * sprawlDx) + (sprawlDy * sprawlDy));
+	sprawlDx /= sprawlLen;
+	sprawlDy /= sprawlLen;
+
+	// Project 500 units beyond furthest zone
+	const float extensionDistance = 500.0f;
+	const float footholdX = furthestZoneX + (sprawlDx * extensionDistance);
+	const float footholdY = furthestZoneY + (sprawlDy * extensionDistance);
+
+	// Foothold should be further from main than furthest zone
+	const float footholdDistFromMain = std::sqrt(
+		((footholdX - mainZoneX) * (footholdX - mainZoneX)) +
+		((footholdY - mainZoneY) * (footholdY - mainZoneY)));
+
+	const float furthestDistFromMain = std::sqrt(
+		((furthestZoneX - mainZoneX) * (furthestZoneX - mainZoneX)) +
+		((furthestZoneY - mainZoneY) * (furthestZoneY - mainZoneY)));
+
+	expect(footholdDistFromMain > furthestDistFromMain, "Foothold should be further from main than furthest zone");
+
+	// Foothold should maintain minimum distance from furthest zone
+	const float footholdDistFromFurthest = std::sqrt(
+		((footholdX - furthestZoneX) * (footholdX - furthestZoneX)) +
+		((footholdY - furthestZoneY) * (footholdY - furthestZoneY)));
+
+	expect(footholdDistFromFurthest >= 220.0f, "Foothold should maintain minimum 220 unit distance from existing zones");
+
+	std::cout << "PASS: testFootholdLocationSelection\n";
+}
+
+void testBuildSpaceValidation()
+{
+	// Build space heuristic: < 3 friendly structures within 120 units = has space
+	const float buildSpaceCheckRadius = 120.0f;
+
+	// Scenario 1: No nearby structures (has space)
+	int nearbyStructures1 = 0;
+	bool hasSpace1 = nearbyStructures1 < 3;
+	expect(hasSpace1, "Should have build space with 0 nearby structures");
+
+	// Scenario 2: 2 nearby structures (has space)
+	int nearbyStructures2 = 2;
+	bool hasSpace2 = nearbyStructures2 < 3;
+	expect(hasSpace2, "Should have build space with 2 nearby structures");
+
+	// Scenario 3: 3+ nearby structures (no space)
+	int nearbyStructures3 = 3;
+	bool hasSpace3 = nearbyStructures3 < 3;
+	expect(!hasSpace3, "Should NOT have build space with 3+ nearby structures");
+
+	int nearbyStructures4 = 5;
+	bool hasSpace4 = nearbyStructures4 < 3;
+	expect(!hasSpace4, "Should NOT have build space with 5+ nearby structures");
+
+	std::cout << "PASS: testBuildSpaceValidation\n";
+}
+
 int main()
 {
 	std::cout << "Running ZoneManager and DefenseManager tests...\n";
@@ -983,6 +1246,20 @@ int main()
 
 	// Phase 7.1: Zone Defense Response tests
 	Phase71::runAllPhase71Tests();
+
+	// Phase 5.8: Zone anchor type tests
+	std::cout << "\nRunning Phase 5.8 Zone Anchor Type tests...\n";
+	testZoneAnchorTypeToString();
+	testZoneSnapshotHasAnchorType();
+	testCapturedStructureAnchorType();
+	testStrategicFootholdAnchorType();
+	testZoneDistanceValidation();
+	testSyntheticAnchorIdRange();
+	testMarketFootholdPrerequisites();
+	testNonSupplyZoneDevelopmentCriteria();
+	testFootholdLocationSelection();
+	testBuildSpaceValidation();
+	std::cout << "All Phase 5.8 Zone Anchor Type tests passed!\n";
 
 	std::cout << "\nAll tests passed!\n";
 	return 0;

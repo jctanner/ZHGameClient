@@ -131,6 +131,11 @@
 			{
 				return false;
 			}
+			// CRITICAL: Check task reservation system to prevent stealing workers from active build tasks
+			if (checkReservation && m_autonomy.taskReservationManager.isObjectReserved(worker->getID()))
+			{
+				return false;
+			}
 			return true;
 		}
 
@@ -153,6 +158,11 @@
 				return false;
 			}
 			if (checkReservation && isWorkerTemporarilyReserved(worker))
+			{
+				return false;
+			}
+			// CRITICAL: Check task reservation system to prevent stealing workers from active build tasks
+			if (checkReservation && m_autonomy.taskReservationManager.isObjectReserved(worker->getID()))
 			{
 				return false;
 			}

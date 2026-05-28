@@ -61,10 +61,14 @@ struct ZoneThreatMemory
 	{}
 };
 
+// Forward declare ZoneAnchorType from Policy.h
+enum class ZoneAnchorType;
+
 /**
  * Zone state snapshot for threat and producer queries.
  *
  * Minimal subset of zone information needed for threat tracking and defense decisions.
+ * Phase 5.8: Extended with anchor_type to support non-supply strategic zones.
  */
 struct ZoneSnapshot
 {
@@ -74,15 +78,9 @@ struct ZoneSnapshot
 	bool isMainBase;               // True if this is the main base zone
 	int barracks;                  // Number of completed barracks in zone
 	int armsDealers;               // Number of completed arms dealers in zone
+	ZoneAnchorType anchorType;     // Type of anchor (main_base, supply_stash, captured_structure, etc.)
 
-	ZoneSnapshot()
-		: anchorId(0)
-		, centerX(0.0f)
-		, centerY(0.0f)
-		, isMainBase(false)
-		, barracks(0)
-		, armsDealers(0)
-	{}
+	ZoneSnapshot();
 };
 
 /**

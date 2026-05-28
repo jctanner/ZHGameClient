@@ -46,6 +46,48 @@
 #include "GameNetwork/GeneralsOnline/json.hpp"
 
 // =============================================================================
+// ZONE ANCHOR TYPES
+// =============================================================================
+
+/**
+ * Zone anchor type classification.
+ *
+ * Defines what kind of structure or strategic position anchors a zone.
+ * Different anchor types influence zone development goals and requirements.
+ *
+ * Phase 5.8 scope (architecture-improvement-plan-codex-2026-05-26.md):
+ * - main_base: Original command center zone
+ * - supply_stash: Traditional supply-based expansion zone
+ * - captured_structure: Zone anchored by captured tech building or static structure
+ * - strategic_foothold: Synthetic foothold in important map control position
+ * - market_foothold: Economy-backed foothold after Palace/Black Markets are online
+ */
+enum class ZoneAnchorType
+{
+	MainBase,             // Command Center zone
+	SupplyStash,          // Supply Stash expansion zone
+	CapturedStructure,    // Captured tech building or static structure
+	StrategicFoothold,    // Synthetic map control foothold
+	MarketFoothold        // Economy-backed foothold
+};
+
+/**
+ * Convert zone anchor type to string for telemetry.
+ */
+inline const char* zoneAnchorTypeToString(ZoneAnchorType type)
+{
+	switch (type)
+	{
+		case ZoneAnchorType::MainBase:            return "main_base";
+		case ZoneAnchorType::SupplyStash:         return "supply_stash";
+		case ZoneAnchorType::CapturedStructure:   return "captured_structure";
+		case ZoneAnchorType::StrategicFoothold:   return "strategic_foothold";
+		case ZoneAnchorType::MarketFoothold:      return "market_foothold";
+		default:                                   return "unknown";
+	}
+}
+
+// =============================================================================
 // PRODUCTION POLICIES
 // =============================================================================
 
@@ -492,6 +534,13 @@ struct AIControlAdapterProductionChoiceInputs
 	bool hasScudLauncherScience; // Whether the player has purchased SCIENCE_ScudLauncher
 	bool hasCaptureUpgrade;      // Whether infantry capture upgrade is complete
 	int captureSources;          // Current count of live units with capture power
+	// Phase 6.3: Capture source capacity tracking
+	int captureSourcesLive;      // Total capture-capable units alive
+	int captureSourcesReserved;  // Capture sources in active capture tasks
+	int captureSourcesAvailable; // live - reserved
+	int capturableTargetsRemaining; // Capturable structures not friendly, not reserved
+	int desiredCaptureSources;   // Target reserve: min(maxConcurrent + 2, targets)
+	int maxCaptureConcurrent;    // Max concurrent capture tasks from automation config
 	int soldiers;                // Current count of Rebel/Worker infantry
 	int rpg;                     // Current count of RPG Troopers
 	int quads;                   // Current count of Quads (fast attack vehicle)
@@ -741,6 +790,59 @@ struct AIControlAdapterZoneExpansionPolicyInputs
  * @return True if zone expansion is urgent and should override markets
  */
 bool AIControlAdapterIsZoneExpansionUrgent(const AIControlAdapterZoneExpansionPolicyInputs& inputs);
+
+/**
+ * Inputs for zone expansion arbitration decision.
+ *
+ * Used by AIControlAdapterChooseZoneExpansionAction to determine if territorial expansion
+ * should be attempted and at what priority relative to market growth/reserve hold.
+ */
+struct AIControlAdapterZoneExpansionArbitrationInputs
+{
+	bool zoneExpansionIsUrgent;           // Large gap between current and desired zones
+	bool allowUrgentExpansionDespiteReserve; // High cash float allows spending above reserve
+	bool remoteZoneNeedsFollowup;         // Existing zone needs development before new expansion
+	int stashZoneCount;                   // Current supply stash zone count
+	int desiredZoneCount;                 // Target zone count for profile
+	int supplyStashesInProgress;          // Supply stashes currently being built
+	bool shouldThrottleExtraStashGrowth;  // Throttle policy active
+	unsigned int money;                   // Current cash
+	unsigned int reserveCash;             // Reserve threshold
+	bool isBalancedSprawl;                // Using balanced sprawl profile
+	bool isBuildAttemptReady;             // Build cooldown/retry allows attempt
+};
+
+/**
+ * Result of zone expansion arbitration.
+ *
+ * Returned by AIControlAdapterChooseZoneExpansionAction with decision on whether to attempt
+ * expansion and the reason for the decision.
+ */
+struct AIControlAdapterZoneExpansionArbitrationResult
+{
+	bool shouldAttemptExpansion;  // True if expansion should be attempted
+	const char* command;          // Command to issue ("Game.BuildSupplyStashSmart" or nullptr)
+	const char* reason;           // Reason for decision (e.g., "urgent_high_cash", "in_progress", "target_reached")
+	bool isUrgent;                // True if this is urgent expansion (high priority)
+	bool allowReserveSpend;       // True if allowed to spend above reserve
+};
+
+/**
+ * Decide whether zone expansion should be attempted and at what priority.
+ *
+ * Phase 5.7: This arbitrates expansion vs. market growth/reserve hold. When expansion is urgent
+ * (large zone gap) and cash float is high, expansion should outrank normal Black Market scaling.
+ *
+ * Returns:
+ * - shouldAttemptExpansion=true, isUrgent=true: urgent expansion, high priority
+ * - shouldAttemptExpansion=true, isUrgent=false: normal expansion
+ * - shouldAttemptExpansion=false with blocker reason: target reached, in progress, throttled, etc.
+ *
+ * @param inputs Current game state and policy flags
+ * @return Expansion arbitration decision with command/reason
+ */
+AIControlAdapterZoneExpansionArbitrationResult AIControlAdapterChooseZoneExpansionAction(
+	const AIControlAdapterZoneExpansionArbitrationInputs& inputs);
 
 /**
  * Decide whether to abort upgrade plan based on failure reason.

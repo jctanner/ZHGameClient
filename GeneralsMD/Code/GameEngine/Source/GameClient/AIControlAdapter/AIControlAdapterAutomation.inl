@@ -136,7 +136,7 @@
 			captureRule.hasExplicitPlayerIndex = false;
 			captureRule.preferIdle = true;
 			captureRule.playerIndex = -1;
-			captureRule.maxConcurrent = 3;
+			captureRule.maxConcurrent = 4;
 			captureRule.cooldownMs = 4000u;
 			captureRule.nextAllowedTick = 0u;
 			captureRule.pendingTargetsUntilTick.clear();
