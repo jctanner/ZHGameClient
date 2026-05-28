@@ -2472,6 +2472,30 @@
 			// lag for a few frames or temporarily report idle.
 			reserveWorkerForBuild(worker, 45000u);
 			reserveBuildLocation(player, location, buildingTemplate);
+
+			// Phase 6.1: Create special task reservation for build lifecycle tracking
+			const unsigned int taskId = m_autonomy.taskReservationManager.createReservation(
+				SpecialTaskType::BuildStructure,
+				workerId,
+				buildingTemplate->getName().str(),
+				location,
+				"smart_build",
+				90000u); // 90 second timeout
+			adapterLog(
+				"special_task_assigned task=%u type=BuildStructure owner=smart_build source=%u template=%s x=%.1f y=%.1f",
+				taskId,
+				static_cast<unsigned int>(workerId),
+				buildingTemplate->getName().str(),
+				location.x,
+				location.y);
+
+			// Telemetry event for task assignment
+			recordAutonomyTelemetryEvent(
+				"construction_task",
+				buildingTemplate->getName().str(),
+				"task_assigned",
+				&location);
+
 			return true;
 		}
 

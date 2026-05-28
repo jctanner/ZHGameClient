@@ -142,9 +142,12 @@ set(GAMEENGINE_SRC
     Include/GameClient/AIControlAdapter/AIControlAdapterDefenseManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterEconomyManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterPolicy.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterCombatTask.h
     Include/GameClient/AIControlAdapter/AIControlAdapterProductionManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterScheduler.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterTaskReservation.h
     Include/GameClient/AIControlAdapter/AIControlAdapterTechManager.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterWMDTarget.h
     Include/GameClient/AIControlAdapter/AIControlAdapterZoneManager.h
     Include/GameClient/AnimateWindowManager.h
     Include/GameClient/CampaignManager.h
@@ -696,10 +699,13 @@ set(GAMEENGINE_SRC
     Source/GameClient/AIControlAdapter/AIControlAdapter.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterDefenseManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterEconomyManager.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterCombatTask.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterPolicy.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterProductionManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterScheduler.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterTaskReservation.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterTechManager.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterWMDTarget.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterZoneManager.cpp
     Source/GameClient/Display.cpp
 #    Source/GameClient/DisplayString.cpp
@@ -1358,4 +1364,26 @@ if(BUILD_TESTING)
     )
 
     add_test(NAME z_gameengine_adapter_distributedplacement_tests COMMAND z_gameengine_adapter_distributedplacement_tests)
+
+    # Phase 6.2: Capture Task Lifecycle Tests
+    add_executable(z_gameengine_adapter_capturetask_tests
+        Tests/AIControlAdapter/AIControlAdapterCaptureTaskLifecycleTests.cpp
+    )
+
+    target_link_libraries(z_gameengine_adapter_capturetask_tests PRIVATE
+        z_gameengine
+    )
+
+    add_test(NAME z_gameengine_adapter_capturetask_tests COMMAND z_gameengine_adapter_capturetask_tests)
+
+    # Phase 9: Combat Task Ownership Tests
+    add_executable(z_gameengine_adapter_combattask_tests
+        Tests/AIControlAdapter/AIControlAdapterCombatTaskTests.cpp
+    )
+
+    target_link_libraries(z_gameengine_adapter_combattask_tests PRIVATE
+        z_gameengine
+    )
+
+    add_test(NAME z_gameengine_adapter_combattask_tests COMMAND z_gameengine_adapter_combattask_tests)
 endif()

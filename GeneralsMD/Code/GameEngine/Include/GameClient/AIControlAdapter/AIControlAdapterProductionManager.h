@@ -122,7 +122,15 @@ struct ProductionManagerInputs
 	// Capabilities
 	bool hasScudLauncherScience;
 	bool hasCaptureUpgrade;
-	int captureSources;
+	int captureSources;  // Legacy: total live capture sources (kept for compatibility)
+
+	// Phase 6.3: Capture source capacity tracking
+	int captureSourcesLive;             // Total capture-capable units alive
+	int captureSourcesReserved;         // Capture sources in active capture tasks
+	int captureSourcesAvailable;        // live - reserved
+	int capturableTargetsRemaining;     // Capturable structures not friendly, not reserved
+	int desiredCaptureSources;          // Target reserve: min(maxConcurrent + 2, targets)
+	int maxCaptureConcurrent;           // Max concurrent capture tasks from automation config
 
 	// Zone info
 	bool hasActiveZone;
@@ -166,6 +174,12 @@ struct ProductionManagerInputs
 		, hasScudLauncherScience(false)
 		, hasCaptureUpgrade(false)
 		, captureSources(0)
+		, captureSourcesLive(0)
+		, captureSourcesReserved(0)
+		, captureSourcesAvailable(0)
+		, capturableTargetsRemaining(0)
+		, desiredCaptureSources(0)
+		, maxCaptureConcurrent(0)
 		, hasActiveZone(false)
 		, activeZoneCenterX(0.0f)
 		, activeZoneCenterY(0.0f)

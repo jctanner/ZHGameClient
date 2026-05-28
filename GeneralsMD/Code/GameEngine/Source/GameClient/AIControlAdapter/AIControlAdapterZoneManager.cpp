@@ -8,9 +8,22 @@
 
 #include "PreRTS.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterZoneManager.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterPolicy.h"
 
 #include <cmath>
 #include <algorithm>
+
+// ZoneSnapshot constructor implementation
+ZoneSnapshot::ZoneSnapshot()
+	: anchorId(0)
+	, centerX(0.0f)
+	, centerY(0.0f)
+	, isMainBase(false)
+	, barracks(0)
+	, armsDealers(0)
+	, anchorType(ZoneAnchorType::SupplyStash)
+{
+}
 
 AIControlAdapterZoneManager::AIControlAdapterZoneManager()
 {

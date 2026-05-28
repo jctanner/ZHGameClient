@@ -1,6 +1,7 @@
 #include "PreRTS.h"
 
 #include "GameClient/AIControlAdapter/AIControlAdapter.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterCombatTask.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterPolicy.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterTechManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterProductionManager.h"
@@ -8,6 +9,8 @@
 #include "GameClient/AIControlAdapter/AIControlAdapterDefenseManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterEconomyManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterScheduler.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterTaskReservation.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterWMDTarget.h"
 
 #include "Common/NameKeyGenerator.h"
 #include "Common/ActionManager.h"
@@ -419,6 +422,30 @@ namespace
 		UnsignedInt lastDefendedZoneAnchor = 0;
 		DWORD lastDefenseResponseTick = 0;
 		int lastDefendedThreatSeverity = 0;
+
+		// Phase 5.8: Pending foothold zone anchors
+		struct PendingFootholdAnchor
+		{
+			UnsignedInt syntheticAnchorId;
+			ZoneAnchorType anchorType;
+			Real targetX;
+			Real targetY;
+			DWORD createdTick;
+			std::string reason;
+			bool buildIssued;
+			std::string buildCommand;
+
+			PendingFootholdAnchor()
+				: syntheticAnchorId(0)
+				, anchorType(ZoneAnchorType::StrategicFoothold)
+				, targetX(0.0f)
+				, targetY(0.0f)
+				, createdTick(0)
+				, buildIssued(false)
+			{}
+		};
+		std::vector<PendingFootholdAnchor> pendingFootholdAnchors;
+		UnsignedInt nextSyntheticAnchorId = 1000000;  // Start at 1M to avoid conflicts with real object IDs
 	};
 
 	#include "AIControlAdapterLog.inl"
@@ -834,8 +861,8 @@ namespace
 			m_automation.captureRule.hasExplicitPlayerIndex = m_autonomy.state.hasExplicitPlayerIndex;
 			m_automation.captureRule.playerIndex = m_autonomy.state.playerIndex;
 			m_automation.captureRule.preferIdle = true;
-			m_automation.captureRule.maxConcurrent = (profile == "tech") ? 3 : 2;
-			m_automation.captureRule.cooldownMs = 5000u;
+			m_automation.captureRule.maxConcurrent = 4;
+			m_automation.captureRule.cooldownMs = 4000u;
 			if (m_automation.captureRule.enabled)
 			{
 				m_automation.captureRule.disabledLogEmitted = false;
@@ -845,7 +872,70 @@ namespace
 				m_automation.captureRule.nextAllowedTick = 0u;
 			}
 
-			m_autonomy.state.lastAppliedTick = ::GetTickCount();
+			// Phase 9: Combat task maintenance
+			const DWORD now = ::GetTickCount();
+			m_autonomy.combatTaskManager.updateTasks(now);
+			m_autonomy.combatTaskManager.pruneExpiredTasks(now);
+
+			// Prune dead units from active combat tasks
+			Player* player = nullptr;
+			if (m_autonomy.state.hasExplicitPlayerIndex)
+			{
+				player = getPlayerByIndex(m_autonomy.state.playerIndex);
+			}
+			else if (ThePlayerList != nullptr)
+			{
+				player = ThePlayerList->getLocalPlayer();
+			}
+
+			if (player != nullptr)
+			{
+				std::vector<CombatTask*> activeTasks = m_autonomy.combatTaskManager.findActiveTasks();
+				for (CombatTask* task : activeTasks)
+				{
+					std::vector<unsigned int> deadUnitIds;
+					for (unsigned int unitId : task->assignedUnitIds)
+					{
+						Object* obj = TheGameLogic != nullptr ? TheGameLogic->findObjectByID((ObjectID)unitId) : nullptr;
+						if (obj == nullptr || obj->isEffectivelyDead())
+						{
+							deadUnitIds.push_back(unitId);
+						}
+					}
+
+					if (!deadUnitIds.empty())
+					{
+						m_autonomy.combatTaskManager.removeDeadUnits(task->taskId, deadUnitIds);
+
+						adapterLog(
+							"combat_task_dead_units task=%u type=%s dead_count=%d remaining=%d min_viable=%d",
+							task->taskId,
+							task->type == CombatTaskType::Attack ? "attack" :
+								task->type == CombatTaskType::Defense ? "defense" : "guard",
+							static_cast<int>(deadUnitIds.size()),
+							static_cast<int>(task->assignedUnitIds.size()),
+							task->minimumViableCount);
+
+						// Fail task if below minimum viable count
+						if (static_cast<int>(task->assignedUnitIds.size()) < task->minimumViableCount)
+						{
+							m_autonomy.combatTaskManager.failTask(
+								task->taskId,
+								"casualties_below_minimum");
+
+							adapterLog(
+								"combat_task_failed task=%u type=%s reason=casualties_below_minimum remaining=%d min=%d",
+								task->taskId,
+								task->type == CombatTaskType::Attack ? "attack" :
+									task->type == CombatTaskType::Defense ? "defense" : "guard",
+								static_cast<int>(task->assignedUnitIds.size()),
+								task->minimumViableCount);
+						}
+					}
+				}
+			}
+
+			m_autonomy.state.lastAppliedTick = now;
 			adapterLog(
 				"autonomy_apply mode=%s profile=%s paused=%d economy_bias=%.2f aggression_bias=%.2f defense_bias=%.2f expansion_bias=%.2f capture_tech=%d target_player=%d",
 				m_autonomy.state.mode.c_str(),
@@ -1129,6 +1219,17 @@ namespace
 				Coord3D center;
 				ObjectID anchorId;
 				bool isMainBase;
+				ZoneAnchorType anchorType;
+
+				AutonomyZone()
+					: anchorId(static_cast<ObjectID>(0))
+					, isMainBase(false)
+					, anchorType(ZoneAnchorType::SupplyStash)
+				{
+					center.x = 0.0f;
+					center.y = 0.0f;
+					center.z = 0.0f;
+				}
 			};
 			std::vector<AutonomyZone> zones;
 			SnapshotBuildContext snapshotBuildContext = { player, &counts, &ownedObjects };
@@ -1323,7 +1424,7 @@ namespace
 				counts.armsDealers + counts.armsDealersInProgress,
 				counts.workers);
 
-			auto pushZone = [&](Object* anchor, bool isMainBase) -> void
+			auto pushZone = [&](Object* anchor, bool isMainBase, ZoneAnchorType anchorType) -> void
 			{
 				if (anchor == nullptr || anchor->getPosition() == nullptr)
 				{
@@ -1333,6 +1434,7 @@ namespace
 				zone.center = *anchor->getPosition();
 				zone.anchorId = anchor->getID();
 				zone.isMainBase = isMainBase;
+				zone.anchorType = anchorType;
 				for (std::size_t i = 0; i < zones.size(); ++i)
 				{
 					const Real dx = zones[i].center.x - zone.center.x;
@@ -1347,7 +1449,7 @@ namespace
 
 			if (Object* cc = findPrimaryCommandCenter(player))
 			{
-				pushZone(cc, true);
+				pushZone(cc, true, ZoneAnchorType::MainBase);
 			}
 			for (std::size_t i = 0; i < ownedObjects.size(); ++i)
 			{
@@ -1356,7 +1458,372 @@ namespace
 				{
 					continue;
 				}
-				pushZone(owned.object, false);
+				pushZone(owned.object, false, ZoneAnchorType::SupplyStash);
+			}
+
+			// Phase 5.8: Add captured structure zone anchors
+			// Scan for owned capturable/tech structures that can become zone anchors
+			if (TheGameLogic != nullptr)
+			{
+				for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
+				{
+					if (obj->isEffectivelyDead())
+					{
+						continue;
+					}
+					// Must be a structure and capturable (tech building or static structure)
+					if (!obj->isKindOf(KINDOF_STRUCTURE) || !obj->isKindOf(KINDOF_CAPTURABLE))
+					{
+						continue;
+					}
+					// Must be owned by the player (captured, not neutral/enemy)
+					if (obj->getControllingPlayer() != player)
+					{
+						continue;
+					}
+					// Must not be under construction
+					if (obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+					{
+						continue;
+					}
+					// Must have position
+					const Coord3D* pos = obj->getPosition();
+					if (pos == nullptr)
+					{
+						continue;
+					}
+
+					// Check if too close to existing zones (using same 220 threshold as pushZone)
+					bool tooClose = false;
+					for (std::size_t i = 0; i < zones.size(); ++i)
+					{
+						const Real dx = zones[i].center.x - pos->x;
+						const Real dy = zones[i].center.y - pos->y;
+						if ((dx * dx) + (dy * dy) < (220.0f * 220.0f))
+						{
+							tooClose = true;
+							break;
+						}
+					}
+					if (tooClose)
+					{
+						continue;
+					}
+
+					// Phase 5.8: Verify nearby build space for Tunnel or Stinger
+					// Check for crowding by nearby friendly structures
+					bool hasBuildSpace = false;
+					const float buildSpaceCheckRadius = 120.0f; // Typical GLA structure footprint + spacing
+					int nearbyFriendlyStructures = 0;
+
+					for (std::size_t i = 0; i < ownedObjects.size(); ++i)
+					{
+						const AutonomyOwnedObjectSnapshot& owned = ownedObjects[i];
+						if (!owned.isStructure)
+						{
+							continue;
+						}
+						const Coord3D* ownedPos = owned.object->getPosition();
+						if (ownedPos == nullptr)
+						{
+							continue;
+						}
+						const float dx = ownedPos->x - pos->x;
+						const float dy = ownedPos->y - pos->y;
+						const float distSq = (dx * dx) + (dy * dy);
+
+						if (distSq < (buildSpaceCheckRadius * buildSpaceCheckRadius))
+						{
+							++nearbyFriendlyStructures;
+						}
+					}
+
+					// Heuristic: if fewer than 3 friendly structures in build radius, assume space is available
+					// This is a rough check since we don't have access to engine placement APIs
+					hasBuildSpace = (nearbyFriendlyStructures < 3);
+
+					if (!hasBuildSpace)
+					{
+						const ThingTemplate* tt = obj->getTemplate();
+						const std::string name = tt != nullptr ? tt->getName().str() : "";
+						adapterLog(
+							"zone_anchor_rejected type=captured_structure object_id=%u x=%.1f y=%.1f template=%s reason=no_build_space nearby_structures=%d",
+							static_cast<unsigned int>(obj->getID()),
+							pos->x,
+							pos->y,
+							name.c_str(),
+							nearbyFriendlyStructures);
+						continue;
+					}
+
+					// Log candidate and add zone
+					const ThingTemplate* tt = obj->getTemplate();
+					const std::string name = tt != nullptr ? tt->getName().str() : "";
+					adapterLog(
+						"zone_anchor_candidate type=captured_structure object_id=%u x=%.1f y=%.1f template=%s reason=owned_capturable has_build_space=1",
+						static_cast<unsigned int>(obj->getID()),
+						pos->x,
+						pos->y,
+						name.c_str());
+
+					AutonomyZone zone = {};
+					zone.center = *pos;
+					zone.anchorId = obj->getID();
+					zone.isMainBase = false;
+					zone.anchorType = ZoneAnchorType::CapturedStructure;
+					zones.push_back(zone);
+
+					adapterLog(
+						"zone_anchor_selected type=captured_structure source_object=%u x=%.1f y=%.1f reason=new_zone",
+						static_cast<unsigned int>(obj->getID()),
+						pos->x,
+						pos->y);
+				}
+			}
+
+			// Phase 5.8: Convert pending foothold anchors to actual zones if structures exist nearby
+			std::vector<UnsignedInt> convertedFootholds;
+			for (std::size_t i = 0; i < m_autonomy.state.pendingFootholdAnchors.size(); ++i)
+			{
+				AutonomyState::PendingFootholdAnchor& pending = m_autonomy.state.pendingFootholdAnchors[i];
+
+				// Check if any friendly Tunnel or Stinger exists near target
+				bool foundNearbyStructure = false;
+				ObjectID nearbyStructureId = static_cast<ObjectID>(0);
+				for (std::size_t j = 0; j < ownedObjects.size(); ++j)
+				{
+					const AutonomyOwnedObjectSnapshot& owned = ownedObjects[j];
+					if (!owned.isStructure || owned.underConstruction)
+					{
+						continue;
+					}
+
+					// Check for Tunnel Network or Stinger Site
+					if (!owned.isTunnel && !owned.isStinger)
+					{
+						continue;
+					}
+
+					// Check distance to pending target
+					const Coord3D* ownedPos = owned.object->getPosition();
+					if (ownedPos == nullptr)
+					{
+						continue;
+					}
+
+					const float dx = ownedPos->x - pending.targetX;
+					const float dy = ownedPos->y - pending.targetY;
+					const float distSq = (dx * dx) + (dy * dy);
+					const float maxDistSq = 250.0f * 250.0f; // Structure within 250 units validates the foothold
+
+					if (distSq < maxDistSq)
+					{
+						foundNearbyStructure = true;
+						nearbyStructureId = owned.object->getID();
+						break;
+					}
+				}
+
+				if (foundNearbyStructure)
+				{
+					// Convert pending foothold to actual zone
+					AutonomyZone zone = {};
+					zone.center.x = pending.targetX;
+					zone.center.y = pending.targetY;
+					zone.center.z = 0.0f;
+					zone.anchorId = static_cast<ObjectID>(pending.syntheticAnchorId);
+					zone.isMainBase = false;
+					zone.anchorType = pending.anchorType;
+					zones.push_back(zone);
+
+					adapterLog(
+						"zone_anchor_selected type=%s source_object=%u x=%.1f y=%.1f reason=foothold_structure_completed nearby_structure=%u",
+						zoneAnchorTypeToString(pending.anchorType),
+						static_cast<unsigned int>(pending.syntheticAnchorId),
+						pending.targetX,
+						pending.targetY,
+						static_cast<unsigned int>(nearbyStructureId));
+
+					convertedFootholds.push_back(static_cast<UnsignedInt>(i));
+				}
+			}
+
+			// Remove converted pending footholds
+			for (std::size_t i = convertedFootholds.size(); i > 0; --i)
+			{
+				const std::size_t idx = static_cast<std::size_t>(convertedFootholds[i - 1]);
+				m_autonomy.state.pendingFootholdAnchors.erase(
+					m_autonomy.state.pendingFootholdAnchors.begin() + idx);
+			}
+
+			// Phase 5.8: Validate captured-structure and foothold zone anchors
+			// Remove zones whose anchors are destroyed, recaptured, or missing
+			std::vector<std::size_t> zonesToRemove;
+			for (std::size_t i = 0; i < zones.size(); ++i)
+			{
+				const AutonomyZone& zone = zones[i];
+
+				// Skip main base and supply stash zones - they're validated elsewhere
+				if (zone.anchorType == ZoneAnchorType::MainBase || zone.anchorType == ZoneAnchorType::SupplyStash)
+				{
+					continue;
+				}
+
+				// Synthetic anchor IDs (>= 1000000) are for foothold zones - validate structure presence
+				const bool isSyntheticAnchor = static_cast<UnsignedInt>(zone.anchorId) >= 1000000u;
+
+				if (zone.anchorType == ZoneAnchorType::CapturedStructure && !isSyntheticAnchor)
+				{
+					// Real object anchor - check if object still exists and is friendly-owned
+					Object* anchorObj = nullptr;
+					if (TheGameLogic != nullptr)
+					{
+						for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
+						{
+							if (obj->getID() == zone.anchorId)
+							{
+								anchorObj = obj;
+								break;
+							}
+						}
+					}
+
+					bool shouldRemove = false;
+					std::string removeReason;
+
+					if (anchorObj == nullptr)
+					{
+						shouldRemove = true;
+						removeReason = "missing";
+					}
+					else if (anchorObj->isEffectivelyDead())
+					{
+						shouldRemove = true;
+						removeReason = "destroyed";
+					}
+					else if (anchorObj->getControllingPlayer() != player)
+					{
+						shouldRemove = true;
+						removeReason = "recaptured";
+					}
+
+					if (shouldRemove)
+					{
+						// Check if there's a nearby friendly support structure to re-anchor to
+						Object* reanchorCandidate = nullptr;
+						for (std::size_t j = 0; j < ownedObjects.size(); ++j)
+						{
+							const AutonomyOwnedObjectSnapshot& owned = ownedObjects[j];
+							if (!owned.isStructure || owned.underConstruction)
+							{
+								continue;
+							}
+
+							// Look for Tunnel, Stinger, or Supply structures
+							if (!owned.isTunnel && !owned.isStinger && !owned.isSupplyStructure)
+							{
+								continue;
+							}
+
+							const Coord3D* ownedPos = owned.object->getPosition();
+							if (ownedPos == nullptr)
+							{
+								continue;
+							}
+
+							const float dx = ownedPos->x - zone.center.x;
+							const float dy = ownedPos->y - zone.center.y;
+							const float distSq = (dx * dx) + (dy * dy);
+							const float reanchorDistSq = 180.0f * 180.0f; // Re-anchor if support structure within 180 units
+
+							if (distSq < reanchorDistSq)
+							{
+								reanchorCandidate = owned.object;
+								break;
+							}
+						}
+
+						if (reanchorCandidate != nullptr)
+						{
+							// Re-anchor zone to nearby support structure
+							zones[i].anchorId = reanchorCandidate->getID();
+							zones[i].anchorType = ZoneAnchorType::SupplyStash; // Re-anchor as supply zone
+
+							adapterLog(
+								"zone_anchor_reanchored old_object=%u new_object=%u type=%s reason=friendly_support_nearby old_reason=%s",
+								static_cast<unsigned int>(zone.anchorId),
+								static_cast<unsigned int>(reanchorCandidate->getID()),
+								zoneAnchorTypeToString(zones[i].anchorType),
+								removeReason.c_str());
+						}
+						else
+						{
+							// No re-anchor candidate - remove zone
+							adapterLog(
+								"zone_anchor_removed type=captured_structure source_object=%u reason=%s x=%.1f y=%.1f",
+								static_cast<unsigned int>(zone.anchorId),
+								removeReason.c_str(),
+								zone.center.x,
+								zone.center.y);
+							zonesToRemove.push_back(i);
+						}
+					}
+				}
+				else if ((zone.anchorType == ZoneAnchorType::StrategicFoothold || zone.anchorType == ZoneAnchorType::MarketFoothold) && isSyntheticAnchor)
+				{
+					// Foothold zones - validate that support structures still exist nearby
+					bool foundSupport = false;
+					for (std::size_t j = 0; j < ownedObjects.size(); ++j)
+					{
+						const AutonomyOwnedObjectSnapshot& owned = ownedObjects[j];
+						if (!owned.isStructure || owned.underConstruction)
+						{
+							continue;
+						}
+
+						// Look for Tunnel or Stinger
+						if (!owned.isTunnel && !owned.isStinger)
+						{
+							continue;
+						}
+
+						const Coord3D* ownedPos = owned.object->getPosition();
+						if (ownedPos == nullptr)
+						{
+							continue;
+						}
+
+						const float dx = ownedPos->x - zone.center.x;
+						const float dy = ownedPos->y - zone.center.y;
+						const float distSq = (dx * dx) + (dy * dy);
+						const float supportDistSq = 250.0f * 250.0f; // Same threshold as foothold conversion
+
+						if (distSq < supportDistSq)
+						{
+							foundSupport = true;
+							break;
+						}
+					}
+
+					if (!foundSupport)
+					{
+						// No supporting structures - remove foothold zone
+						adapterLog(
+							"zone_anchor_removed type=%s source_object=%u reason=no_support_structures x=%.1f y=%.1f",
+							zoneAnchorTypeToString(zone.anchorType),
+							static_cast<unsigned int>(zone.anchorId),
+							zone.center.x,
+							zone.center.y);
+						zonesToRemove.push_back(i);
+					}
+				}
+			}
+
+			// Remove invalidated zones
+			for (std::size_t i = zonesToRemove.size(); i > 0; --i)
+			{
+				const std::size_t idx = zonesToRemove[i - 1];
+				zones.erase(zones.begin() + idx);
 			}
 
 			AutonomyZone activeZone = {};
@@ -1422,6 +1889,76 @@ namespace
 				sprawlAxisDx = 0.0f;
 				sprawlAxisDy = -1.0f;
 			}
+
+			// Helper: Find strategic foothold placement coordinates
+			auto findFootholdPlacement = [&](std::string& outReason) -> Coord3D
+			{
+				Coord3D candidate = {};
+				candidate.x = 0.0f;
+				candidate.y = 0.0f;
+				candidate.z = 0.0f;
+				outReason = "no_candidate";
+
+				// Need at least one existing zone to determine sprawl direction
+				if (zones.empty())
+				{
+					outReason = "no_existing_zones";
+					return candidate;
+				}
+
+				// Find furthest zone along sprawl axis
+				float furthestDot = -1e10f;
+				const AutonomyZone* furthestZone = nullptr;
+				for (std::size_t i = 0; i < zones.size(); ++i)
+				{
+					const float dot = (zones[i].center.x * sprawlAxisDx) + (zones[i].center.y * sprawlAxisDy);
+					if (dot > furthestDot)
+					{
+						furthestDot = dot;
+						furthestZone = &zones[i];
+					}
+				}
+
+				if (furthestZone == nullptr)
+				{
+					outReason = "no_furthest_zone";
+					return candidate;
+				}
+
+				// Project beyond furthest zone along sprawl axis by 500 units
+				const float extensionDistance = 500.0f;
+				candidate.x = furthestZone->center.x + (sprawlAxisDx * extensionDistance);
+				candidate.y = furthestZone->center.y + (sprawlAxisDy * extensionDistance);
+				candidate.z = 0.0f;
+
+				// Validate minimum distance from all existing zones
+				const float minDistSq = 220.0f * 220.0f;
+				for (std::size_t i = 0; i < zones.size(); ++i)
+				{
+					const float dx = candidate.x - zones[i].center.x;
+					const float dy = candidate.y - zones[i].center.y;
+					const float distSq = (dx * dx) + (dy * dy);
+					if (distSq < minDistSq)
+					{
+						outReason = "too_close";
+						candidate.x = 0.0f;
+						candidate.y = 0.0f;
+						return candidate;
+					}
+				}
+
+				// Validate against map boundaries (rough approximation)
+				if (candidate.x < 100.0f || candidate.x > 6000.0f || candidate.y < 100.0f || candidate.y > 6000.0f)
+				{
+					outReason = "out_of_bounds";
+					candidate.x = 0.0f;
+					candidate.y = 0.0f;
+					return candidate;
+				}
+
+				outReason = "valid_foothold_location";
+				return candidate;
+			};
 
 			const UnsignedInt telemetryNowTick = ::GetTickCount();
 			AIControlAdapterMapPoint recentAttackTarget = { 0.0f, 0.0f };
@@ -1964,12 +2501,39 @@ namespace
 					const Int zoneTunnels = zoneCounts[i].tunnels + zoneCounts[i].tunnelsInProgress;
 					const Int zoneStingers = zoneCounts[i].stingers + zoneCounts[i].stingersInProgress;
 					const bool isActiveZone = hasActiveZone && static_cast<Int>(i) == activeZoneIndex;
-					const bool zoneNeedsFollowup =
-						zoneSupply > 0
-						&& (zoneTunnels < 1 || zoneBarracks < 1 || zoneArms < 1 || zoneStingers < 1);
-					const bool zoneDeveloped =
-						zoneSupply > 0
-						&& (zoneBarracks + zoneArms + zoneTunnels + zoneStingers) >= 3;
+
+					// Phase 5.8: Zone development logic must handle non-supply zones
+					// Different anchor types have different development requirements
+					bool zoneNeedsFollowup = false;
+					bool zoneDeveloped = false;
+
+					if (zones[i].anchorType == ZoneAnchorType::SupplyStash || zones[i].anchorType == ZoneAnchorType::MainBase)
+					{
+						// Supply zones: require Supply Stash + infrastructure
+						zoneNeedsFollowup =
+							zoneSupply > 0
+							&& (zoneTunnels < 1 || zoneBarracks < 1 || zoneArms < 1 || zoneStingers < 1);
+						zoneDeveloped =
+							zoneSupply > 0
+							&& (zoneBarracks + zoneArms + zoneTunnels + zoneStingers) >= 3;
+					}
+					else if (zones[i].anchorType == ZoneAnchorType::CapturedStructure)
+					{
+						// Captured structure zones: require Tunnel + defense, Supply Stash optional
+						zoneNeedsFollowup =
+							zoneTunnels < 1 || zoneStingers < 1;
+						zoneDeveloped =
+							zoneTunnels >= 1 && zoneStingers >= 1;
+					}
+					else if (zones[i].anchorType == ZoneAnchorType::StrategicFoothold || zones[i].anchorType == ZoneAnchorType::MarketFoothold)
+					{
+						// Strategic/Market foothold zones: require Tunnel + Stinger minimum
+						// Black Markets are follow-up goals only when safe
+						zoneNeedsFollowup =
+							zoneTunnels < 1 || zoneStingers < 1;
+						zoneDeveloped =
+							zoneTunnels >= 1 && zoneStingers >= 1;
+					}
 					const Real zoneRadius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius);
 					Real zoneFrontDx = sprawlAxisDx;
 					Real zoneFrontDy = sprawlAxisDy;
@@ -1982,6 +2546,7 @@ namespace
 						zoneFrontDy);
 					m_autonomy.state.telemetryZones.push_back(nlohmann::json::object({
 						{"anchor_id", static_cast<UnsignedInt>(zones[i].anchorId)},
+						{"anchor_type", zoneAnchorTypeToString(zones[i].anchorType)},
 						{"is_main_base", zones[i].isMainBase},
 						{"active", isActiveZone},
 						{"center_x", zones[i].center.x},
@@ -2468,6 +3033,37 @@ namespace
 					static_cast<unsigned long>(cashAboveReserve),
 					expansionReason.c_str());
 
+				// Evaluate zone expansion arbitration
+				const auto expansionDecision = AIControlAdapterChooseZoneExpansionAction({
+					zoneExpansionIsUrgent,
+					allowUrgentExpansionDespiteReserve,
+					remoteZoneNeedsFollowup,
+					stashZoneCount,
+					desiredZoneCount,
+					counts.supplyStashesInProgress,
+					shouldThrottleExtraStashGrowth,
+					money,
+					reserveCash,
+					isBalancedSprawl,
+					isBuildAttemptReady("Game.BuildSupplyStashSmart", counts.supplyStashesInProgress)
+				});
+
+				// Log zone expansion request decision
+				adapterLog(
+					"zone_expansion_request command=%s issued=%d reason=%s current=%d developed=%d desired=%d gap=%d "
+					"cash_above_reserve=%lu in_progress=%d throttled=%d is_urgent=%d",
+					expansionDecision.command != nullptr ? expansionDecision.command : "none",
+					expansionDecision.shouldAttemptExpansion ? 1 : 0,
+					expansionDecision.reason,
+					stashZoneCount,
+					developedZoneCount,
+					desiredZoneCount,
+					zoneGap,
+					static_cast<unsigned long>(cashAboveReserve),
+					counts.supplyStashesInProgress,
+					shouldThrottleExtraStashGrowth ? 1 : 0,
+					expansionDecision.isUrgent ? 1 : 0);
+
 				const char* requiredOpeningBuild = AIControlAdapterGetRequiredOpeningBuild({
 					counts.supplyStashes,
 					counts.barracks,
@@ -2699,6 +3295,20 @@ namespace
 					recordBuildAttempt("Game.BuildSupplyStashSmart", issued, reason);
 				}
 				else if (isSprawlStyle
+					&& zoneExpansionIsUrgent
+					&& allowUrgentExpansionDespiteReserve
+					&& stashZoneCount < desiredZoneCount
+					&& counts.supplyStashesInProgress < 1
+					&& isBuildAttemptReady("Game.BuildSupplyStashSmart", counts.supplyStashesInProgress)
+					&& money >= (isBalancedSprawl ? 2200u : 1800u))
+				{
+					// Urgent expansion: large zone gap + high cash float
+					// This can proceed even if remoteZoneNeedsFollowup because zone deficit is critical
+					chosenCommand = "Game.BuildSupplyStashSmart";
+					issued = tryMacroBuildWithFallback("Game.BuildSupplyStashSmart", false, reason);
+					recordBuildAttempt("Game.BuildSupplyStashSmart", issued, reason);
+				}
+				else if (isSprawlStyle
 					&& totalBlackMarkets < 1
 					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", counts.blackMarketsInProgress)
 					&& canAttemptBlackMarketNow)
@@ -2770,6 +3380,18 @@ namespace
 					chosenCommand = "Game.BuildTunnelNetwork";
 					issued = tryMacroBuildWithFallback("Game.BuildTunnelNetwork", true, reason);
 					recordBuildAttempt("Game.BuildTunnelNetwork", issued, reason);
+
+					// Phase 5.8: Log non-supply zone development if active zone is non-supply
+					if (issued && hasActiveZone
+						&& (activeZone.anchorType == ZoneAnchorType::CapturedStructure
+							|| activeZone.anchorType == ZoneAnchorType::StrategicFoothold
+							|| activeZone.anchorType == ZoneAnchorType::MarketFoothold))
+					{
+						adapterLog(
+							"non_supply_zone_development anchor=%u type=%s command=Game.BuildTunnelNetwork issued=1 reason=zone_infrastructure",
+							static_cast<unsigned int>(activeZone.anchorId),
+							zoneAnchorTypeToString(activeZone.anchorType));
+					}
 				}
 				else if (!shouldPreserveReserve
 					&& isSprawlStyle
@@ -2781,6 +3403,18 @@ namespace
 					chosenCommand = "Game.BuildStingerSite";
 					issued = tryMacroBuildWithFallback("Game.BuildStingerSite", true, reason);
 					recordBuildAttempt("Game.BuildStingerSite", issued, reason);
+
+					// Phase 5.8: Log non-supply zone development if active zone is non-supply
+					if (issued && hasActiveZone
+						&& (activeZone.anchorType == ZoneAnchorType::CapturedStructure
+							|| activeZone.anchorType == ZoneAnchorType::StrategicFoothold
+							|| activeZone.anchorType == ZoneAnchorType::MarketFoothold))
+					{
+						adapterLog(
+							"non_supply_zone_development anchor=%u type=%s command=Game.BuildStingerSite issued=1 reason=zone_defense",
+							static_cast<unsigned int>(activeZone.anchorId),
+							zoneAnchorTypeToString(activeZone.anchorType));
+					}
 				}
 				else if ((!shouldPreserveReserve || allowUrgentExpansionDespiteReserve)
 					&& isSprawlStyle
@@ -2794,6 +3428,136 @@ namespace
 					issued = tryMacroBuildWithFallback("Game.BuildSupplyStashSmart", false, reason);
 					recordBuildAttempt("Game.BuildSupplyStashSmart", issued, reason);
 				}
+
+				// Phase 5.8: Non-supply expansion path for strategic/market footholds
+				// When supply expansion is blocked and economy is strong, allow Tunnel/Stinger foothold zones
+				if (!issued
+					&& isSprawlStyle
+					&& stashZoneCount < desiredZoneCount
+					&& allowUrgentExpansionDespiteReserve)
+				{
+					// Check if supply expansion repeatedly failed or is blocked
+					const bool supplyExpansionBlocked =
+						(reason == "no_legal_build_location" || reason == "placement_failed" || reason == "no_worker");
+
+					// Check if Palace and Black Market economy is online
+					const bool economyIsStrong =
+						hasCompletedPalace
+						&& totalBlackMarkets >= 4
+						&& money >= 3000u;
+
+					// Check if durable income is high enough
+					const int durableIncome = totalBlackMarkets * 200; // Rough estimate: 200/min per market
+					const bool hasStrongIncome = durableIncome >= 800;
+
+					if ((supplyExpansionBlocked || hasStrongIncome) && economyIsStrong)
+					{
+						// Determine foothold type: market_foothold if income is strong, strategic_foothold otherwise
+						const ZoneAnchorType footholdType = hasStrongIncome
+							? ZoneAnchorType::MarketFoothold
+							: ZoneAnchorType::StrategicFoothold;
+
+						// Find candidate foothold location
+						std::string footholdReason;
+						const Coord3D footholdCandidate = findFootholdPlacement(footholdReason);
+
+						if (footholdReason == "valid_foothold_location")
+						{
+							// Check if we already have a pending foothold at this location
+							bool duplicateFoothold = false;
+							for (std::size_t i = 0; i < m_autonomy.state.pendingFootholdAnchors.size(); ++i)
+							{
+								const AutonomyState::PendingFootholdAnchor& existing = m_autonomy.state.pendingFootholdAnchors[i];
+								const float dx = existing.targetX - footholdCandidate.x;
+								const float dy = existing.targetY - footholdCandidate.y;
+								const float distSq = (dx * dx) + (dy * dy);
+								if (distSq < (100.0f * 100.0f))
+								{
+									duplicateFoothold = true;
+									break;
+								}
+							}
+
+							if (!duplicateFoothold)
+							{
+								// Prefer Tunnel Network as first foothold structure
+								if (totalTunnels < sprawlTunnelCap
+									&& counts.tunnelsInProgress < 1
+									&& isBuildAttemptReady("Game.BuildTunnelNetwork", counts.tunnelsInProgress)
+									&& money >= 900u)
+								{
+									chosenCommand = "Game.BuildTunnelNetwork";
+									issued = tryMacroBuildWithFallback("Game.BuildTunnelNetwork", true, reason);
+									recordBuildAttempt("Game.BuildTunnelNetwork", issued, reason);
+
+									if (issued)
+									{
+										// Create pending foothold anchor
+										AutonomyState::PendingFootholdAnchor pending;
+										pending.syntheticAnchorId = m_autonomy.state.nextSyntheticAnchorId++;
+										pending.anchorType = footholdType;
+										pending.targetX = footholdCandidate.x;
+										pending.targetY = footholdCandidate.y;
+										pending.createdTick = GetTickCount();
+										pending.buildIssued = true;
+										pending.buildCommand = "Game.BuildTunnelNetwork";
+										pending.reason = "non_supply_expansion";
+										m_autonomy.state.pendingFootholdAnchors.push_back(pending);
+
+										adapterLog(
+											"zone_anchor_candidate type=%s anchor_id=%u x=%.1f y=%.1f reason=non_supply_expansion tunnel_issued=1",
+											zoneAnchorTypeToString(footholdType),
+											static_cast<unsigned int>(pending.syntheticAnchorId),
+											footholdCandidate.x,
+											footholdCandidate.y);
+									}
+									else
+									{
+										adapterLog(
+											"zone_anchor_rejected type=%s reason=tunnel_build_failed detail=%s",
+											zoneAnchorTypeToString(footholdType),
+											reason.c_str());
+									}
+								}
+								else if (!issued)
+								{
+									adapterLog(
+										"zone_anchor_rejected type=%s reason=tunnel_unavailable tunnels=%d cap=%d in_progress=%d money=%lu",
+										zoneAnchorTypeToString(footholdType),
+										totalTunnels,
+										sprawlTunnelCap,
+										counts.tunnelsInProgress,
+										static_cast<unsigned long>(money));
+								}
+							}
+							else
+							{
+								adapterLog(
+									"zone_anchor_rejected type=%s reason=duplicate x=%.1f y=%.1f",
+									zoneAnchorTypeToString(footholdType),
+									footholdCandidate.x,
+									footholdCandidate.y);
+							}
+						}
+						else
+						{
+							// Candidate selection failed
+							adapterLog(
+								"zone_anchor_rejected type=%s reason=%s",
+								zoneAnchorTypeToString(footholdType),
+								footholdReason.c_str());
+						}
+					}
+					else if (!economyIsStrong)
+					{
+						adapterLog(
+							"zone_anchor_rejected type=market_foothold reason=economy_not_ready palace=%d markets=%d money=%lu",
+							hasCompletedPalace ? 1 : 0,
+							totalBlackMarkets,
+							static_cast<unsigned long>(money));
+					}
+				}
+
 				if (!issued && reason.empty())
 				{
 					if (shouldPreserveReserve && !allowUrgentExpansionDespiteReserve)
@@ -2808,9 +3572,21 @@ namespace
 						{
 							reason = "macro_wait_expansion_in_progress";
 						}
+						else if (counts.tunnelsInProgress > 0)
+						{
+							reason = "macro_wait_non_supply_anchor_build_in_progress";
+						}
 						else if (shouldThrottleExtraStashGrowth)
 						{
 							reason = "macro_wait_expansion_throttle";
+						}
+						else if (!hasCompletedPalace || totalBlackMarkets < 4)
+						{
+							reason = "macro_wait_non_supply_anchor_economy";
+						}
+						else if (totalTunnels >= sprawlTunnelCap)
+						{
+							reason = "macro_wait_non_supply_anchor_unavailable";
 						}
 						else
 						{
@@ -3204,30 +3980,58 @@ namespace
 						// Capture defense execution in callback
 						// Update cooldown only on successful issue (not on submit)
 						defenseIntent.executeFunc = [&, threatenedZoneAnchor, threatPositionX, threatPositionY, threatLevel, highestSeverity, defenseResponseCooldownMs](std::string& resultReason) -> bool {
-							nlohmann::json args = nlohmann::json::object();
-							args["target_x"] = threatPositionX;
-							args["target_y"] = threatPositionY;
-							args["zone_anchor"] = threatenedZoneAnchor;
+							nlohmann::json message = nlohmann::json::object();
+							message["type"] = "SessionCommand";
+							message["cmd"] = "Game.AttackMove.DefendZoneSmart";
+							message["args"] = nlohmann::json::object();
+							message["args"]["target_x"] = threatPositionX;
+							message["args"]["target_y"] = threatPositionY;
+							message["args"]["zone_anchor"] = threatenedZoneAnchor;
 
-							const bool issued = tryCommand("auto_defense", "Game.AttackMove.DefendZoneSmart", args, resultReason);
+							// Phase 9.0: Get defense command result with unit IDs
+							AttackCommandResult defenseResult;
+							const bool issued = executeGameAttackMoveDefendZoneSmart(message, resultReason, &defenseResult);
 
-							if (issued)
+							if (issued && !defenseResult.assignedUnitIds.empty())
 							{
 								// Update cooldown state only after successful command issue
 								m_autonomy.state.lastDefenseResponseTick = now + defenseResponseCooldownMs;
 								m_autonomy.state.lastDefendedZoneAnchor = threatenedZoneAnchor;
 								m_autonomy.state.lastDefendedThreatSeverity = highestSeverity;
 
+								// Phase 9.0: Create defense combat task with real unit IDs
+								const unsigned int defenseTaskId = m_autonomy.combatTaskManager.createTask(
+									CombatTaskType::Defense,
+									defenseResult.assignedUnitIds,
+									defenseResult.targetPosition,
+									"zone_defense",
+									"defend_zone_" + std::to_string(threatenedZoneAnchor),
+									90000); // 90 second timeout
+
 								adapterLog(
-									"zone_defense_response zone_anchor=%u threat_level=%s severity=%d target_x=%.1f target_y=%.1f result=issued tick=%u",
+									"zone_defense_response zone_anchor=%u threat_level=%s severity=%d target_x=%.1f target_y=%.1f result=issued units=%d tick=%u",
 									threatenedZoneAnchor,
 									threatLevel.c_str(),
 									highestSeverity,
-									threatPositionX,
-									threatPositionY,
+									defenseResult.targetPosition.x,
+									defenseResult.targetPosition.y,
+									static_cast<int>(defenseResult.assignedUnitIds.size()),
 									now);
+
+								adapterLog(
+									"combat_task_assigned task=%u type=defense units=%d target=(%.1f,%.1f) zone=%u reason=zone_under_attack",
+									defenseTaskId,
+									static_cast<int>(defenseResult.assignedUnitIds.size()),
+									defenseResult.targetPosition.x,
+									defenseResult.targetPosition.y,
+									threatenedZoneAnchor);
+
+								adapterLog(
+									"combat_task_command task=%u type=defense command=Game.AttackMove.DefendZoneSmart issued=1 units=%d",
+									defenseTaskId,
+									static_cast<int>(defenseResult.assignedUnitIds.size()));
 							}
-							else
+							else if (!issued)
 							{
 								adapterLog(
 									"zone_defense_skip zone_anchor=%u threat_level=%s reason=%s tick=%u",
@@ -3235,9 +4039,22 @@ namespace
 									threatLevel.c_str(),
 									resultReason.c_str(),
 									now);
+								adapterLog(
+									"combat_task_skip type=defense reason=%s",
+									resultReason.c_str());
+							}
+							else if (defenseResult.assignedUnitIds.empty())
+							{
+								adapterLog(
+									"zone_defense_skip zone_anchor=%u threat_level=%s reason=no_eligible_units tick=%u",
+									threatenedZoneAnchor,
+									threatLevel.c_str(),
+									now);
+								adapterLog(
+									"combat_task_skip type=defense reason=no_eligible_units");
 							}
 
-							return issued;
+							return issued && !defenseResult.assignedUnitIds.empty();
 						};
 
 						m_autonomy.scheduler.SubmitIntent(defenseIntent);
@@ -3298,6 +4115,75 @@ namespace
 					++captureSources;
 				}
 
+				// Phase 6.3: Capture source capacity tracking
+				int captureSourcesLive = captureSources;
+				int captureSourcesReserved = 0;
+				int capturableTargetsRemaining = 0;
+				int maxCaptureConcurrent = m_automation.captureRule.maxConcurrent;
+
+				// Count reserved capture sources (units in active capture tasks)
+				std::vector<SpecialTaskReservation*> captureTasks = m_autonomy.taskReservationManager.findCaptureTasks();
+				for (const SpecialTaskReservation* task : captureTasks)
+				{
+					if (task == nullptr)
+					{
+						continue;
+					}
+					// Only count active (non-terminal) tasks
+					if (task->state != SpecialTaskState::Complete &&
+						task->state != SpecialTaskState::Failed &&
+						task->state != SpecialTaskState::Expired)
+					{
+						++captureSourcesReserved;
+					}
+				}
+
+				// Count capturable targets remaining (not friendly, not reserved by active task)
+				std::vector<Object*> capturableTargets;
+				collectCapturableTargetsForPlayer(player, capturableTargets);
+				capturableTargetsRemaining = static_cast<int>(capturableTargets.size());
+
+				// Compute available and desired capture sources
+				int captureSourcesAvailable = captureSourcesLive - captureSourcesReserved;
+				if (captureSourcesAvailable < 0)
+				{
+					captureSourcesAvailable = 0;
+				}
+				int desiredCaptureSources = 0;
+				const char* capacityReason = "no_upgrade";
+				if (hasCaptureUpgrade && m_automation.captureRule.enabled && capturableTargetsRemaining > 0)
+				{
+					// desired = min(maxConcurrent + 2, capturable_targets_remaining)
+					const int targetReserve = maxCaptureConcurrent + 2;
+					desiredCaptureSources = targetReserve < capturableTargetsRemaining ? targetReserve : capturableTargetsRemaining;
+					capacityReason = captureSourcesAvailable < desiredCaptureSources ? "production_needed" : "capacity_met";
+				}
+				else if (!hasCaptureUpgrade)
+				{
+					capacityReason = "no_upgrade";
+				}
+				else if (!m_automation.captureRule.enabled)
+				{
+					capacityReason = "automation_disabled";
+				}
+				else
+				{
+					capacityReason = "no_targets";
+				}
+
+				// Phase 6.3: Log capture source policy
+				const bool productionNeeded = captureSourcesAvailable < desiredCaptureSources && desiredCaptureSources > 0;
+				adapterLog(
+					"capture_source_policy live=%d reserved=%d available=%d desired=%d targets=%d max_concurrent=%d production_needed=%d reason=%s",
+					captureSourcesLive,
+					captureSourcesReserved,
+					captureSourcesAvailable,
+					desiredCaptureSources,
+					capturableTargetsRemaining,
+					maxCaptureConcurrent,
+					productionNeeded ? 1 : 0,
+					capacityReason);
+
 				// Build ProductionManager inputs
 				ProductionManagerInputs inputs;
 				inputs.money = money;
@@ -3321,6 +4207,12 @@ namespace
 				inputs.hasScudLauncherScience = hasScudLauncherScience;
 				inputs.hasCaptureUpgrade = hasCaptureUpgrade;
 				inputs.captureSources = captureSources;
+				inputs.captureSourcesLive = captureSourcesLive;
+				inputs.captureSourcesReserved = captureSourcesReserved;
+				inputs.captureSourcesAvailable = captureSourcesAvailable;
+				inputs.capturableTargetsRemaining = capturableTargetsRemaining;
+				inputs.desiredCaptureSources = desiredCaptureSources;
+				inputs.maxCaptureConcurrent = maxCaptureConcurrent;
 				inputs.hasActiveZone = hasActiveZone;
 				if (hasActiveZone)
 				{
@@ -3342,15 +4234,69 @@ namespace
 				// Get production decision from ProductionManager
 				ProductionIntent prodIntent = m_autonomy.productionManager.ChooseProduction(inputs, now);
 
+				// Phase 6.3: Compute armyCap for logging (same logic as later telemetry)
+				const Int armyCapForLog = AIControlAdapterGetEffectiveArmyCap({
+					isBalancedSprawl,
+					money,
+					static_cast<int>(std::floor(m_autonomy.state.smoothedNetCashPerMinute)),
+					counts.barracks,
+					counts.armsDealers,
+					isBalancedSprawl ? 100 : 9999
+				});
+
+				// Phase 6.3: Log capture source production decisions
+				if (prodIntent.shouldProduce && prodIntent.reason == "capture_utility_reserve")
+				{
+					adapterLog(
+						"capture_source_army_cap_override army_count=%d army_cap=%d desired=%d reason=capture_utility_reserve",
+						armyCount,
+						armyCapForLog,
+						desiredCaptureSources);
+					adapterLog(
+						"capture_source_production command=%s reason=%s available=%d desired=%d",
+						prodIntent.commandName.c_str(),
+						prodIntent.reason.c_str(),
+						captureSourcesAvailable,
+						desiredCaptureSources);
+				}
+				else if (prodIntent.shouldProduce && productionNeeded && prodIntent.commandName == "Game.QueueSoldiersAllBarracks")
+				{
+					// Production for capture capacity (not at army cap)
+					adapterLog(
+						"capture_source_production command=%s reason=capture_capacity available=%d desired=%d",
+						prodIntent.commandName.c_str(),
+						captureSourcesAvailable,
+						desiredCaptureSources);
+				}
+
+				// Phase 7.5: Mobile SCUD Launcher Reserve - DISABLED
+				// Mobile SCUD Launcher trucks are too slow/vulnerable for reliable counter-WMD
+				// Use stationary SCUD Storm structures instead (see evaluateDefensiveScudStorm)
+				// Mobile SCUD Launchers return to normal production mix
+				bool scudCounterbatteryOverride = false;
+
+				const int availableScuds = counts.scudLaunchers;
+				const int queuedScuds = counts.queuedScudLaunchers;
+
+				// Log for telemetry tracking
+				adapterLog(
+					"mobile_scud_launcher_policy baseline_reserve_enabled=0 live=%d queued=%d reason=phase_7_5_uses_scud_storm_structures",
+					availableScuds,
+					queuedScuds);
+
+				// Phase 7.5: Mobile SCUD override code removed
+				// Normal production manager handles mobile SCUD Launchers as part of vehicle mix
+				// (scudCounterbatteryOverride remains false)
+
 				// Economy policy enforcement: block or suppress production based on spending mode
-				if (prodIntent.shouldProduce && economyPolicy.combatSpendingMode == CombatSpendingMode::BlockedExceptDefense)
+				if (!scudCounterbatteryOverride && prodIntent.shouldProduce && economyPolicy.combatSpendingMode == CombatSpendingMode::BlockedExceptDefense)
 				{
 					// Block normal combat production during critical income/reserve pressure
 					// (Defense production would still be allowed via DefenseManager intents)
 					prodIntent.shouldProduce = false;
 					prodIntent.reason = "economy_policy_blocked";
 				}
-				else if (prodIntent.shouldProduce && economyPolicy.combatSpendingMode == CombatSpendingMode::Conservative)
+				else if (!scudCounterbatteryOverride && prodIntent.shouldProduce && economyPolicy.combatSpendingMode == CombatSpendingMode::Conservative)
 				{
 					// Conservative mode: reduce production pressure (could skip some production ticks)
 					// For now, allow production but note it in reason if it was reserve-related
@@ -4157,6 +5103,318 @@ namespace
 			result["telemetry_tick"] = static_cast<UnsignedInt>(::GetTickCount());
 			result["zones"] = m_autonomy.state.telemetryZones.is_array() ? m_autonomy.state.telemetryZones : nlohmann::json::array();
 			result["recent_events"] = m_autonomy.state.telemetryEvents.is_array() ? m_autonomy.state.telemetryEvents : nlohmann::json::array();
+
+			// Phase 6.1: Task reservation counts
+			result["task_reservations"] = nlohmann::json::object({
+				{"active_total", m_autonomy.taskReservationManager.getActiveTaskCount()},
+				{"active_build", m_autonomy.taskReservationManager.getBuildTaskCount()},
+				{"active_capture", m_autonomy.taskReservationManager.getCaptureTaskCount()}
+			});
+
+			// Phase 6.2: Active capture task details
+			nlohmann::json captureTasks = nlohmann::json::array();
+			const DWORD now = ::GetTickCount();
+			std::vector<SpecialTaskReservation*> activeCaptureTasks = m_autonomy.taskReservationManager.findCaptureTasks();
+			for (const SpecialTaskReservation* task : activeCaptureTasks)
+			{
+				if (task == nullptr)
+				{
+					continue;
+				}
+				// Skip terminal states
+				if (task->state == SpecialTaskState::Complete ||
+					task->state == SpecialTaskState::Failed ||
+					task->state == SpecialTaskState::Expired)
+				{
+					continue;
+				}
+
+				nlohmann::json taskDetail = nlohmann::json::object();
+				taskDetail["task_id"] = task->taskId;
+				taskDetail["source_id"] = task->sourceObjectId;
+				taskDetail["target_id"] = task->targetObjectId;
+				// Phase 6.2: Expose capture-specific state name "capturing" instead of generic "executing"
+				taskDetail["state"] = task->state == SpecialTaskState::Assigned ? "assigned" :
+					task->state == SpecialTaskState::Moving ? "moving" :
+					task->state == SpecialTaskState::Executing ? "capturing" : "unknown";
+				taskDetail["reason"] = task->reason;
+				taskDetail["owner"] = task->owner;
+				taskDetail["age_ms"] = now - task->createdTick;
+				taskDetail["last_update_age_ms"] = now - task->lastUpdateTick;
+
+				// Look up source object
+				Object* source = TheGameLogic != nullptr ? TheGameLogic->findObjectByID((ObjectID)task->sourceObjectId) : nullptr;
+				if (source != nullptr && !source->isEffectivelyDead())
+				{
+					const Coord3D* sourcePos = source->getPosition();
+					if (sourcePos != nullptr)
+					{
+						taskDetail["source_x"] = sourcePos->x;
+						taskDetail["source_y"] = sourcePos->y;
+					}
+					const ThingTemplate* sourceTemplate = source->getTemplate();
+					if (sourceTemplate != nullptr)
+					{
+						taskDetail["source_template"] = sourceTemplate->getName().str();
+					}
+				}
+
+				// Look up target object
+				Object* target = TheGameLogic != nullptr ? TheGameLogic->findObjectByID((ObjectID)task->targetObjectId) : nullptr;
+				if (target != nullptr && !target->isEffectivelyDead())
+				{
+					const Coord3D* targetPos = target->getPosition();
+					if (targetPos != nullptr)
+					{
+						taskDetail["target_x"] = targetPos->x;
+						taskDetail["target_y"] = targetPos->y;
+					}
+					const ThingTemplate* targetTemplate = target->getTemplate();
+					if (targetTemplate != nullptr)
+					{
+						taskDetail["target_template"] = targetTemplate->getName().str();
+					}
+					Player* targetOwner = target->getControllingPlayer();
+					if (targetOwner != nullptr)
+					{
+						taskDetail["target_owner_index"] = targetOwner->getPlayerIndex();
+					}
+
+					// Calculate distance
+					if (source != nullptr && !source->isEffectivelyDead())
+					{
+						const Coord3D* sourcePos = source->getPosition();
+						const Coord3D* targetPos = target->getPosition();
+						if (sourcePos != nullptr && targetPos != nullptr)
+						{
+							const Real dx = targetPos->x - sourcePos->x;
+							const Real dy = targetPos->y - sourcePos->y;
+							const Real distance = std::sqrt(dx * dx + dy * dy);
+							taskDetail["distance_to_target"] = distance;
+						}
+					}
+				}
+
+				captureTasks.push_back(taskDetail);
+			}
+			result["capture_tasks"] = captureTasks;
+
+			// Phase 6.3: Capture source capacity tracking
+			Player* player = ThePlayerList != nullptr ? ThePlayerList->getLocalPlayer() : nullptr;
+			if (player != nullptr)
+			{
+				// Count live capture sources
+				int captureSourcesLive = 0;
+				std::vector<AutomationOwnedObjectSnapshot> ownedObjects;
+				collectOwnedAutomationObjects(player, ownedObjects);
+				for (std::size_t i = 0; i < ownedObjects.size(); ++i)
+				{
+					const auto& owned = ownedObjects[i];
+					if (owned.object != nullptr && !owned.underConstruction && owned.hasCapturePower)
+					{
+						++captureSourcesLive;
+					}
+				}
+
+				// Count reserved capture sources
+				int captureSourcesReserved = 0;
+				for (const SpecialTaskReservation* task : activeCaptureTasks)
+				{
+					if (task != nullptr &&
+						task->state != SpecialTaskState::Complete &&
+						task->state != SpecialTaskState::Failed &&
+						task->state != SpecialTaskState::Expired)
+					{
+						++captureSourcesReserved;
+					}
+				}
+
+				// Count capturable targets remaining
+				int capturableTargetsRemaining = 0;
+				std::vector<Object*> capturableTargets;
+				collectCapturableTargetsForPlayer(player, capturableTargets);
+				capturableTargetsRemaining = static_cast<int>(capturableTargets.size());
+
+				// Compute available and desired
+				int captureSourcesAvailable = captureSourcesLive - captureSourcesReserved;
+				if (captureSourcesAvailable < 0)
+				{
+					captureSourcesAvailable = 0;
+				}
+
+				const UpgradeTemplate* captureUpgrade = TheUpgradeCenter != nullptr
+					? TheUpgradeCenter->findUpgrade("Upgrade_InfantryCaptureBuilding")
+					: nullptr;
+				const bool hasCaptureUpgrade = captureUpgrade != nullptr && player->hasUpgradeComplete(captureUpgrade);
+				const int maxCaptureConcurrent = m_automation.captureRule.maxConcurrent;
+
+				int desiredCaptureSources = 0;
+				bool productionNeeded = false;
+				if (hasCaptureUpgrade && m_automation.captureRule.enabled && capturableTargetsRemaining > 0)
+				{
+					const int targetReserve = maxCaptureConcurrent + 2;
+					desiredCaptureSources = targetReserve < capturableTargetsRemaining ? targetReserve : capturableTargetsRemaining;
+					productionNeeded = captureSourcesAvailable < desiredCaptureSources;
+				}
+
+				result["capture_sources"] = nlohmann::json::object({
+					{"live", captureSourcesLive},
+					{"reserved", captureSourcesReserved},
+					{"available", captureSourcesAvailable},
+					{"desired", desiredCaptureSources},
+					{"capturable_targets_remaining", capturableTargetsRemaining},
+					{"max_concurrent", maxCaptureConcurrent},
+					{"production_needed", productionNeeded}
+				});
+			}
+
+			// Phase 9: Combat task counts
+			result["combat_tasks"] = nlohmann::json::object({
+				{"active_total", m_autonomy.combatTaskManager.getActiveTaskCount()},
+				{"active_attack", m_autonomy.combatTaskManager.getAttackTaskCount()},
+				{"active_defense", m_autonomy.combatTaskManager.getDefenseTaskCount()},
+				{"active_guard", m_autonomy.combatTaskManager.getGuardTaskCount()},
+				{"total_assigned_units", m_autonomy.combatTaskManager.getTotalAssignedUnitCount()}
+			});
+
+			// Phase 7.4: WMD threat and counterbattery status
+			nlohmann::json wmdTargetsArray = nlohmann::json::array();
+			const std::vector<WMDTarget>& wmdTargets = m_autonomy.wmdTargetTracker.getAllTargets();
+			for (std::size_t i = 0; i < wmdTargets.size(); ++i)
+			{
+				const WMDTarget& target = wmdTargets[i];
+				wmdTargetsArray.push_back(nlohmann::json::object({
+					{"object_id", target.objectId},
+					{"template", target.templateName},
+					{"owner_index", target.ownerIndex},
+					{"x", target.position.x},
+					{"y", target.position.y},
+					{"priority", target.priority == WMDTargetPriority::Critical ? "critical" :
+								 target.priority == WMDTargetPriority::High ? "high" : "medium"},
+					{"visible", target.visible},
+					{"alive", target.alive}
+				}));
+			}
+
+			// Phase 7.4: SCUD reserve telemetry
+			// Count live and queued SCUDs
+			int liveScuds = 0;
+			int queuedScuds = 0;
+			player->iterateObjects([](Object* obj, void* userData)
+			{
+				if (obj == nullptr || obj->isEffectivelyDead() || userData == nullptr)
+				{
+					return;
+				}
+
+				int* scudCount = static_cast<int*>(userData);
+				const ThingTemplate* tt = obj->getTemplate();
+				const std::string name = tt != nullptr ? tt->getName().str() : "";
+
+				if (containsIgnoreCase(name, "scudlauncher"))
+				{
+					++(*scudCount);
+				}
+			}, &liveScuds);
+
+			// For queued SCUDs, use the count already computed in macro counts
+			// (avoids API issues with getProductionUpdate/getPlayer in this context)
+			queuedScuds = 0; // Will be approximated from production telemetry if needed
+
+			// Count SCUD counterbattery tasks
+			int scudCounterbatteryTasks = 0;
+			int scudCounterbatteryUnits = 0;
+			const std::vector<CombatTask*> activeCombatTasks = m_autonomy.combatTaskManager.findActiveTasks();
+			for (std::size_t i = 0; i < activeCombatTasks.size(); ++i)
+			{
+				const CombatTask* task = activeCombatTasks[i];
+				if (task != nullptr && task->owner == "scud_counterbattery")
+				{
+					++scudCounterbatteryTasks;
+					scudCounterbatteryUnits += static_cast<int>(task->assignedUnitIds.size());
+				}
+			}
+
+			// Phase 7.5: Mobile SCUD Launcher trucks are normal vehicle-mix units,
+			// not a standing counter-WMD reserve.
+			const bool hasWMDThreat = m_autonomy.wmdTargetTracker.hasActiveWMDThreat();
+			const int baselineDesired = 0;
+			const int wmdDesired = 0;
+			const int totalDesired = 0;
+			const bool productionNeeded = false;
+
+			// Phase 7.5: Count stationary SCUD Storms separately
+			struct ScudStormTelemetryContext {
+				int liveCount = 0;
+				int readyCount = 0;
+			};
+			ScudStormTelemetryContext scudStormTelCtx;
+
+			player->iterateObjects([](Object* obj, void* userData) -> void {
+				if (obj == nullptr)
+				{
+					return;
+				}
+
+				ScudStormTelemetryContext* ctx = static_cast<ScudStormTelemetryContext*>(userData);
+
+				const ThingTemplate* tt = obj->getTemplate();
+				const std::string name = tt != nullptr ? tt->getName().str() : "";
+
+				if (containsIgnoreCase(name, "scudstorm"))
+				{
+					++(ctx->liveCount);
+					const bool underConstruction = obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION);
+					if (!underConstruction)
+					{
+						++(ctx->readyCount);
+					}
+				}
+			}, &scudStormTelCtx);
+
+			const int scudStormBuildTasks = static_cast<int>(m_autonomy.taskReservationManager.findBuildTasks("ScudStorm").size());
+			const int liveScudStorms = scudStormTelCtx.liveCount;
+			const int readyScudStorms = scudStormTelCtx.readyCount;
+			const int inProgressScudStorms = std::max(liveScudStorms - readyScudStorms, scudStormBuildTasks);
+			const int desiredScudStorms = 10;
+			const int effectiveScudStorms = readyScudStorms + inProgressScudStorms;
+
+			// Phase 7.5: wmd_counter telemetry structure
+			result["wmd_targets"] = wmdTargetsArray;
+			result["wmd_counter"] = nlohmann::json::object({
+				{"enemy_wmd_targets", wmdTargetsArray},
+				{"scud_storms", nlohmann::json::object({
+					{"desired", desiredScudStorms},
+					{"live", liveScudStorms},
+					{"in_progress", inProgressScudStorms},
+					{"ready", readyScudStorms},
+					{"production_needed", effectiveScudStorms < desiredScudStorms},
+					{"reason", hasWMDThreat ? "enemy_wmd_detected" : "defensive_baseline"}
+				})},
+				{"mobile_scud_launchers", nlohmann::json::object({
+					{"live", liveScuds},
+					{"queued", queuedScuds},
+					{"baseline_reserve_enabled", false}
+				})}
+			});
+
+			// Keep old scud_reserve for backward compatibility (deprecated)
+			result["scud_reserve"] = nlohmann::json::object({
+				{"baseline_desired", baselineDesired},
+				{"wmd_desired", wmdDesired},
+				{"desired", totalDesired},
+				{"live", liveScuds},
+				{"queued", queuedScuds},
+				{"assigned_counterbattery", scudCounterbatteryUnits},
+				{"production_needed", productionNeeded},
+				{"reason", hasWMDThreat ? "wmd_threat" : "baseline_reserve"}
+			});
+			result["scud_counterbattery"] = nlohmann::json::object({
+				{"active_tasks", scudCounterbatteryTasks},
+				{"assigned_units", scudCounterbatteryUnits},
+				{"has_active_threat", hasWMDThreat}
+			});
+
 			if (m_autonomy.state.telemetryZones.is_array())
 			{
 				Int currentZoneCount = 0;
@@ -4397,6 +5655,7 @@ namespace
 				Coord3D center;
 				ObjectID anchorId;
 				bool isMainBase;
+				ZoneAnchorType anchorType;
 			};
 			std::vector<AutonomyZone> zones;
 
@@ -4441,6 +5700,7 @@ namespace
 				zone.center = *anchorPos;
 				zone.anchorId = owned.object->getID();
 				zone.isMainBase = false;
+				zone.anchorType = owned.isSupplyStructure ? ZoneAnchorType::SupplyStash : ZoneAnchorType::MainBase;
 				zones.push_back(zone);
 			}
 
@@ -4534,10 +5794,678 @@ namespace
 			evaluateRadarVanAutomationRule();
 			evaluateAttackAutomationRule();
 			evaluateCaptureAutomationRule();
+
+			// Phase 6.1: Update special task reservations and construction lifecycle
+			Player* player = resolveAutonomyPlayer();
+			updateSpecialTaskReservations(player);
+
+			// Phase 9.0: Update combat task lifecycle
+			updateCombatTaskLifecycle(player);
+
+			// Phase 7.4: Update WMD target tracking
+			updateWMDTargets(player);
+
+			// Phase 7.5: Mobile SCUD Launcher counterbattery is deprecated.
+			// Trucks remain in the normal vehicle mix; stationary SCUD Storms handle WMD counterplay.
+
+			// Phase 7.5: Evaluate defensive SCUD Storm construction and firing
+			evaluateDefensiveScudStorm(player);
+
 			drawDebugZones();
 		}
 
-		void collectCombatUnitsForRaid(Player* player, std::vector<Object*>& outUnits) const
+		// Phase 9.0: Update combat task lifecycle - prune dead units, fail/complete/expire tasks
+		void updateCombatTaskLifecycle(Player* player)
+		{
+			if (player == nullptr || TheGameLogic == nullptr)
+			{
+				return;
+			}
+
+			const DWORD now = ::GetTickCount();
+			std::vector<CombatTask*> activeTasks = m_autonomy.combatTaskManager.findActiveTasks();
+
+			for (std::size_t i = 0; i < activeTasks.size(); ++i)
+			{
+				CombatTask* task = activeTasks[i];
+				if (task == nullptr)
+				{
+					continue;
+				}
+
+				// Skip terminal tasks - they'll be pruned after grace period
+				if (task->state == CombatTaskState::Complete ||
+					task->state == CombatTaskState::Failed ||
+					task->state == CombatTaskState::Expired)
+				{
+					continue;
+				}
+
+				// 1. Remove dead units from task
+				std::vector<unsigned int> deadUnits;
+				for (std::size_t j = 0; j < task->assignedUnitIds.size(); ++j)
+				{
+					const unsigned int unitId = task->assignedUnitIds[j];
+					Object* unit = TheGameLogic->findObjectByID(static_cast<ObjectID>(unitId));
+					if (unit == nullptr || unit->isEffectivelyDead())
+					{
+						deadUnits.push_back(unitId);
+					}
+				}
+
+				if (!deadUnits.empty())
+				{
+					m_autonomy.combatTaskManager.removeDeadUnits(task->taskId, deadUnits);
+
+					adapterLog(
+						"combat_task_state task=%u type=%s state=%s units_dead=%d remaining=%d reason=dead_unit_pruning",
+						task->taskId,
+						task->type == CombatTaskType::Attack ? "attack" :
+						task->type == CombatTaskType::Defense ? "defense" : "guard",
+						task->state == CombatTaskState::Assembling ? "assembling" :
+						task->state == CombatTaskState::Moving ? "moving" : "engaging",
+						static_cast<int>(deadUnits.size()),
+						static_cast<int>(task->assignedUnitIds.size()));
+				}
+
+				// 2. Fail task if below minimum viable count
+				const int remaining = static_cast<int>(task->assignedUnitIds.size());
+				if (remaining < task->minimumViableCount)
+				{
+					m_autonomy.combatTaskManager.failTask(task->taskId, "insufficient_units_remaining");
+
+					adapterLog(
+						"combat_task_failed task=%u type=%s reason=insufficient_units_remaining remaining=%d minimum=%d",
+						task->taskId,
+						task->type == CombatTaskType::Attack ? "attack" :
+						task->type == CombatTaskType::Defense ? "defense" : "guard",
+						remaining,
+						task->minimumViableCount);
+
+					adapterLog(
+						"combat_task_release task=%u type=%s units=%d reason=task_failed",
+						task->taskId,
+						task->type == CombatTaskType::Attack ? "attack" :
+						task->type == CombatTaskType::Defense ? "defense" : "guard",
+						remaining);
+					continue;
+				}
+
+				// 3. Expire task if timeout exceeded
+				if (task->timeoutTick > 0 && now >= task->timeoutTick)
+				{
+					const DWORD taskAge = now - task->createdTick;
+					m_autonomy.combatTaskManager.expireTask(task->taskId, "timeout_exceeded");
+
+					adapterLog(
+						"combat_task_failed task=%u type=%s reason=timeout_exceeded age_ms=%u",
+						task->taskId,
+						task->type == CombatTaskType::Attack ? "attack" :
+						task->type == CombatTaskType::Defense ? "defense" : "guard",
+						static_cast<unsigned int>(taskAge));
+
+					adapterLog(
+						"combat_task_release task=%u type=%s units=%d reason=task_expired",
+						task->taskId,
+						task->type == CombatTaskType::Attack ? "attack" :
+						task->type == CombatTaskType::Defense ? "defense" : "guard",
+						remaining);
+					continue;
+				}
+
+				// 4. Phase 7.4: Complete counterbattery tasks if WMD target destroyed
+				if (task->owner == "scud_counterbattery" && task->targetObjectId > 0)
+				{
+					Object* targetObj = TheGameLogic->findObjectByID(static_cast<ObjectID>(task->targetObjectId));
+
+					if (targetObj == nullptr || targetObj->isEffectivelyDead())
+					{
+						m_autonomy.combatTaskManager.completeTask(task->taskId, "target_destroyed");
+
+						adapterLog(
+							"scud_counterbattery_complete task=%u target=%u reason=target_destroyed",
+							task->taskId,
+							task->targetObjectId);
+
+						adapterLog(
+							"combat_task_release task=%u type=scud_counterbattery units=%d reason=target_destroyed",
+							task->taskId,
+							remaining);
+						continue;
+					}
+				}
+			}
+
+			// 5. Prune terminal tasks after grace period (5 seconds)
+			const DWORD terminalGracePeriodMs = 5000;
+			std::vector<unsigned int> tasksToRemove;
+
+			for (std::size_t i = 0; i < activeTasks.size(); ++i)
+			{
+				CombatTask* task = activeTasks[i];
+				if (task == nullptr)
+				{
+					continue;
+				}
+
+				if (task->state == CombatTaskState::Complete ||
+					task->state == CombatTaskState::Failed ||
+					task->state == CombatTaskState::Expired)
+				{
+					const DWORD stateDuration = now - task->lastCommandTick;
+					if (stateDuration > terminalGracePeriodMs)
+					{
+						tasksToRemove.push_back(task->taskId);
+					}
+				}
+			}
+
+			// Remove terminal tasks
+			for (std::size_t i = 0; i < tasksToRemove.size(); ++i)
+			{
+				m_autonomy.combatTaskManager.removeTask(tasksToRemove[i]);
+			}
+		}
+
+		// Phase 7.4: Update WMD target tracking
+		void updateWMDTargets(Player* player)
+		{
+			if (player == nullptr)
+			{
+				return;
+			}
+
+			const DWORD now = ::GetTickCount();
+			m_autonomy.wmdTargetTracker.updateWMDTargets(player, now);
+		}
+
+		// Phase 7.5: Defensive SCUD Storm Construction and Firing
+		void evaluateDefensiveScudStorm(Player* player)
+		{
+			if (player == nullptr || TheGameLogic == nullptr)
+			{
+				return;
+			}
+
+			const DWORD now = ::GetTickCount();
+			static DWORD s_nextScudStormEvaluationTick = 0u;
+			static DWORD s_nextScudStormBuildTick = 0u;
+			static DWORD s_nextScudStormFireTick = 0u;
+			if (AIControlAdapterIsTickInFuture(s_nextScudStormEvaluationTick, now))
+			{
+				return;
+			}
+			s_nextScudStormEvaluationTick = now + 2000u;
+
+			// Check prerequisites
+			const bool hasWMDThreat = m_autonomy.wmdTargetTracker.hasActiveWMDThreat();
+
+			// Count existing SCUD Storms
+			struct ScudStormContext {
+				int liveCount;
+				int readyCount;
+				Object* readyObj;
+			};
+
+			ScudStormContext scudStormCtx = { 0, 0, nullptr };
+
+			player->iterateObjects([](Object* obj, void* userData) {
+				if (obj == nullptr || obj->isEffectivelyDead())
+				{
+					return;
+				}
+
+				ScudStormContext* ctx = static_cast<ScudStormContext*>(userData);
+				const ThingTemplate* tt = obj->getTemplate();
+				const std::string name = tt != nullptr ? tt->getName().str() : "";
+
+				if (containsIgnoreCase(name, "scudstorm"))
+				{
+					++(ctx->liveCount);
+
+					// Check if ready to fire (not on cooldown, construction complete)
+					const bool underConstruction = obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION);
+					if (!underConstruction)
+					{
+						++(ctx->readyCount);
+						if (ctx->readyObj == nullptr)
+						{
+							ctx->readyObj = obj;
+						}
+					}
+				}
+			}, &scudStormCtx);
+
+			const int liveScudStorms = scudStormCtx.liveCount;
+			const int readyScudStorms = scudStormCtx.readyCount;
+			const int scudStormBuildTasks = static_cast<int>(m_autonomy.taskReservationManager.findBuildTasks("ScudStorm").size());
+			const int inProgressScudStorms = std::max(liveScudStorms - readyScudStorms, scudStormBuildTasks);
+			const int effectiveScudStorms = readyScudStorms + inProgressScudStorms;
+			Object* readyScudStorm = scudStormCtx.readyObj;
+
+			// Maintain a standing defensive SCUD Storm baseline. Firing still
+			// requires a known WMD target, but production should not wait for one.
+			const int desiredScudStorms = 10;
+			const std::string reason = hasWMDThreat ? "enemy_wmd_detected" : "defensive_baseline";
+
+			const bool productionNeeded = effectiveScudStorms < desiredScudStorms;
+			bool scudStormPrereqReady = false;
+			if (productionNeeded)
+			{
+				for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
+				{
+					if (obj == nullptr || obj->isEffectivelyDead())
+					{
+						continue;
+					}
+					if (obj->getControllingPlayer() != player || !obj->isKindOf(KINDOF_DOZER))
+					{
+						continue;
+					}
+					if (!inferScudStormTemplateForPlayer(player, obj).empty())
+					{
+						scudStormPrereqReady = true;
+						break;
+					}
+				}
+			}
+
+			adapterLog(
+				"scud_storm_policy desired=%d live=%d in_progress=%d ready=%d production_needed=%d reason=%s",
+				desiredScudStorms,
+				liveScudStorms,
+				inProgressScudStorms,
+				readyScudStorms,
+				productionNeeded ? 1 : 0,
+				reason.c_str());
+
+			// Fire at enemy WMD if ready
+			if (readyScudStorm != nullptr && hasWMDThreat)
+			{
+				const WMDTarget* wmdTarget = m_autonomy.wmdTargetTracker.getHighestPriorityTarget();
+				if (wmdTarget != nullptr && wmdTarget->alive && !AIControlAdapterIsTickInFuture(s_nextScudStormFireTick, now))
+				{
+					s_nextScudStormFireTick = now + 10000u;
+
+					// Issue SCUD Storm fire command
+					char requestIdBuffer[96];
+					sprintf_s(requestIdBuffer, "scud_storm_fire_%08X", static_cast<unsigned int>(wmdTarget->objectId));
+
+					nlohmann::json message = {
+						{"type", "SessionCommand"},
+						{"request_id", std::string(requestIdBuffer)},
+						{"cmd", "Game.ScudStormAtPosition"},
+						{"args", nlohmann::json::object({
+							{"x", wmdTarget->position.x},
+							{"y", wmdTarget->position.y},
+							{"z", wmdTarget->position.z}
+						})}
+					};
+
+					if (m_autonomy.state.hasExplicitPlayerIndex)
+					{
+						message["args"]["player"] = player->getPlayerIndex();
+					}
+
+					std::string fireReason;
+					const bool fired = executeGameScudStormAtPosition(message, fireReason);
+
+					adapterLog(
+						"scud_storm_fire target=%u template=%s issued=%d reason=%s x=%.1f y=%.1f",
+						wmdTarget->objectId,
+						wmdTarget->templateName.c_str(),
+						fired ? 1 : 0,
+						fired ? "fired_at_enemy_wmd" : fireReason.c_str(),
+						wmdTarget->position.x,
+						wmdTarget->position.y);
+				}
+			}
+
+			// Build defensive SCUD Storms up to the standing baseline.
+			if (productionNeeded && AIControlAdapterIsTickInFuture(s_nextScudStormBuildTick, now))
+			{
+				return;
+			}
+			if (productionNeeded && !scudStormPrereqReady)
+			{
+				s_nextScudStormBuildTick = now + 10000u;
+				adapterLog(
+					"scud_storm_build command=Game.BuildScudStormSmart issued=0 desired=%d live=%d in_progress=%d reason=scud_storm_prereq_missing",
+					desiredScudStorms,
+					liveScudStorms,
+					inProgressScudStorms);
+				return;
+			}
+
+			if (productionNeeded)
+			{
+				const Money* wallet = player->getMoney();
+				const UnsignedInt currentMoney = wallet != nullptr ? wallet->countMoney() : 0u;
+				if (currentMoney < 5000u)
+				{
+					s_nextScudStormBuildTick = now + 10000u;
+					adapterLog(
+						"scud_storm_build command=Game.BuildScudStormSmart issued=0 desired=%d live=%d in_progress=%d reason=cash_below_scud_storm_cost money=%u",
+						desiredScudStorms,
+						liveScudStorms,
+						inProgressScudStorms,
+						static_cast<unsigned int>(currentMoney));
+					return;
+				}
+
+				nlohmann::json message = {
+					{"type", "SessionCommand"},
+					{"request_id", std::string("defensive_scud_storm_build")},
+					{"cmd", "Game.BuildScudStormSmart"},
+					{"args", nlohmann::json::object()}
+				};
+				if (m_autonomy.state.hasExplicitPlayerIndex)
+				{
+					message["args"]["player_index"] = m_autonomy.state.playerIndex;
+				}
+
+				std::string buildReason;
+				const bool buildIssued = executeGameBuildScudStormSmart(message, buildReason);
+				s_nextScudStormBuildTick = now + (buildIssued ? 15000u : 10000u);
+
+				adapterLog(
+					"scud_storm_build command=Game.BuildScudStormSmart issued=%d desired=%d live=%d in_progress=%d reason=%s",
+					buildIssued ? 1 : 0,
+					desiredScudStorms,
+					liveScudStorms,
+					inProgressScudStorms,
+					buildIssued ? reason.c_str() : buildReason.c_str());
+			}
+		}
+
+		// Phase 7.4: SCUD Counterbattery Assignment
+		void evaluateScudCounterbattery(Player* player)
+		{
+			if (player == nullptr || TheGameLogic == nullptr)
+			{
+				return;
+			}
+
+			// Only evaluate if WMD threat exists
+			if (!m_autonomy.wmdTargetTracker.hasActiveWMDThreat())
+			{
+				return;
+			}
+
+			const WMDTarget* wmdTarget = m_autonomy.wmdTargetTracker.getHighestPriorityTarget();
+			if (wmdTarget == nullptr || !wmdTarget->alive)
+			{
+				return;
+			}
+
+			// Check if we already have an active counterbattery task for this target
+			const std::vector<CombatTask*> activeTasks = m_autonomy.combatTaskManager.findActiveTasks();
+			for (std::size_t i = 0; i < activeTasks.size(); ++i)
+			{
+				const CombatTask* task = activeTasks[i];
+				if (task != nullptr &&
+					task->owner == "scud_counterbattery" &&
+					task->targetObjectId == wmdTarget->objectId)
+				{
+					// Already have active counterbattery task for this WMD
+					return;
+				}
+			}
+
+			// Collect available SCUD Launchers
+			std::vector<Object*> availableScuds;
+			player->iterateObjects([](Object* obj, void* userData)
+			{
+				if (obj == nullptr || obj->isEffectivelyDead() || userData == nullptr)
+				{
+					return;
+				}
+
+				std::vector<Object*>* scuds = static_cast<std::vector<Object*>*>(userData);
+				const ThingTemplate* tt = obj->getTemplate();
+				const std::string name = tt != nullptr ? tt->getName().str() : "";
+
+				if (containsIgnoreCase(name, "scudlauncher"))
+				{
+					scuds->push_back(obj);
+				}
+			}, &availableScuds);
+
+			// Phase 7.4: Direct strike fallback if no SCUDs available
+			if (availableScuds.empty())
+			{
+				adapterLog(
+					"scud_counterbattery_skip target=%u reason=no_scuds_available",
+					wmdTarget->objectId);
+
+				// Check if we should send a bounded direct strike instead
+				evaluateWMDDirectStrikeFallback(player, wmdTarget);
+				return;
+			}
+
+			// Filter out SCUDs already reserved for other combat tasks
+			std::vector<unsigned int> scudIds;
+			for (std::size_t i = 0; i < availableScuds.size(); ++i)
+			{
+				const unsigned int scudId = availableScuds[i]->getID();
+				if (!m_autonomy.combatTaskManager.isUnitReserved(scudId))
+				{
+					scudIds.push_back(scudId);
+				}
+			}
+
+			if (scudIds.empty())
+			{
+				adapterLog(
+					"scud_counterbattery_skip target=%u reason=all_scuds_reserved",
+					wmdTarget->objectId);
+				return;
+			}
+
+			// Create counterbattery combat task
+			const unsigned int taskId = m_autonomy.combatTaskManager.createTask(
+				CombatTaskType::Attack,
+				scudIds,
+				wmdTarget->position,
+				"scud_counterbattery",
+				"wmd_threat_" + std::to_string(wmdTarget->objectId),
+				180000); // 3 minute timeout
+
+			// Update task to track target object ID
+			CombatTask* task = m_autonomy.combatTaskManager.findTask(taskId);
+			if (task != nullptr)
+			{
+				task->targetObjectId = wmdTarget->objectId;
+			}
+
+			adapterLog(
+				"scud_counterbattery_assigned task=%u target=%u scuds=%d x=%.1f y=%.1f",
+				taskId,
+				wmdTarget->objectId,
+				static_cast<int>(scudIds.size()),
+				wmdTarget->position.x,
+				wmdTarget->position.y);
+
+			// Issue attack-move command to WMD target
+			std::vector<ObjectID> scudObjectIds;
+			scudObjectIds.reserve(scudIds.size());
+			for (std::size_t i = 0; i < scudIds.size(); ++i)
+			{
+				scudObjectIds.push_back(static_cast<ObjectID>(scudIds[i]));
+			}
+
+			std::string commandReason;
+			const bool commandIssued = executeScopedSelectionCommand(player, scudObjectIds, commandReason, [&]() -> bool
+			{
+				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_ATTACKMOVETO);
+				if (msg == nullptr)
+				{
+					commandReason = "message_stream_not_ready";
+					return false;
+				}
+				msg->appendLocationArgument(wmdTarget->position);
+				return true;
+			});
+
+			if (commandIssued)
+			{
+				m_autonomy.combatTaskManager.updateTaskState(taskId, CombatTaskState::Moving, "attack_command_issued");
+				m_autonomy.combatTaskManager.updateTaskCommand(taskId, ::GetTickCount());
+
+				adapterLog(
+					"scud_counterbattery_command task=%u target=%u issued=1 scuds=%d reason=attack_move_to_wmd",
+					taskId,
+					wmdTarget->objectId,
+					static_cast<int>(scudIds.size()));
+			}
+			else
+			{
+				m_autonomy.combatTaskManager.failTask(taskId, "command_failed");
+
+				adapterLog(
+					"scud_counterbattery_failed task=%u target=%u reason=command_failed detail=%s",
+					taskId,
+					wmdTarget->objectId,
+					commandReason.c_str());
+			}
+		}
+
+		// Phase 7.4: WMD Direct Strike Fallback
+		void evaluateWMDDirectStrikeFallback(Player* player, const WMDTarget* wmdTarget)
+		{
+			if (player == nullptr || wmdTarget == nullptr)
+			{
+				return;
+			}
+
+			// Check if we already have an active direct strike task for this WMD
+			const std::vector<CombatTask*> activeTasks = m_autonomy.combatTaskManager.findActiveTasks();
+			for (std::size_t i = 0; i < activeTasks.size(); ++i)
+			{
+				const CombatTask* task = activeTasks[i];
+				if (task != nullptr &&
+					task->owner == "wmd_direct_strike" &&
+					task->targetObjectId == wmdTarget->objectId)
+				{
+					adapterLog(
+						"wmd_direct_strike_skip target=%u reason=active_task_exists",
+						wmdTarget->objectId);
+					return;
+				}
+			}
+
+			// Collect available combat units (bounded strike group, not entire army)
+			std::vector<Object*> combatUnits;
+			collectCombatUnitsForRaid(player, combatUnits);
+
+			if (combatUnits.empty())
+			{
+				adapterLog(
+					"wmd_direct_strike_skip target=%u reason=no_combat_units",
+					wmdTarget->objectId);
+				return;
+			}
+
+			// Bounded strike: use up to 15 units (not the entire army)
+			const std::size_t maxStrikeUnits = 15;
+			const std::size_t strikeCount = std::min(maxStrikeUnits, combatUnits.size());
+
+			if (strikeCount < 5)
+			{
+				adapterLog(
+					"wmd_direct_strike_skip target=%u reason=insufficient_units available=%d min=5",
+					wmdTarget->objectId,
+					static_cast<int>(strikeCount));
+				return;
+			}
+
+			// Select units for direct strike
+			std::vector<unsigned int> strikeUnitIds;
+			for (std::size_t i = 0; i < strikeCount; ++i)
+			{
+				if (!m_autonomy.combatTaskManager.isUnitReserved(combatUnits[i]->getID()))
+				{
+					strikeUnitIds.push_back(combatUnits[i]->getID());
+				}
+			}
+
+			if (strikeUnitIds.size() < 5)
+			{
+				adapterLog(
+					"wmd_direct_strike_skip target=%u reason=too_many_reserved available_unreserved=%d min=5",
+					wmdTarget->objectId,
+					static_cast<int>(strikeUnitIds.size()));
+				return;
+			}
+
+			// Create direct strike combat task
+			const unsigned int taskId = m_autonomy.combatTaskManager.createTask(
+				CombatTaskType::Attack,
+				strikeUnitIds,
+				wmdTarget->position,
+				"wmd_direct_strike",
+				"wmd_direct_" + std::to_string(wmdTarget->objectId),
+				180000); // 3 minute timeout
+
+			CombatTask* task = m_autonomy.combatTaskManager.findTask(taskId);
+			if (task != nullptr)
+			{
+				task->targetObjectId = wmdTarget->objectId;
+			}
+
+			adapterLog(
+				"wmd_direct_strike_assigned task=%u target=%u units=%d x=%.1f y=%.1f reason=no_scuds_available",
+				taskId,
+				wmdTarget->objectId,
+				static_cast<int>(strikeUnitIds.size()),
+				wmdTarget->position.x,
+				wmdTarget->position.y);
+
+			// Issue attack-move command to WMD target
+			std::vector<ObjectID> strikeObjectIds;
+			strikeObjectIds.reserve(strikeUnitIds.size());
+			for (std::size_t i = 0; i < strikeUnitIds.size(); ++i)
+			{
+				strikeObjectIds.push_back(static_cast<ObjectID>(strikeUnitIds[i]));
+			}
+
+			std::string commandReason;
+			const bool commandIssued = executeScopedSelectionCommand(player, strikeObjectIds, commandReason, [&]() -> bool
+			{
+				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_ATTACKMOVETO);
+				if (msg == nullptr)
+				{
+					commandReason = "message_stream_not_ready";
+					return false;
+				}
+				msg->appendLocationArgument(wmdTarget->position);
+				return true;
+			});
+
+			if (commandIssued)
+			{
+				m_autonomy.combatTaskManager.updateTaskState(taskId, CombatTaskState::Moving, "attack_command_issued");
+				m_autonomy.combatTaskManager.updateTaskCommand(taskId, ::GetTickCount());
+
+				adapterLog(
+					"wmd_direct_strike_command task=%u target=%u issued=1 units=%d reason=attack_move_to_wmd",
+					taskId,
+					wmdTarget->objectId,
+					static_cast<int>(strikeUnitIds.size()));
+			}
+			else
+			{
+				m_autonomy.combatTaskManager.failTask(taskId, "command_failed");
+
+				adapterLog(
+					"wmd_direct_strike_failed task=%u target=%u reason=command_failed detail=%s",
+					taskId,
+					wmdTarget->objectId,
+					commandReason.c_str());
+			}
+		}
+
+		void collectCombatUnitsForRaid(Player* player, std::vector<Object*>& outUnits)
 		{
 			outUnits.clear();
 			if (player == nullptr)
@@ -4563,6 +6491,49 @@ namespace
 				}
 				if (owned.underConstruction || !owned.hasAI || owned.object == nullptr)
 				{
+					continue;
+				}
+				// Phase 6.2: Exclude units reserved for capture tasks
+				if (owned.object != nullptr && m_autonomy.taskReservationManager.isObjectReserved(owned.object->getID()))
+				{
+					const SpecialTaskReservation* reservation = findActiveCaptureReservationForObject(owned.object->getID());
+					if (reservation != nullptr)
+					{
+						adapterLog(
+							"combat_skip_reserved_capture unit=%u task=%u owner=%s target=%u",
+							owned.object->getID(),
+							reservation->taskId,
+							reservation->owner.c_str(),
+							reservation->targetObjectId);
+					}
+					continue;
+				}
+				// Phase 9.0: Exclude units reserved for combat tasks
+				if (owned.object != nullptr && m_autonomy.combatTaskManager.isUnitReserved(owned.object->getID()))
+				{
+					// Find which task owns this unit for logging
+					const std::vector<CombatTask*> activeTasks = m_autonomy.combatTaskManager.findActiveTasks();
+					for (std::size_t j = 0; j < activeTasks.size(); ++j)
+					{
+						const CombatTask* task = activeTasks[j];
+						if (task != nullptr)
+						{
+							for (std::size_t k = 0; k < task->assignedUnitIds.size(); ++k)
+							{
+								if (task->assignedUnitIds[k] == owned.object->getID())
+								{
+									adapterLog(
+										"combat_skip_reserved_combat unit=%u task=%u owner=%s type=%s",
+										owned.object->getID(),
+										task->taskId,
+										task->owner.c_str(),
+										task->type == CombatTaskType::Attack ? "attack" :
+										task->type == CombatTaskType::Defense ? "defense" : "guard");
+									break;
+								}
+							}
+						}
+					}
 					continue;
 				}
 				outUnits.push_back(owned.object);
@@ -4591,6 +6562,11 @@ namespace
 				{
 					continue;
 				}
+				// Phase 6.2: Skip targets that already have active capture tasks
+				if (isCaptureTargetReserved(obj))
+				{
+					continue;
+				}
 				outTargets.push_back(obj);
 			}
 		}
@@ -4606,20 +6582,81 @@ namespace
 			{
 				return false;
 			}
-			const auto it = m_automation.captureRule.pendingSourcesUntilTick.find(sourceId);
-			if (it == m_automation.captureRule.pendingSourcesUntilTick.end())
+			// Phase 6.2: Check durable task reservations instead of simple pending map
+			return m_autonomy.taskReservationManager.isObjectReserved(static_cast<unsigned int>(sourceId));
+		}
+
+		/**
+		 * Phase 6.2: Find active capture reservation for object (source or target).
+		 * Returns task details if object is reserved, nullptr otherwise.
+		 * Used for skip logging to show which task is protecting the unit.
+		 */
+		const SpecialTaskReservation* findActiveCaptureReservationForObject(unsigned int objectId) const
+		{
+			std::vector<SpecialTaskReservation*> captureTasks =
+				const_cast<AIControlAdapterTaskReservationManager&>(m_autonomy.taskReservationManager).findCaptureTasks();
+			for (const SpecialTaskReservation* task : captureTasks)
+			{
+				if (task == nullptr)
+				{
+					continue;
+				}
+				// Skip terminal states
+				if (task->state == SpecialTaskState::Complete ||
+					task->state == SpecialTaskState::Failed ||
+					task->state == SpecialTaskState::Expired)
+				{
+					continue;
+				}
+				// Check if object is source or target
+				if (task->sourceObjectId == objectId || task->targetObjectId == objectId)
+				{
+					return task;
+				}
+			}
+			return nullptr;
+		}
+
+		bool isCaptureTargetReserved(const Object* target) const
+		{
+			if (target == nullptr)
 			{
 				return false;
 			}
-			const DWORD now = ::GetTickCount();
-			return AIControlAdapterIsTickInFuture(it->second, now);
+			const Int targetId = static_cast<Int>(target->getID());
+			if (targetId <= 0)
+			{
+				return false;
+			}
+			// Phase 6.2: Check if target is already reserved by an active capture task
+			std::vector<SpecialTaskReservation*> captureTasks =
+				const_cast<AIControlAdapterTaskReservationManager&>(m_autonomy.taskReservationManager).findCaptureTasks();
+			for (const SpecialTaskReservation* task : captureTasks)
+			{
+				if (task != nullptr &&
+					task->state != SpecialTaskState::Complete &&
+					task->state != SpecialTaskState::Failed &&
+					task->state != SpecialTaskState::Expired &&
+					task->targetObjectId == static_cast<unsigned int>(targetId))
+				{
+					return true;
+				}
+			}
+			return false;
 		}
 
 		void collectCaptureSourcesForPlayer(Player* player, bool preferIdle, std::vector<Object*>& outSources)
 		{
 			outSources.clear();
-			adapterLog("collect_capture_sources_enter player=%d prefer_idle=%d",
-				player != nullptr ? player->getPlayerIndex() : -1, preferIdle ? 1 : 0);
+			static DWORD s_nextCaptureSourceSearchLogTick = 0u;
+			const DWORD now = ::GetTickCount();
+			const bool shouldLogSearch = AIControlAdapterHasTickElapsed(s_nextCaptureSourceSearchLogTick, now);
+			if (shouldLogSearch)
+			{
+				s_nextCaptureSourceSearchLogTick = now + 5000u;
+				adapterLog("collect_capture_sources_enter player=%d prefer_idle=%d",
+					player != nullptr ? player->getPlayerIndex() : -1, preferIdle ? 1 : 0);
+			}
 			if (player == nullptr || TheActionManager == nullptr)
 			{
 				adapterLog("collect_capture_sources_early_return player_null=%d action_mgr_null=%d",
@@ -4668,9 +6705,12 @@ namespace
 				outSources.push_back(owned.object);
 			}
 
-			adapterLog("capture_source_search player=%d prefer_idle=%d units=%d with_power=%d reserved=%d under_construction=%d not_idle=%d found=%d",
-				player->getPlayerIndex(), preferIdle ? 1 : 0, ctx.unitCount, ctx.withCapturePower,
-				ctx.reserved, ctx.underConstruction, ctx.notIdle, (int)outSources.size());
+			if (shouldLogSearch)
+			{
+				adapterLog("capture_source_search player=%d prefer_idle=%d units=%d with_power=%d reserved=%d under_construction=%d not_idle=%d found=%d",
+					player->getPlayerIndex(), preferIdle ? 1 : 0, ctx.unitCount, ctx.withCapturePower,
+					ctx.reserved, ctx.underConstruction, ctx.notIdle, (int)outSources.size());
+			}
 
 			if (!outSources.empty() || !preferIdle)
 			{
@@ -4701,8 +6741,11 @@ namespace
 				outSources.push_back(owned.object);
 			}
 
-			adapterLog("capture_source_search_retry player=%d reserved=%d under_construction=%d found=%d",
-				player->getPlayerIndex(), ctx.reserved, ctx.underConstruction, (int)outSources.size());
+			if (shouldLogSearch)
+			{
+				adapterLog("capture_source_search_retry player=%d reserved=%d under_construction=%d found=%d",
+					player->getPlayerIndex(), ctx.reserved, ctx.underConstruction, (int)outSources.size());
+			}
 		}
 
 		void pruneCaptureAutomationPendingTargets()
@@ -4977,6 +7020,19 @@ namespace
 				args["player_index"] = m_automation.attackRule.playerIndex;
 			}
 
+			// Phase 9.0: Check for equivalent active attack task before issuing
+			std::vector<Object*> tempCombatUnits;
+			collectCombatUnitsForRaid(player, tempCombatUnits);
+			if (static_cast<Int>(tempCombatUnits.size()) < m_automation.attackRule.minUnits)
+			{
+				// Not enough units after filtering combat-reserved
+				adapterLog(
+					"combat_task_skip type=attack reason=no_eligible_units available=%d min=%d",
+					static_cast<int>(tempCombatUnits.size()),
+					m_automation.attackRule.minUnits);
+				return;
+			}
+
 			char requestIdBuffer[64];
 			sprintf_s(
 				requestIdBuffer,
@@ -4991,9 +7047,68 @@ namespace
 				{"args", args}
 			};
 
+			// Phase 9.0: Get attack command result with unit IDs and target
 			std::string reason;
-			const bool ok = executeGameAttackMoveRaidSmart(message, reason);
+			AttackCommandResult attackResult;
+			const bool ok = executeGameAttackMoveRaidSmart(message, reason, &attackResult);
 			m_automation.attackRule.nextAllowedTick = now + m_automation.attackRule.cooldownMs;
+
+			// Phase 9.0: Create attack combat task with real unit IDs and target
+			if (ok && !attackResult.assignedUnitIds.empty())
+			{
+				// Check for equivalent active attack near same target
+				if (m_autonomy.combatTaskManager.hasEquivalentActiveTask(
+					CombatTaskType::Attack,
+					attackResult.targetPosition,
+					500.0f))
+				{
+					adapterLog(
+						"combat_task_skip type=attack reason=equivalent_active target=(%.1f,%.1f)",
+						attackResult.targetPosition.x,
+						attackResult.targetPosition.y);
+
+					// Release units since we didn't create task for them
+					// They'll be available for next cycle
+					adapterLog(
+						"automation_attack_rule request_id=%s player=%d combat_units=%d ok=0 reason=equivalent_active_task",
+						requestIdBuffer,
+						player->getPlayerIndex(),
+						static_cast<int>(attackResult.assignedUnitIds.size()));
+					return;
+				}
+
+				const unsigned int attackTaskId = m_autonomy.combatTaskManager.createTask(
+					CombatTaskType::Attack,
+					attackResult.assignedUnitIds,
+					attackResult.targetPosition,
+					"autonomous_attack",
+					"auto_attack_rule",
+					120000); // 2 minute timeout
+
+				adapterLog(
+					"combat_task_assigned task=%u type=attack units=%d target=(%.1f,%.1f) reason=attack_automation",
+					attackTaskId,
+					static_cast<int>(attackResult.assignedUnitIds.size()),
+					attackResult.targetPosition.x,
+					attackResult.targetPosition.y);
+
+				adapterLog(
+					"combat_task_command task=%u type=attack command=Game.AttackMove.RaidSmart issued=1 units=%d",
+					attackTaskId,
+					static_cast<int>(attackResult.assignedUnitIds.size()));
+			}
+			else if (!ok)
+			{
+				adapterLog(
+					"combat_task_skip type=attack reason=%s",
+					reason.c_str());
+			}
+			else if (attackResult.assignedUnitIds.empty())
+			{
+				adapterLog(
+					"combat_task_skip type=attack reason=no_eligible_units");
+			}
+
 			adapterLog(
 				"automation_attack_rule request_id=%s player=%d combat_units=%d min_units=%d group_size=%d distance=%.1f ok=%d reason=%s",
 				requestIdBuffer,
@@ -5168,6 +7283,368 @@ namespace
 				ok ? "" : reason.c_str());
 		}
 
+		/**
+		 * Phase 6.2: Update capture task lifecycle.
+		 *
+		 * Checks active capture tasks and updates their state based on:
+		 * - Source unit validity (dead/alive)
+		 * - Target building validity (dead/capturable/friendly)
+		 * - Task timeout/expiration
+		 *
+		 * Marks tasks as Complete when target becomes friendly.
+		 * Marks tasks as Failed when source/target dies or becomes invalid.
+		 * Marks tasks as Expired when timeout elapses without progress.
+		 */
+		void updateCaptureTaskLifecycle()
+		{
+			const DWORD now = ::GetTickCount();
+			std::vector<SpecialTaskReservation*> captureTasks = m_autonomy.taskReservationManager.findCaptureTasks();
+
+			for (SpecialTaskReservation* task : captureTasks)
+			{
+				if (task == nullptr)
+				{
+					continue;
+				}
+
+				// Skip terminal states
+				if (task->state == SpecialTaskState::Complete ||
+					task->state == SpecialTaskState::Failed ||
+					task->state == SpecialTaskState::Expired)
+				{
+					continue;
+				}
+
+				// Find player to check ownership
+				Player* player = nullptr;
+				if (m_automation.captureRule.hasExplicitPlayerIndex)
+				{
+					player = getPlayerByIndex(m_automation.captureRule.playerIndex);
+				}
+				else if (ThePlayerList != nullptr)
+				{
+					player = ThePlayerList->getLocalPlayer();
+				}
+
+				if (player == nullptr)
+				{
+					continue;
+				}
+
+				// Check source unit validity
+				Object* source = TheGameLogic != nullptr ? TheGameLogic->findObjectByID((ObjectID)task->sourceObjectId) : nullptr;
+				if (source == nullptr || source->isEffectivelyDead())
+				{
+					m_autonomy.taskReservationManager.failTask(task->taskId, "source_dead");
+					adapterLog(
+						"capture_task_failed task=%u reason=source_dead source=%u target=%u",
+						task->taskId,
+						task->sourceObjectId,
+						task->targetObjectId);
+					adapterLog(
+						"capture_unit_released task=%u source=%u reason=source_dead",
+						task->taskId,
+						task->sourceObjectId);
+					recordAutonomyTelemetryEvent("capture_task_failed", "source_dead", "source_unit_dead");
+					continue;
+				}
+
+				// Check target building validity
+				Object* target = nullptr;
+				if (TheGameLogic != nullptr)
+				{
+					for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
+					{
+						if (obj->getID() == task->targetObjectId)
+						{
+							target = obj;
+							break;
+						}
+					}
+				}
+
+				if (target == nullptr || target->isEffectivelyDead())
+				{
+					m_autonomy.taskReservationManager.failTask(task->taskId, "target_dead");
+					adapterLog(
+						"capture_task_failed task=%u reason=target_dead source=%u target=%u",
+						task->taskId,
+						task->sourceObjectId,
+						task->targetObjectId);
+					adapterLog(
+						"capture_unit_released task=%u source=%u reason=target_dead",
+						task->taskId,
+						task->sourceObjectId);
+					recordAutonomyTelemetryEvent("capture_task_failed", "target_dead", "target_building_dead");
+					continue;
+				}
+
+				// Check if target has been captured (is now friendly)
+				if (target->getControllingPlayer() == player)
+				{
+					m_autonomy.taskReservationManager.completeTask(task->taskId, "target_captured");
+					adapterLog(
+						"capture_task_complete task=%u target=%u owner=%d",
+						task->taskId,
+						task->targetObjectId,
+						player->getPlayerIndex());
+					adapterLog(
+						"capture_unit_released task=%u source=%u reason=target_captured",
+						task->taskId,
+						task->sourceObjectId);
+					const Coord3D* targetPos = target->getPosition();
+					recordAutonomyTelemetryEvent("capture_task_complete", "target_captured", "building_captured", targetPos);
+					continue;
+				}
+
+				// Check if target is no longer capturable
+				if (!target->isKindOf(KINDOF_CAPTURABLE))
+				{
+					m_autonomy.taskReservationManager.failTask(task->taskId, "target_not_capturable");
+					adapterLog(
+						"capture_task_failed task=%u reason=target_not_capturable source=%u target=%u",
+						task->taskId,
+						task->sourceObjectId,
+						task->targetObjectId);
+					adapterLog(
+						"capture_unit_released task=%u source=%u reason=target_not_capturable",
+						task->taskId,
+						task->sourceObjectId);
+					recordAutonomyTelemetryEvent("capture_task_failed", "target_not_capturable", "building_not_capturable");
+					continue;
+				}
+
+				// Phase 6.2: Track progress to avoid premature timeout
+				const Coord3D* sourcePos = source->getPosition();
+				const Coord3D* targetPos = target->getPosition();
+				Real currentDistance = -1.0f;
+				bool nearTarget = false;
+				if (sourcePos != nullptr && targetPos != nullptr)
+				{
+					const Real dx = targetPos->x - sourcePos->x;
+					const Real dy = targetPos->y - sourcePos->y;
+					currentDistance = std::sqrt(dx * dx + dy * dy);
+					const Real NEAR_TARGET_THRESHOLD = 200.0f;
+					const Real PROGRESS_THRESHOLD = 10.0f; // Consider 10 units improvement as progress
+					const DWORD PROGRESS_TIMEOUT_EXTENSION_MS = 60000u;
+					nearTarget = (currentDistance <= NEAR_TARGET_THRESHOLD);
+
+					// Update distance tracking
+					if (task->lastDistance < 0.0f)
+					{
+						// First measurement
+						task->lastDistance = currentDistance;
+						task->bestDistance = currentDistance;
+						task->lastUpdateTick = now;
+
+						task->timeoutTick = now + PROGRESS_TIMEOUT_EXTENSION_MS;
+
+						adapterLog(
+							"capture_task_progress task=%u source=%u target=%u distance=%.1f best_distance=%.1f reason=first_measurement",
+							task->taskId,
+							task->sourceObjectId,
+							task->targetObjectId,
+							currentDistance,
+							currentDistance);
+
+						if (nearTarget && task->state != SpecialTaskState::Executing)
+						{
+							m_autonomy.taskReservationManager.updateTaskState(
+								task->taskId, SpecialTaskState::Executing, "near_target");
+							adapterLog(
+								"capture_task_state task=%u state=Capturing reason=near_target source=%u target=%u distance=%.1f",
+								task->taskId,
+								task->sourceObjectId,
+								task->targetObjectId,
+								currentDistance);
+						}
+					}
+					else
+					{
+						// Check for progress
+						const bool madeProgress = (currentDistance < task->bestDistance - PROGRESS_THRESHOLD);
+						const bool enteringNearTarget =
+							nearTarget &&
+							task->state != SpecialTaskState::Executing;
+
+						if (madeProgress || enteringNearTarget)
+						{
+							// Update progress
+							task->lastUpdateTick = now;
+							if (currentDistance < task->bestDistance)
+							{
+								task->bestDistance = currentDistance;
+							}
+
+							// Phase 6.2 FIX: Extend timeout when progress is made
+							task->timeoutTick = now + PROGRESS_TIMEOUT_EXTENSION_MS;
+
+							const char* progressReason = madeProgress ? "distance_decreased" : "near_target";
+							adapterLog(
+								"capture_task_progress task=%u source=%u target=%u distance=%.1f best_distance=%.1f reason=%s",
+								task->taskId,
+								task->sourceObjectId,
+								task->targetObjectId,
+								currentDistance,
+								task->bestDistance,
+								progressReason);
+
+							// Phase 6.2 FIX: State transitions based on distance
+							if (nearTarget && task->state != SpecialTaskState::Executing)
+							{
+								m_autonomy.taskReservationManager.updateTaskState(
+									task->taskId, SpecialTaskState::Executing, "near_target");
+								adapterLog(
+									"capture_task_state task=%u state=Capturing reason=near_target source=%u target=%u distance=%.1f",
+									task->taskId,
+									task->sourceObjectId,
+									task->targetObjectId,
+									currentDistance);
+							}
+							else if (madeProgress && task->state == SpecialTaskState::Assigned)
+							{
+								m_autonomy.taskReservationManager.updateTaskState(
+									task->taskId, SpecialTaskState::Moving, "distance_progress");
+								adapterLog(
+									"capture_task_state task=%u state=Moving reason=distance_progress source=%u target=%u distance=%.1f",
+									task->taskId,
+									task->sourceObjectId,
+									task->targetObjectId,
+									currentDistance);
+							}
+						}
+
+						task->lastDistance = currentDistance;
+					}
+				}
+
+				// Phase 6.2: Reissue capture command for stalled but recoverable tasks
+				const DWORD REISSUE_THRESHOLD_MS = 10000u; // 10 seconds without progress
+				const DWORD NEAR_TARGET_REISSUE_MS = 8000u; // Re-click capture quickly once adjacent
+				const DWORD STALE_THRESHOLD_MS = 30000u; // 30 seconds without progress while far
+				const DWORD NEAR_TARGET_STALE_MS = 45000u; // 45 seconds adjacent without ownership flip
+				const Real FAR_FROM_TARGET = 200.0f;
+				const DWORD staleDuration = now - task->lastUpdateTick;
+				const DWORD timeSinceLastCommand = now - task->lastCommandTick;
+				const int MAX_REISSUES = 4;
+
+				auto reissueCaptureCommand = [&](const char* recoveryReason) -> bool
+				{
+					nlohmann::json args = nlohmann::json::object({
+						{"target_object_id", static_cast<Int>(task->targetObjectId)},
+						{"source_object_id", static_cast<Int>(task->sourceObjectId)}
+					});
+					if (m_automation.captureRule.hasExplicitPlayerIndex)
+					{
+						args["player_index"] = m_automation.captureRule.playerIndex;
+					}
+
+					char requestIdBuffer[64];
+					sprintf_s(
+						requestIdBuffer,
+						"reissue_capture_%08X_%08X",
+						task->taskId,
+						static_cast<unsigned int>(now));
+
+					nlohmann::json message = {
+						{"type", "SessionCommand"},
+						{"request_id", std::string(requestIdBuffer)},
+						{"cmd", "Game.CaptureBuilding"},
+						{"args", args}
+					};
+
+					std::string reason;
+					const bool ok = executeGameCaptureBuilding(message, reason);
+					if (ok)
+					{
+						task->lastCommandTick = now;
+						task->commandReissueCount++;
+						task->timeoutTick = now + 60000u;
+						adapterLog(
+							"capture_task_command task=%u source=%u target=%u action=reissue reason=%s reissue_count=%d distance=%.1f stale_ms=%u",
+							task->taskId,
+							task->sourceObjectId,
+							task->targetObjectId,
+							recoveryReason,
+							task->commandReissueCount,
+							currentDistance,
+							staleDuration);
+						recordAutonomyTelemetryEvent("capture_task_command", "reissue", recoveryReason, targetPos);
+					}
+					else
+					{
+						adapterLog(
+							"capture_task_command task=%u source=%u target=%u action=reissue_failed reason=%s recovery_reason=%s",
+							task->taskId,
+							task->sourceObjectId,
+							task->targetObjectId,
+							reason.c_str(),
+							recoveryReason);
+					}
+					return ok;
+				};
+
+				// Try to reissue command if stalled but not yet expired
+				const bool canReissue =
+					task->commandReissueCount < MAX_REISSUES &&
+					currentDistance > 0.0f;
+				const bool shouldReissueNearTarget =
+					nearTarget &&
+					timeSinceLastCommand > NEAR_TARGET_REISSUE_MS &&
+					staleDuration > NEAR_TARGET_REISSUE_MS;
+				const bool shouldReissueFarTarget =
+					!nearTarget &&
+					staleDuration > REISSUE_THRESHOLD_MS &&
+					staleDuration < STALE_THRESHOLD_MS &&
+					timeSinceLastCommand > REISSUE_THRESHOLD_MS;
+				if (canReissue && shouldReissueNearTarget)
+				{
+					reissueCaptureCommand("near_target_retry");
+				}
+				else if (canReissue && shouldReissueFarTarget)
+				{
+					reissueCaptureCommand("stalled_recovery");
+				}
+
+				// Check for timeout with progress awareness
+				// Expire only if truly stalled:
+				// - No progress for the stale threshold AND
+				// - Overall timeout reached
+				const bool isFarStalled = (staleDuration > STALE_THRESHOLD_MS) &&
+					(currentDistance < 0.0f || currentDistance > FAR_FROM_TARGET);
+				const bool isNearStalled = nearTarget &&
+					(staleDuration > NEAR_TARGET_STALE_MS) &&
+					(task->commandReissueCount >= MAX_REISSUES);
+				const bool overallTimeout = (now >= task->timeoutTick);
+
+				if ((isFarStalled || isNearStalled) && overallTimeout)
+				{
+					const char* expireReason = isNearStalled ? "near_target_no_capture" : "stalled_no_progress";
+					m_autonomy.taskReservationManager.expireTask(task->taskId, expireReason);
+					adapterLog(
+						"capture_task_expired task=%u reason=%s source=%u target=%u age_ms=%u stale_ms=%u distance=%.1f reissues=%d",
+						task->taskId,
+						expireReason,
+						task->sourceObjectId,
+						task->targetObjectId,
+						now - task->createdTick,
+						staleDuration,
+						currentDistance,
+						task->commandReissueCount);
+					adapterLog(
+						"capture_unit_released task=%u source=%u reason=%s",
+						task->taskId,
+						task->sourceObjectId,
+						expireReason);
+					recordAutonomyTelemetryEvent("capture_task_expired", expireReason, "no_movement");
+					continue;
+				}
+			}
+
+			// Prune expired tasks after a grace period
+			m_autonomy.taskReservationManager.pruneExpiredTasks(now);
+		}
+
 		void evaluateCaptureAutomationRule()
 		{
 			if (!m_automation.captureRule.enabled)
@@ -5183,7 +7660,8 @@ namespace
 			m_automation.captureRule.disabledLogEmitted = false;
 
 			const DWORD now = ::GetTickCount();
-			pruneCaptureAutomationPendingTargets();
+			// Phase 6.2: Update capture task lifecycle instead of pruning simple pending maps
+			updateCaptureTaskLifecycle();
 			if (AIControlAdapterIsTickInFuture(m_automation.captureRule.nextAllowedTick, now))
 			{
 				return;
@@ -5246,7 +7724,8 @@ namespace
 				return;
 			}
 
-			const Int pendingCount = static_cast<Int>(m_automation.captureRule.pendingTargetsUntilTick.size());
+			// Phase 6.2: Check active capture task count instead of simple pending map
+			const Int pendingCount = m_autonomy.taskReservationManager.getCaptureTaskCount();
 			if (pendingCount >= m_automation.captureRule.maxConcurrent)
 			{
 				adapterLog("automation_capture_rule_skip player=%d reason=pending_limit pending=%d max_concurrent=%d", player->getPlayerIndex(), pendingCount, m_automation.captureRule.maxConcurrent);
@@ -5403,15 +7882,28 @@ namespace
 					"ok",
 					target->getPosition());
 
+				// Phase 6.2: Create durable capture task reservation
+				const unsigned int sourceId = static_cast<unsigned int>(selectedSource->getID());
+				const unsigned int targetIdUnsigned = static_cast<unsigned int>(targetId);
+				const unsigned int taskId = m_autonomy.taskReservationManager.createCaptureReservation(
+					sourceId,
+					targetIdUnsigned,
+					"capture_automation",
+					60000); // 60 second timeout
+
+				const Coord3D* targetPos = target->getPosition();
+				adapterLog(
+					"capture_task_assigned task=%u source=%u target=%u x=%.1f y=%.1f reason=capture_automation",
+					taskId,
+					sourceId,
+					targetIdUnsigned,
+					targetPos != nullptr ? targetPos->x : 0.0f,
+					targetPos != nullptr ? targetPos->y : 0.0f);
+
+				recordAutonomyTelemetryEvent("capture_task_assigned", "capture_automation", "capturable_building", targetPos);
+
 				++sentOk;
 				--assignmentsRemaining;
-				const DWORD pendingUntil = now + std::max<DWORD>(m_automation.captureRule.cooldownMs, 20000u);
-				const Int sourceId = static_cast<Int>(selectedSource->getID());
-				m_automation.captureRule.pendingTargetsUntilTick[targetId] = pendingUntil;
-				if (sourceId > 0)
-				{
-					m_automation.captureRule.pendingSourcesUntilTick[sourceId] = pendingUntil;
-				}
 				sources.erase(std::remove(sources.begin(), sources.end(), selectedSource), sources.end());
 			}
 
@@ -5689,7 +8181,7 @@ namespace
 			rule.preferIdle = true;
 			rule.disabledLogEmitted = false;
 			rule.playerIndex = -1;
-			rule.maxConcurrent = 3;
+			rule.maxConcurrent = 4;
 			rule.cooldownMs = 4000u;
 			rule.nextAllowedTick = 0u;
 			rule.pendingTargetsUntilTick.clear();
@@ -5951,7 +8443,7 @@ namespace
 			m_automation.captureRule.preferIdle = true;
 			m_automation.captureRule.disabledLogEmitted = false;
 			m_automation.captureRule.playerIndex = -1;
-			m_automation.captureRule.maxConcurrent = 3;
+			m_automation.captureRule.maxConcurrent = 4;
 			m_automation.captureRule.cooldownMs = 4000u;
 			m_automation.captureRule.nextAllowedTick = 0u;
 			m_automation.captureRule.pendingTargetsUntilTick.clear();
@@ -6212,6 +8704,8 @@ namespace
 		}
 
 		#include "AIControlAdapterGameActions.inl"
+
+		#include "AIControlAdapterTaskLifecycle.inl"
 
 		#include "AIControlAdapterGameQuery.inl"
 

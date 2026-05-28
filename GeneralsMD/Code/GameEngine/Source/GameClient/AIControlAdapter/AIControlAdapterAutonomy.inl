@@ -207,4 +207,7 @@
 		AIControlAdapterDefenseManager defenseManager;  ///< Defense request management
 		AIControlAdapterEconomyManager economyManager;  ///< Economy recovery and income scaling management
 		AIControlAdapterScheduler scheduler;  ///< Intent scheduler for action arbitration
+		AIControlAdapterTaskReservationManager taskReservationManager;  ///< Special operations task reservations (Phase 6.1)
+		AIControlAdapterCombatTaskManager combatTaskManager;  ///< Combat task ownership and unit reservations (Phase 9)
+		AIControlAdapterWMDTargetTracker wmdTargetTracker;  ///< WMD threat detection and tracking (Phase 7.4)
 	};

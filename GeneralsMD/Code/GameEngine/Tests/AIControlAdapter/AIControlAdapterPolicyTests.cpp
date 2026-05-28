@@ -625,6 +625,7 @@ int main()
 				false,
 				false,
 				0,
+				0, 0, 0, 0, 0, 0,  // Phase 6.3 fields
 				4,
 				0,
 				0,
@@ -653,6 +654,7 @@ int main()
 				false,
 				false,
 				0,
+				0, 0, 0, 0, 0, 0,  // Phase 6.3 fields
 				6,
 				0,
 				0,
@@ -680,6 +682,7 @@ int main()
 				false,
 				false,
 				0,
+				0, 0, 0, 0, 0, 0,  // Phase 6.3 fields
 				12,
 				8,
 				0,
@@ -707,14 +710,20 @@ int main()
 				false,
 				false,
 				0,
-				6,
-				0,
-				4,
-			0,
-			0,
-			0,
-			10,
-			100
+				0,  // captureSourcesLive
+				0,  // captureSourcesReserved
+				0,  // captureSourcesAvailable
+				0,  // capturableTargetsRemaining
+				0,  // desiredCaptureSources
+				0,  // maxCaptureConcurrent
+				6,  // soldiers
+				0,  // rpg
+				4,  // quads
+			0,  // scorpions
+			0,  // scudLaunchers
+			0,  // radarVans
+			10, // armyCount
+			100 // armyCap
 		});
 		expect(std::string(result.command) == "Game.QueueScorpionsAllWarFactories", "balanced sprawl should keep building toward the vehicle target instead of immediately falling back to barracks-first spam");
 	}
@@ -734,6 +743,7 @@ int main()
 				false,
 				false,
 				0,
+				0, 0, 0, 0, 0, 0,  // Phase 6.3 fields
 				0,
 				0,
 				0,
@@ -761,6 +771,7 @@ int main()
 				true,
 				false,
 				0,
+				0, 0, 0, 0, 0, 0,  // Phase 6.3 fields
 				20,
 				20,
 				10,
@@ -789,6 +800,7 @@ int main()
 				true,
 				false,
 				0,
+				0, 0, 0, 0, 0, 0,  // Phase 6.3 fields
 				28,
 				10,
 				24,
@@ -817,6 +829,7 @@ int main()
 				true,
 				false,
 				0,
+				0, 0, 0, 0, 0, 0,  // Phase 6.3 fields
 				12,
 				10,
 				18,
@@ -844,6 +857,12 @@ int main()
 				true,
 				true,
 				0,
+				0,     // captureSourcesLive
+				0,     // captureSourcesReserved
+				0,     // captureSourcesAvailable
+				5,     // capturableTargetsRemaining
+				3,     // desiredCaptureSources
+				2,     // maxCaptureConcurrent
 				12,
 				10,
 				18,
@@ -853,7 +872,7 @@ int main()
 				57,
 				100
 			});
-			expect(std::string(result.command) == "Game.QueueSoldiersAllBarracks", "balanced sprawl should force Rebel-capable infantry when capture upgrade is ready but no capture sources exist");
+			expect(std::string(result.command) == "Game.QueueSoldiersAllBarracks", "balanced sprawl should force Rebel-capable infantry when capture upgrade is ready and capture sources are needed");
 		}
 
 		{
@@ -871,6 +890,7 @@ int main()
 				true,
 				false,
 				0,
+				0, 0, 0, 0, 0, 0,  // Phase 6.3 fields
 				12,
 				10,
 				4,
@@ -898,6 +918,7 @@ int main()
 				false,
 				false,
 				0,
+				0, 0, 0, 0, 0, 0,  // Phase 6.3 fields
 				12,
 				10,
 				4,
@@ -1109,6 +1130,553 @@ int main()
 			5    // zoneGapThreshold
 		};
 		expect(AIControlAdapterIsZoneExpansionUrgent(inputs), "zone expansion should be urgent even at high absolute counts when gap >= threshold");
+	}
+
+	// =========================================================================
+	// Phase 5.7: Zone Expansion Arbitration Tests
+	// =========================================================================
+
+	{
+		// Live scenario: 7 current / 30 desired with high cash above reserve
+		// Should select urgent expansion despite reserve protection
+		const AIControlAdapterZoneExpansionArbitrationInputs inputs = {
+			true,   // zoneExpansionIsUrgent (gap=23 >= threshold 5)
+			true,   // allowUrgentExpansionDespiteReserve (cash_float >= 10000)
+			false,  // remoteZoneNeedsFollowup
+			7,      // stashZoneCount
+			30,     // desiredZoneCount
+			0,      // supplyStashesInProgress
+			false,  // shouldThrottleExtraStashGrowth
+			120000, // money (high cash)
+			10000,  // reserveCash
+			true,   // isBalancedSprawl
+			true    // isBuildAttemptReady
+		};
+		const auto result = AIControlAdapterChooseZoneExpansionAction(inputs);
+		expect(result.shouldAttemptExpansion, "Phase 5.7: urgent expansion should be selected with large gap and high cash");
+		expect(result.isUrgent, "Phase 5.7: expansion should be marked as urgent");
+		expect(result.allowReserveSpend, "Phase 5.7: urgent expansion should allow reserve spend");
+		expect(std::strcmp(result.reason, "urgent_high_cash") == 0, "Phase 5.7: reason should be urgent_high_cash");
+	}
+
+	{
+		// Urgent expansion even with remoteZoneNeedsFollowup
+		// When zone deficit is critical, we can start new zone despite followup needed
+		const AIControlAdapterZoneExpansionArbitrationInputs inputs = {
+			true,   // zoneExpansionIsUrgent
+			true,   // allowUrgentExpansionDespiteReserve
+			true,   // remoteZoneNeedsFollowup (true but urgent overrides)
+			5,      // stashZoneCount
+			25,     // desiredZoneCount
+			0,      // supplyStashesInProgress
+			false,  // shouldThrottleExtraStashGrowth
+			150000, // money
+			10000,  // reserveCash
+			true,   // isBalancedSprawl
+			true    // isBuildAttemptReady
+		};
+		const auto result = AIControlAdapterChooseZoneExpansionAction(inputs);
+		expect(result.shouldAttemptExpansion, "Phase 5.7: urgent expansion should override followup requirement");
+		expect(result.isUrgent, "Phase 5.7: should be urgent with large gap");
+	}
+
+	{
+		// Normal expansion (not urgent): small gap below threshold
+		// Should respect normal rules (followup must be complete)
+		const AIControlAdapterZoneExpansionArbitrationInputs inputs = {
+			false,  // zoneExpansionIsUrgent (gap=3 < threshold 5)
+			false,  // allowUrgentExpansionDespiteReserve
+			false,  // remoteZoneNeedsFollowup
+			12,     // stashZoneCount
+			15,     // desiredZoneCount
+			0,      // supplyStashesInProgress
+			false,  // shouldThrottleExtraStashGrowth
+			50000,  // money
+			10000,  // reserveCash
+			true,   // isBalancedSprawl
+			true    // isBuildAttemptReady
+		};
+		const auto result = AIControlAdapterChooseZoneExpansionAction(inputs);
+		expect(result.shouldAttemptExpansion, "Phase 5.7: normal expansion should proceed when followup complete");
+		expect(!result.isUrgent, "Phase 5.7: should not be urgent with small gap");
+		expect(std::strcmp(result.reason, "normal") == 0, "Phase 5.7: reason should be normal");
+	}
+
+	{
+		// Normal expansion blocked by followup needed
+		const AIControlAdapterZoneExpansionArbitrationInputs inputs = {
+			false,  // zoneExpansionIsUrgent
+			false,  // allowUrgentExpansionDespiteReserve
+			true,   // remoteZoneNeedsFollowup (blocks normal expansion)
+			12,     // stashZoneCount
+			15,     // desiredZoneCount
+			0,      // supplyStashesInProgress
+			false,  // shouldThrottleExtraStashGrowth
+			50000,  // money
+			10000,  // reserveCash
+			true,   // isBalancedSprawl
+			true    // isBuildAttemptReady
+		};
+		const auto result = AIControlAdapterChooseZoneExpansionAction(inputs);
+		expect(!result.shouldAttemptExpansion, "Phase 5.7: normal expansion should be blocked by followup");
+		expect(std::strcmp(result.reason, "followup_needed") == 0, "Phase 5.7: reason should be followup_needed");
+	}
+
+	{
+		// Expansion in progress: should produce specific blocker
+		const AIControlAdapterZoneExpansionArbitrationInputs inputs = {
+			true,   // zoneExpansionIsUrgent
+			true,   // allowUrgentExpansionDespiteReserve
+			false,  // remoteZoneNeedsFollowup
+			7,      // stashZoneCount
+			30,     // desiredZoneCount
+			1,      // supplyStashesInProgress (blocker)
+			false,  // shouldThrottleExtraStashGrowth
+			120000, // money
+			10000,  // reserveCash
+			true,   // isBalancedSprawl
+			true    // isBuildAttemptReady
+		};
+		const auto result = AIControlAdapterChooseZoneExpansionAction(inputs);
+		expect(!result.shouldAttemptExpansion, "Phase 5.7: expansion should be blocked when build in progress");
+		expect(std::strcmp(result.reason, "build_in_progress") == 0, "Phase 5.7: reason should be build_in_progress");
+	}
+
+	{
+		// Throttle produces specific blocker
+		const AIControlAdapterZoneExpansionArbitrationInputs inputs = {
+			true,   // zoneExpansionIsUrgent
+			true,   // allowUrgentExpansionDespiteReserve
+			false,  // remoteZoneNeedsFollowup
+			7,      // stashZoneCount
+			30,     // desiredZoneCount
+			0,      // supplyStashesInProgress
+			true,   // shouldThrottleExtraStashGrowth (blocker)
+			120000, // money
+			10000,  // reserveCash
+			true,   // isBalancedSprawl
+			true    // isBuildAttemptReady
+		};
+		const auto result = AIControlAdapterChooseZoneExpansionAction(inputs);
+		expect(!result.shouldAttemptExpansion, "Phase 5.7: expansion should be blocked when throttled");
+		expect(std::strcmp(result.reason, "throttled") == 0, "Phase 5.7: reason should be throttled");
+	}
+
+	{
+		// Target reached produces specific reason
+		const AIControlAdapterZoneExpansionArbitrationInputs inputs = {
+			false,  // zoneExpansionIsUrgent (at target)
+			false,  // allowUrgentExpansionDespiteReserve
+			false,  // remoteZoneNeedsFollowup
+			30,     // stashZoneCount (equals desired)
+			30,     // desiredZoneCount
+			0,      // supplyStashesInProgress
+			false,  // shouldThrottleExtraStashGrowth
+			120000, // money
+			10000,  // reserveCash
+			true,   // isBalancedSprawl
+			true    // isBuildAttemptReady
+		};
+		const auto result = AIControlAdapterChooseZoneExpansionAction(inputs);
+		expect(!result.shouldAttemptExpansion, "Phase 5.7: expansion should not be attempted when target reached");
+		expect(std::strcmp(result.reason, "target_reached") == 0, "Phase 5.7: reason should be target_reached");
+	}
+
+	{
+		// Urgent but low cash produces specific reason
+		const AIControlAdapterZoneExpansionArbitrationInputs inputs = {
+			true,   // zoneExpansionIsUrgent
+			true,   // allowUrgentExpansionDespiteReserve
+			false,  // remoteZoneNeedsFollowup
+			7,      // stashZoneCount
+			30,     // desiredZoneCount
+			0,      // supplyStashesInProgress
+			false,  // shouldThrottleExtraStashGrowth
+			1500,   // money (below 2200 for balanced sprawl)
+			10000,  // reserveCash
+			true,   // isBalancedSprawl
+			true    // isBuildAttemptReady
+		};
+		const auto result = AIControlAdapterChooseZoneExpansionAction(inputs);
+		expect(!result.shouldAttemptExpansion, "Phase 5.7: urgent expansion should be blocked when cash too low");
+		expect(std::strcmp(result.reason, "urgent_low_cash") == 0, "Phase 5.7: reason should be urgent_low_cash");
+	}
+
+	{
+		// Build cooldown active produces specific reason
+		const AIControlAdapterZoneExpansionArbitrationInputs inputs = {
+			true,   // zoneExpansionIsUrgent
+			true,   // allowUrgentExpansionDespiteReserve
+			false,  // remoteZoneNeedsFollowup
+			7,      // stashZoneCount
+			30,     // desiredZoneCount
+			0,      // supplyStashesInProgress
+			false,  // shouldThrottleExtraStashGrowth
+			120000, // money
+			10000,  // reserveCash
+			true,   // isBalancedSprawl
+			false   // isBuildAttemptReady (blocker)
+		};
+		const auto result = AIControlAdapterChooseZoneExpansionAction(inputs);
+		expect(!result.shouldAttemptExpansion, "Phase 5.7: expansion should be blocked when build cooldown active");
+		expect(std::strcmp(result.reason, "build_cooldown") == 0, "Phase 5.7: reason should be build_cooldown");
+	}
+
+	// =========================================================================
+	// Phase 6.3: Capture Source Capacity and Concurrency Tests
+	// =========================================================================
+
+	// Test: No capture upgrade means no forced Rebel reserve
+	{
+		const AIControlAdapterProductionChoiceInputs inputs = {
+			false, // shouldPauseForEconomy
+			nullptr,
+			false, // shouldHoldArmyCap
+			true,  // isBalancedSprawl
+			"balanced",
+			5000u, // money
+			1,     // barracks
+			1,     // armsDealers
+			0,     // palaces
+			false,
+			false,
+			false, // hasCaptureUpgrade
+			0,     // captureSources
+			0,     // captureSourcesLive
+			0,     // captureSourcesReserved
+			0,     // captureSourcesAvailable
+			5,     // capturableTargetsRemaining
+			3,     // desiredCaptureSources (would be desired if upgrade existed)
+			2,     // maxCaptureConcurrent
+			0,     // soldiers
+			0,     // rpg
+			0,     // quads
+			0,     // scorpions
+			0,     // scudLaunchers
+			0,     // radarVans
+			0,     // armyCount
+			20     // armyCap
+		};
+		const auto result = AIControlAdapterChoosePreferredProductionCommand(inputs);
+		// Should NOT force Game.QueueSoldiersAllBarracks for capture reserve
+		// (may queue soldiers for other reasons, but not because of capture capacity)
+		const bool isForcedForCapture = result.command != nullptr
+			&& std::strcmp(result.command, "Game.QueueSoldiersAllBarracks") == 0
+			&& (result.reason == nullptr || std::strlen(result.reason) == 0 || std::strcmp(result.reason, "capture_utility_reserve") == 0);
+		expect(!isForcedForCapture,
+			"Phase 6.3: no capture upgrade should not force Rebel reserve");
+	}
+
+	// Test: No capturable targets means no forced Rebel reserve
+	{
+		const AIControlAdapterProductionChoiceInputs inputs = {
+			false,
+			nullptr,
+			false,
+			true,
+			"balanced",
+			5000u,
+			1,
+			1,
+			0,
+			false,
+			false,
+			true,  // hasCaptureUpgrade
+			0,
+			0,
+			0,
+			0,
+			0,     // capturableTargetsRemaining
+			0,     // desiredCaptureSources
+			2,
+			0,
+			0,
+			0,
+			0,
+			0,
+			0,
+			0,
+			20
+		};
+		const auto result = AIControlAdapterChoosePreferredProductionCommand(inputs);
+		// Should NOT force Game.QueueSoldiersAllBarracks when no capturable targets remain
+		// When capturableTargetsRemaining == 0, desiredCaptureSources should be 0,
+		// so no capture reserve production should occur
+		const bool isForcedForCapture = result.command != nullptr
+			&& std::strcmp(result.command, "Game.QueueSoldiersAllBarracks") == 0
+			&& (result.reason == nullptr || std::strlen(result.reason) == 0 || std::strcmp(result.reason, "capture_utility_reserve") == 0);
+		expect(!isForcedForCapture,
+			"Phase 6.3: no capturable targets should not force Rebel reserve or soldiers for capture capacity");
+	}
+
+	// Test: One live Rebel with max_concurrent=2 and targets forces another
+	{
+		const AIControlAdapterProductionChoiceInputs inputs = {
+			false,
+			nullptr,
+			false,
+			true,
+			"balanced",
+			5000u,
+			1,
+			1,
+			0,
+			false,
+			false,
+			true,
+			1,     // captureSources
+			1,     // captureSourcesLive
+			0,     // captureSourcesReserved
+			1,     // captureSourcesAvailable
+			5,     // capturableTargetsRemaining
+			3,     // desiredCaptureSources = min(2+1, 5) = 3
+			2,     // maxCaptureConcurrent
+			1,     // soldiers (the one Rebel)
+			0,
+			0,
+			0,
+			0,
+			0,
+			1,     // armyCount
+			20
+		};
+		const auto result = AIControlAdapterChoosePreferredProductionCommand(inputs);
+		// Should build soldiers for capture capacity: available(1) < desired(3)
+		expect(result.command != nullptr && std::strcmp(result.command, "Game.QueueSoldiersAllBarracks") == 0,
+			"Phase 6.3: should force soldiers when available < desired");
+	}
+
+	// Test: Reserved Rebel counts as unavailable
+	{
+		const AIControlAdapterProductionChoiceInputs inputs = {
+			false,
+			nullptr,
+			false,
+			true,
+			"balanced",
+			5000u,
+			1,
+			1,
+			0,
+			false,
+			false,
+			true,
+			1,     // captureSources
+			1,     // captureSourcesLive
+			1,     // captureSourcesReserved
+			0,     // captureSourcesAvailable = live - reserved
+			5,     // capturableTargetsRemaining
+			3,     // desiredCaptureSources
+			2,
+			1,
+			0,
+			0,
+			0,
+			0,
+			0,
+			1,
+			20
+		};
+		const auto result = AIControlAdapterChoosePreferredProductionCommand(inputs);
+		// Should force production: available(0) < desired(3)
+		expect(result.command != nullptr && std::strcmp(result.command, "Game.QueueSoldiersAllBarracks") == 0,
+			"Phase 6.3: reserved Rebel should count as unavailable, forcing production");
+	}
+
+	// Test: Automation disabled (desiredCaptureSources == 0) means no forced reserve
+	{
+		const AIControlAdapterProductionChoiceInputs inputs = {
+			false,
+			nullptr,
+			false,
+			true,
+			"balanced",
+			5000u,
+			1,
+			1,
+			0,
+			false,
+			false,
+			true,  // hasCaptureUpgrade
+			0,
+			0,
+			0,
+			0,
+			5,     // capturableTargetsRemaining (targets exist but automation disabled)
+			0,     // desiredCaptureSources (automation disabled)
+			2,
+			0,
+			0,
+			0,
+			0,
+			0,
+			0,
+			0,
+			20
+		};
+		const auto result = AIControlAdapterChoosePreferredProductionCommand(inputs);
+		// Should NOT force capture reserve when automation disabled
+		const bool isForcedForCapture = result.command != nullptr
+			&& std::strcmp(result.command, "Game.QueueSoldiersAllBarracks") == 0
+			&& (result.reason == nullptr || std::strlen(result.reason) == 0 || std::strcmp(result.reason, "capture_utility_reserve") == 0);
+		expect(!isForcedForCapture,
+			"Phase 6.3: automation disabled (desiredCaptureSources == 0) should not force Rebel reserve");
+	}
+
+	// Test: Skewed vehicle/infantry mix still forces capture reserve
+	{
+		const AIControlAdapterProductionChoiceInputs inputs = {
+			false,
+			nullptr,
+			false,
+			true,
+			"balanced",
+			5000u,
+			1,
+			1,
+			0,
+			false,
+			false,
+			true,
+			0,     // captureSources
+			0,     // captureSourcesLive
+			0,     // captureSourcesReserved
+			0,     // captureSourcesAvailable
+			5,     // capturableTargetsRemaining
+			3,     // desiredCaptureSources
+			2,
+			0,     // soldiers
+			0,     // rpg
+			0,     // quads (vehicle-starved)
+			0,     // scorpions
+			0,
+			0,
+			0,     // armyCount
+			100    // armyCap (plenty of room)
+		};
+		const auto result = AIControlAdapterChoosePreferredProductionCommand(inputs);
+		// Should force soldiers for capture reserve even when vehicle count is low
+		// Capture reserve overrides composition when available < desired
+		expect(result.command != nullptr && std::strcmp(result.command, "Game.QueueSoldiersAllBarracks") == 0,
+			"Phase 6.3: capture reserve should override composition priorities when available < desired");
+	}
+
+	// Test: Available >= desired does not force extra Rebels
+	{
+		const AIControlAdapterProductionChoiceInputs inputs = {
+			false,
+			nullptr,
+			false,
+			true,
+			"balanced",
+			5000u,
+			1,
+			1,
+			0,
+			false,
+			false,
+			true,
+			3,     // captureSources
+			3,     // captureSourcesLive
+			0,     // captureSourcesReserved
+			3,     // captureSourcesAvailable
+			5,     // capturableTargetsRemaining
+			3,     // desiredCaptureSources
+			2,
+			3,     // soldiers
+			0,
+			0,
+			0,
+			0,
+			0,
+			3,
+			20
+		};
+		const auto result = AIControlAdapterChoosePreferredProductionCommand(inputs);
+		// Should not force capture reserve: available(3) >= desired(3)
+		// May build other units or nothing
+		expect(result.command == nullptr
+			|| std::strcmp(result.command, "Game.QueueSoldiersAllBarracks") != 0
+			|| (result.reason != nullptr && std::strcmp(result.reason, "capture_utility_reserve") != 0),
+			"Phase 6.3: should not force Rebel when available >= desired");
+	}
+
+	// Test: Army cap override for bounded capture reserve
+	{
+		const AIControlAdapterProductionChoiceInputs inputs = {
+			false,
+			nullptr,
+			true,  // shouldHoldArmyCap
+			true,
+			"balanced",
+			5000u,
+			1,
+			1,
+			0,
+			false,
+			false,
+			true,
+			0,     // captureSources
+			0,     // captureSourcesLive
+			0,     // captureSourcesReserved
+			0,     // captureSourcesAvailable
+			5,     // capturableTargetsRemaining
+			3,     // desiredCaptureSources
+			2,
+			0,
+			0,
+			0,
+			0,
+			0,
+			0,
+			20,    // armyCount
+			20     // armyCap (at cap)
+		};
+		const auto result = AIControlAdapterChoosePreferredProductionCommand(inputs);
+		// Should override army cap for capture utility reserve
+		expect(result.command != nullptr && std::strcmp(result.command, "Game.QueueSoldiersAllBarracks") == 0,
+			"Phase 6.3: should override army cap for bounded capture reserve");
+		expect(result.reason != nullptr && std::strcmp(result.reason, "capture_utility_reserve") == 0,
+			"Phase 6.3: reason should be capture_utility_reserve");
+	}
+
+	// Test: Bounded override does not allow infinite production
+	{
+		const AIControlAdapterProductionChoiceInputs inputs = {
+			false,
+			nullptr,
+			true,  // shouldHoldArmyCap
+			true,
+			"balanced",
+			5000u,
+			1,
+			1,
+			0,
+			false,
+			false,
+			true,
+			0,
+			0,
+			0,
+			0,
+			5,
+			3,     // desiredCaptureSources
+			2,
+			0,
+			0,
+			0,
+			0,
+			0,
+			0,
+			25,    // armyCount = armyCap(20) + desired(3) + 2 (exceeded bound)
+			20
+		};
+		const auto result = AIControlAdapterChoosePreferredProductionCommand(inputs);
+		// Should NOT produce when army exceeds cap + desired reserve
+		expect(result.command == nullptr,
+			"Phase 6.3: should not produce beyond armyCap + desiredCaptureSources");
+		expect(result.reason != nullptr && std::strcmp(result.reason, "army_cap_reached") == 0,
+			"Phase 6.3: should return army_cap_reached when exceeded bound");
 	}
 
 	std::cout << "AIControlAdapterPolicyTests passed\n";

@@ -470,6 +470,91 @@ bool AIControlAdapterIsZoneExpansionUrgent(const AIControlAdapterZoneExpansionPo
 	return zoneGap >= inputs.zoneGapThreshold;
 }
 
+AIControlAdapterZoneExpansionArbitrationResult AIControlAdapterChooseZoneExpansionAction(
+	const AIControlAdapterZoneExpansionArbitrationInputs& inputs)
+{
+	AIControlAdapterZoneExpansionArbitrationResult result;
+	result.shouldAttemptExpansion = false;
+	result.command = nullptr;
+	result.reason = "unknown";
+	result.isUrgent = false;
+	result.allowReserveSpend = false;
+
+	// Check target reached
+	if (inputs.stashZoneCount >= inputs.desiredZoneCount)
+	{
+		result.reason = "target_reached";
+		return result;
+	}
+
+	// Check build in progress
+	if (inputs.supplyStashesInProgress > 0)
+	{
+		result.reason = "build_in_progress";
+		return result;
+	}
+
+	// Check throttle
+	if (inputs.shouldThrottleExtraStashGrowth)
+	{
+		result.reason = "throttled";
+		return result;
+	}
+
+	// Check build attempt ready (cooldown)
+	if (!inputs.isBuildAttemptReady)
+	{
+		result.reason = "build_cooldown";
+		return result;
+	}
+
+	// Urgent expansion: large zone gap + high cash float
+	if (inputs.zoneExpansionIsUrgent && inputs.allowUrgentExpansionDespiteReserve)
+	{
+		// Urgent expansion can proceed even if remoteZoneNeedsFollowup
+		// because the zone deficit is critical
+		const unsigned int minCash = inputs.isBalancedSprawl ? 2200u : 1800u;
+		if (inputs.money >= minCash)
+		{
+			result.shouldAttemptExpansion = true;
+			result.command = "Game.BuildSupplyStashSmart";
+			result.reason = "urgent_high_cash";
+			result.isUrgent = true;
+			result.allowReserveSpend = true;
+			return result;
+		}
+		else
+		{
+			result.reason = "urgent_low_cash";
+			return result;
+		}
+	}
+
+	// Normal expansion: requires followup complete
+	if (!inputs.remoteZoneNeedsFollowup)
+	{
+		const unsigned int minCash = inputs.isBalancedSprawl ? (inputs.reserveCash + 1800u) : 1800u;
+		if (inputs.money >= minCash)
+		{
+			result.shouldAttemptExpansion = true;
+			result.command = "Game.BuildSupplyStashSmart";
+			result.reason = "normal";
+			result.isUrgent = false;
+			result.allowReserveSpend = false;
+			return result;
+		}
+		else
+		{
+			result.reason = "normal_low_cash";
+			return result;
+		}
+	}
+
+	// Below target but followup needed
+	result.reason = "followup_needed";
+	return result;
+}
+
 AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProductionCommand(
 	const AIControlAdapterProductionChoiceInputs& inputs)
 {
@@ -490,13 +575,34 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 		inputs.rpg
 	});
 
+	// Phase 6.3: Capture source capacity check
+	// Only force production when real capture demand exists:
+	// - Capture upgrade complete
+	// - Desired capacity > 0 (automation enabled, targets remaining)
+	// - Available < desired
+	const bool needsCaptureReserve = inputs.hasCaptureUpgrade
+		&& inputs.desiredCaptureSources > 0
+		&& inputs.captureSourcesAvailable < inputs.desiredCaptureSources;
+
 	if (inputs.shouldPauseForEconomy)
 	{
 		return { nullptr, inputs.pauseReason != nullptr ? inputs.pauseReason : "reserve_cash_recovery" };
 	}
 
+	// Phase 6.3: Army cap override for bounded capture utility reserve
+	// Allow capture source production even at army cap, but only up to desired reserve
 	if (inputs.shouldHoldArmyCap)
 	{
+		if (needsCaptureReserve && inputs.barracks > 0 && inputs.money >= 300u)
+		{
+			// Allow bounded override: only produce if we haven't exceeded desired reserve
+			// This prevents infinite infantry production while still ensuring capture capacity
+			const int captureUtilityOverhead = inputs.desiredCaptureSources;
+			if (inputs.armyCount < (inputs.armyCap + captureUtilityOverhead))
+			{
+				return { "Game.QueueSoldiersAllBarracks", "capture_utility_reserve" };
+			}
+		}
 		return { nullptr, "army_cap_reached" };
 	}
 
@@ -521,6 +627,13 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 		if (nearArmyCap && compositionCloseEnough)
 		{
 			return { nullptr, "army_cap_buffer" };
+		}
+
+		// Phase 6.3: Check capture reserve need before composition priorities
+		// Capture reserve overrides normal composition when below desired capacity
+		if (needsCaptureReserve && canQueueInfantry)
+		{
+			return { "Game.QueueSoldiersAllBarracks", "" };
 		}
 
 		if (canQueueVehicles
@@ -548,10 +661,6 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 				|| infantryDeficit > 0
 				|| inputs.armyCount < (inputs.armyCap / 2)))
 		{
-			if (inputs.hasCaptureUpgrade && inputs.captureSources < 1)
-			{
-				return { "Game.QueueSoldiersAllBarracks", "" };
-			}
 			if (aggressive || inputs.rpg < inputs.soldiers)
 			{
 				return { "Game.QueueRpgTroopersAllBarracks", "" };
@@ -578,7 +687,8 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 
 		if (canQueueInfantry)
 		{
-			if (inputs.hasCaptureUpgrade && inputs.captureSources < 1)
+			// Phase 6.3: In fallback infantry, capture reserve takes priority
+			if (needsCaptureReserve)
 			{
 				return { "Game.QueueSoldiersAllBarracks", "" };
 			}
@@ -614,7 +724,8 @@ AIControlAdapterProductionChoiceResult AIControlAdapterChoosePreferredProduction
 
 	if (inputs.barracks > 0 && inputs.money >= 300u)
 	{
-		if (inputs.hasCaptureUpgrade && inputs.captureSources < 1)
+		// Phase 6.3: Non-balanced sprawl infantry fallback with capture priority
+		if (needsCaptureReserve)
 		{
 			return { "Game.QueueSoldiersAllBarracks", "" };
 		}

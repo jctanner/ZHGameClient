@@ -1,3 +1,12 @@
+		// Phase 9.0: Result structure for attack commands that need to create combat tasks
+		struct AttackCommandResult
+		{
+			bool success = false;
+			std::vector<unsigned int> assignedUnitIds;
+			Coord3D targetPosition = {0.0f, 0.0f, 0.0f};
+			std::string failureReason;
+		};
+
 		bool executeGameScudStormAtPosition(const nlohmann::json& message, std::string& reason)
 		{
 			if (TheGameLogic == nullptr || TheActionManager == nullptr)
@@ -372,7 +381,8 @@
 			return true;
 		}
 
-		bool executeGameAttackMoveRaidSmart(const nlohmann::json& message, std::string& reason)
+		// Phase 9.0: Overload that returns attack result with unit IDs and target for combat task creation
+		bool executeGameAttackMoveRaidSmart(const nlohmann::json& message, std::string& reason, AttackCommandResult* outResult = nullptr)
 		{
 			if (TheGameLogic == nullptr || ThePlayerList == nullptr)
 			{
@@ -540,7 +550,8 @@
 				reason = "no_valid_objects";
 				return false;
 			}
-			return executeScopedSelectionCommand(player, selectedIds, reason, [&]() -> bool
+
+			const bool commandSuccess = executeScopedSelectionCommand(player, selectedIds, reason, [&]() -> bool
 			{
 				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_ATTACKMOVETO);
 				if (msg == nullptr)
@@ -551,6 +562,27 @@
 				msg->appendLocationArgument(target);
 				return true;
 			});
+
+			// Phase 9.0: Populate result structure for combat task creation
+			if (outResult != nullptr)
+			{
+				outResult->success = commandSuccess;
+				outResult->targetPosition = target;
+				if (commandSuccess)
+				{
+					outResult->assignedUnitIds.reserve(selectedIds.size());
+					for (std::size_t i = 0; i < selectedIds.size(); ++i)
+					{
+						outResult->assignedUnitIds.push_back(static_cast<unsigned int>(selectedIds[i]));
+					}
+				}
+				else
+				{
+					outResult->failureReason = reason;
+				}
+			}
+
+			return commandSuccess;
 		}
 
 		bool executeGameGuardAllIdleGroundCombat(const nlohmann::json& message, std::string& reason)
@@ -575,9 +607,13 @@
 			struct GuardCollectContext
 			{
 				std::vector<GuardCommand> commands;
+				// Phase 6.2: Pass task reservation manager to filter capture-reserved units
+				const AIControlAdapterTaskReservationManager* taskReservationManager;
+				std::vector<ObjectID> skippedReservedUnits; // Track skipped for logging
 			};
 
 			GuardCollectContext collectCtx;
+			collectCtx.taskReservationManager = &m_autonomy.taskReservationManager;
 			player->iterateObjects([](Object* obj, void* userData)
 			{
 				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
@@ -609,13 +645,44 @@
 					return;
 				}
 
+				// Phase 6.2: Exclude units reserved for capture tasks
 				GuardCollectContext* ctx = static_cast<GuardCollectContext*>(userData);
+				if (ctx->taskReservationManager != nullptr &&
+					ctx->taskReservationManager->isObjectReserved(obj->getID()))
+				{
+					ctx->skippedReservedUnits.push_back(obj->getID());
+					return;
+				}
+
 				GuardCommand command = {};
 				command.id = obj->getID();
 				command.pos = *pos;
 				command.pos.z = 0.0f;
 				ctx->commands.push_back(command);
 			}, &collectCtx);
+
+			// Phase 6.2: Log skipped capture-reserved units
+			for (ObjectID skippedId : collectCtx.skippedReservedUnits)
+			{
+				std::vector<SpecialTaskReservation*> captureTasks = m_autonomy.taskReservationManager.findCaptureTasks();
+				for (const SpecialTaskReservation* task : captureTasks)
+				{
+					if (task != nullptr &&
+						task->state != SpecialTaskState::Complete &&
+						task->state != SpecialTaskState::Failed &&
+						task->state != SpecialTaskState::Expired &&
+						task->sourceObjectId == static_cast<unsigned int>(skippedId))
+					{
+						adapterLog(
+							"guard_skip_reserved_capture unit=%u task=%u owner=%s target=%u",
+							static_cast<unsigned int>(skippedId),
+							task->taskId,
+							task->owner.c_str(),
+							task->targetObjectId);
+						break;
+					}
+				}
+			}
 
 			if (collectCtx.commands.empty())
 			{
@@ -646,7 +713,8 @@
 			return true;
 		}
 
-		bool executeGameAttackMoveDefendZoneSmart(const nlohmann::json& message, std::string& reason)
+		// Phase 9.0: Overload that returns defense result with unit IDs for combat task creation
+		bool executeGameAttackMoveDefendZoneSmart(const nlohmann::json& message, std::string& reason, AttackCommandResult* outResult = nullptr)
 		{
 			if (TheGameLogic == nullptr)
 			{
@@ -690,9 +758,43 @@
 				return false;
 			}
 
-			// Select all idle combat units for defense
+			// Phase 7.4: WMD-aware defense discipline - cap unit count when WMD threat exists
+			const bool hasWMDThreat = m_autonomy.wmdTargetTracker.hasActiveWMDThreat();
+			std::size_t maxDefenseUnits = combatUnits.size(); // Default: use all units
+
+			if (hasWMDThreat)
+			{
+				// Cap defense groups to prevent mass clustering under WMD threat
+				// Smaller groups reduce nuke/particle cannon damage potential
+				const auto zoneAnchorIt = argsIt->find("zone_anchor");
+				const bool isMainBaseZone = false; // Could check if zone anchor is Command Center/Supply Center
+
+				if (!isMainBaseZone)
+				{
+					// Non-main-base zones: strict cap
+					maxDefenseUnits = std::min(static_cast<std::size_t>(30), combatUnits.size());
+				}
+				else
+				{
+					// Main base: more generous cap but still bounded
+					maxDefenseUnits = std::min(static_cast<std::size_t>(50), combatUnits.size());
+				}
+
+				if (maxDefenseUnits < combatUnits.size())
+				{
+					adapterLog(
+						"zone_defense_cap_applied zone=%u reason=wmd_threat requested=%d capped=%d main_base=%d",
+						zoneAnchorIt != argsIt->end() && zoneAnchorIt->is_number()
+							? zoneAnchorIt->get<unsigned int>() : 0u,
+						static_cast<int>(combatUnits.size()),
+						static_cast<int>(maxDefenseUnits),
+						isMainBaseZone ? 1 : 0);
+				}
+			}
+
+			// Select units for defense (capped by WMD discipline if applicable)
 			std::vector<ObjectID> selectedIds;
-			for (std::size_t i = 0; i < combatUnits.size(); ++i)
+			for (std::size_t i = 0; i < combatUnits.size() && selectedIds.size() < maxDefenseUnits; ++i)
 			{
 				Object* obj = combatUnits[i];
 				if (obj == nullptr || obj->getAI() == nullptr)
@@ -708,7 +810,7 @@
 				return false;
 			}
 
-			return executeScopedSelectionCommand(player, selectedIds, reason, [&]() -> bool
+			const bool commandSuccess = executeScopedSelectionCommand(player, selectedIds, reason, [&]() -> bool
 			{
 				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_ATTACKMOVETO);
 				if (msg == nullptr)
@@ -719,5 +821,26 @@
 				msg->appendLocationArgument(target);
 				return true;
 			});
+
+			// Phase 9.0: Populate result structure for combat task creation
+			if (outResult != nullptr)
+			{
+				outResult->success = commandSuccess;
+				outResult->targetPosition = target;
+				if (commandSuccess)
+				{
+					outResult->assignedUnitIds.reserve(selectedIds.size());
+					for (std::size_t i = 0; i < selectedIds.size(); ++i)
+					{
+						outResult->assignedUnitIds.push_back(static_cast<unsigned int>(selectedIds[i]));
+					}
+				}
+				else
+				{
+					outResult->failureReason = reason;
+				}
+			}
+
+			return commandSuccess;
 		}
 
