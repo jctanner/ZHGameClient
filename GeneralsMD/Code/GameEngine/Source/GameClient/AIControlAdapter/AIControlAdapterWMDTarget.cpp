@@ -11,33 +11,6 @@ AIControlAdapterWMDTargetTracker::AIControlAdapterWMDTargetTracker()
 {
 }
 
-bool AIControlAdapterWMDTargetTracker::isWMDTemplate(const std::string& templateName)
-{
-	// China nuclear missile launcher
-	if (templateName.find("NuclearMissile") != std::string::npos)
-	{
-		return true;
-	}
-	if (templateName.find("NukeSilo") != std::string::npos)
-	{
-		return true;
-	}
-
-	// America particle cannon
-	if (templateName.find("ParticleCannon") != std::string::npos)
-	{
-		return true;
-	}
-
-	// GLA SCUD Storm
-	if (templateName.find("ScudStorm") != std::string::npos)
-	{
-		return true;
-	}
-
-	return false;
-}
-
 void AIControlAdapterWMDTargetTracker::updateWMDTargets(Player* player, DWORD currentTick)
 {
 	if (player == nullptr || TheGameLogic == nullptr)

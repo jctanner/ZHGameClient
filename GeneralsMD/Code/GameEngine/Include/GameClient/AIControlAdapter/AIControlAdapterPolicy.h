@@ -41,6 +41,7 @@
 
 #pragma once
 
+#include <string>
 #include <vector>
 
 #include "GameNetwork/GeneralsOnline/json.hpp"
@@ -843,6 +844,284 @@ struct AIControlAdapterZoneExpansionArbitrationResult
  */
 AIControlAdapterZoneExpansionArbitrationResult AIControlAdapterChooseZoneExpansionAction(
 	const AIControlAdapterZoneExpansionArbitrationInputs& inputs);
+
+// =============================================================================
+// SCUD STORM CONSTRUCTION POLICY
+// =============================================================================
+
+struct AIControlAdapterScudStormConstructionPolicyInputs
+{
+	bool prereqReady;
+	bool productionNeeded;
+	unsigned int money;
+	unsigned int reserveCash;
+	unsigned int scudStormCost;
+	int currentZoneCount;
+	int desiredZoneCount;
+	int zoneGapThreshold;
+	int inProgressScudStorms;
+	int normalMaxInProgress;
+	unsigned int highCashFloatThreshold;
+};
+
+struct AIControlAdapterScudStormConstructionPolicyResult
+{
+	bool spendAllowed;
+	bool zoneExpansionUrgent;
+	bool highCashOverride;
+	unsigned int cashFloat;
+	int zoneGap;
+	int maxInProgress;
+	const char* reason;
+};
+
+AIControlAdapterScudStormConstructionPolicyResult AIControlAdapterEvaluateScudStormConstruction(
+	const AIControlAdapterScudStormConstructionPolicyInputs& inputs);
+
+// =============================================================================
+// ZONE DEFENSE ALLOCATION POLICY
+// =============================================================================
+
+struct AIControlAdapterZoneDefenseBudgetInputs
+{
+	std::string threatLevel;
+	int availableIdleCombat;
+	int activeDefenseAllocations;
+	int localFriendlyCombat;
+	bool isMainBase;
+	bool isDeveloped;
+	bool isFrontier;
+	bool isActiveZone;
+	bool hasActiveCriticalAllocation;
+};
+
+struct AIControlAdapterZoneDefenseBudgetResult
+{
+	int threatSeverity;
+	int desiredDefenders;
+	int maxNewAssignments;
+	int localReserve;
+	unsigned int minHoldMs;
+	unsigned int timeoutMs;
+	bool allowFrontDonors;
+	bool criticalOverride;
+	const char* reason;
+};
+
+AIControlAdapterZoneDefenseBudgetResult AIControlAdapterChooseZoneDefenseBudget(
+	const AIControlAdapterZoneDefenseBudgetInputs& inputs);
+
+struct AIControlAdapterZoneDefenseAllocationInputs
+{
+	bool hasActiveAllocation;
+	int activeSeverity;
+	int newThreatSeverity;
+	unsigned int currentTick;
+	unsigned int holdUntilTick;
+	unsigned int expiryTick;
+	int assignedCount;
+	int desiredDefenders;
+	float oldTargetX;
+	float oldTargetY;
+	float newTargetX;
+	float newTargetY;
+	float targetMoveThreshold;
+};
+
+struct AIControlAdapterZoneDefenseAllocationResult
+{
+	bool shouldIssueCommand;
+	bool shouldReinforce;
+	bool shouldRelease;
+	int requestedNewAssignments;
+	const char* reason;
+};
+
+AIControlAdapterZoneDefenseAllocationResult AIControlAdapterEvaluateZoneDefenseAllocation(
+	const AIControlAdapterZoneDefenseAllocationInputs& inputs);
+
+struct AIControlAdapterZoneThreatSourceInputs
+{
+	int localEnemyCount;
+	int enemyArtilleryCount;
+	bool recentWmd;
+	float damageFraction;
+	float damageDelta;
+	int damagedStructures;
+	int destroyedStructures;
+};
+
+struct AIControlAdapterZoneThreatSourceResult
+{
+	const char* type;
+	const char* response;
+	const char* reason;
+	const char* severity;
+};
+
+AIControlAdapterZoneThreatSourceResult AIControlAdapterClassifyZoneThreatSource(
+	const AIControlAdapterZoneThreatSourceInputs& inputs);
+
+struct AIControlAdapterStaticDefensePolicyInputs
+{
+	std::string zoneRole;
+	bool isMainBase;
+	bool isDeveloped;
+	bool isFrontier;
+	bool isActiveZone;
+	bool isAnchorZone;
+	bool repeatedAttack;
+	int liveTunnels;
+	int liveStingers;
+	int inProgressTunnels;
+	int inProgressStingers;
+	int reservedTunnels;
+	int reservedStingers;
+};
+
+struct AIControlAdapterStaticDefensePolicyResult
+{
+	int desiredTunnels;
+	int desiredStingers;
+	int effectiveTunnels;
+	int effectiveStingers;
+	bool shouldBuildTunnel;
+	bool shouldBuildStinger;
+	const char* role;
+	const char* reason;
+};
+
+AIControlAdapterStaticDefensePolicyResult AIControlAdapterChooseStaticDefensePolicy(
+	const AIControlAdapterStaticDefensePolicyInputs& inputs);
+
+struct AIControlAdapterPalaceRedundancyInputs
+{
+	std::string zoneRole;
+	bool hasTechUnlocked;
+	bool isDeveloped;
+	bool isFrontier;
+	bool isAnchorZone;
+	bool reserveProtected;
+	bool urgentExpansion;
+	unsigned int cashFloat;
+	int globalLivePalaces;
+	int globalInProgressPalaces;
+	int zoneLivePalaces;
+	int zoneInProgressPalaces;
+};
+
+struct AIControlAdapterPalaceRedundancyResult
+{
+	int desiredZonePalaces;
+	bool spendAllowed;
+	bool shouldBuild;
+	const char* role;
+	const char* reason;
+};
+
+AIControlAdapterPalaceRedundancyResult AIControlAdapterEvaluatePalaceRedundancy(
+	const AIControlAdapterPalaceRedundancyInputs& inputs);
+
+struct AIControlAdapterCounterbatteryPolicyInputs
+{
+	int visibleArtilleryThreats;
+	int availableCounterUnits;
+	int activeCounterbatteryTasks;
+	bool hasProductionPrerequisites;
+	int liveMobileScudLaunchers;
+	int queuedMobileScudLaunchers;
+	int maxMobileScudLaunchers;
+};
+
+struct AIControlAdapterCounterbatteryPolicyResult
+{
+	int desiredGroups;
+	int desiredAssignedUnits;
+	bool shouldAssign;
+	bool productionNeeded;
+	const char* reason;
+};
+
+bool AIControlAdapterIsBattlefieldArtilleryTemplate(const std::string& templateName, bool isStructure);
+
+struct AIControlAdapterMobileSiegeTemplateResult
+{
+	bool accepted;
+	const char* reason;
+};
+
+AIControlAdapterMobileSiegeTemplateResult AIControlAdapterClassifyMobileSiegeTemplate(
+	const std::string& templateName,
+	bool isStructure,
+	bool isEnemy);
+
+AIControlAdapterCounterbatteryPolicyResult AIControlAdapterChooseCounterbatteryPolicy(
+	const AIControlAdapterCounterbatteryPolicyInputs& inputs);
+
+struct AIControlAdapterRocketBuggyMixInputs
+{
+	bool hasPrerequisites;
+	bool spendAllowed;
+	bool mobileSiegeThreatVisible;
+	int liveBuggies;
+	int queuedBuggies;
+	int quads;
+	int scorpions;
+	int scudLaunchers;
+};
+
+struct AIControlAdapterRocketBuggyMixResult
+{
+	int desiredBuggies;
+	bool productionNeeded;
+	const char* reason;
+};
+
+AIControlAdapterRocketBuggyMixResult AIControlAdapterChooseRocketBuggyMix(
+	const AIControlAdapterRocketBuggyMixInputs& inputs);
+
+struct AIControlAdapterLocalWorkerLiquidityInputs
+{
+	int globalWorkers;
+	int workerCap;
+	unsigned int cashFloat;
+	int localIdleWorkers;
+	int desiredLocalWorkers;
+	bool hasLocalProducer;
+};
+
+struct AIControlAdapterLocalWorkerLiquidityResult
+{
+	bool shouldQueue;
+	const char* reason;
+};
+
+AIControlAdapterLocalWorkerLiquidityResult AIControlAdapterChooseLocalWorkerLiquidity(
+	const AIControlAdapterLocalWorkerLiquidityInputs& inputs);
+
+struct AIControlAdapterBrutalPressureInputs
+{
+	int expansionGap;
+	bool mainUnderPressure;
+	int staticDefenseGap;
+	int garrisonGap;
+	int localWorkerGap;
+	int staleFoundations;
+	int mobileSiegeThreats;
+	bool reserveProtected;
+	unsigned int cashFloat;
+	bool normalAttackReady;
+	bool emergencyUnitAttack;
+};
+
+struct AIControlAdapterBrutalPressureResult
+{
+	const char* chosenPriority;
+	const char* reason;
+};
+
+AIControlAdapterBrutalPressureResult AIControlAdapterChooseBrutalPressurePriority(
+	const AIControlAdapterBrutalPressureInputs& inputs);
 
 /**
  * Decide whether to abort upgrade plan based on failure reason.

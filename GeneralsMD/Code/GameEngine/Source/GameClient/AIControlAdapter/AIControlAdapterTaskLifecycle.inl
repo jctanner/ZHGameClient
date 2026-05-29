@@ -28,6 +28,7 @@ bool isStrategicStructureTemplate(const std::string& templateName)
 		"GLABarracks",
 		"GLATunnelNetwork",
 		"GLAStingerSite",
+		"GLAScudStorm",
 		"GLAPalace",
 		"GLABlackMarket",
 		"GLACommandCenter",
@@ -37,6 +38,50 @@ bool isStrategicStructureTemplate(const std::string& templateName)
 	for (int i = 0; STRATEGIC_STRUCTURE_TEMPLATES[i] != nullptr; ++i)
 	{
 		if (templateName == STRATEGIC_STRUCTURE_TEMPLATES[i])
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool isPhase79StrategicFoundationTemplate(const std::string& templateName)
+{
+	return containsIgnoreCase(templateName, "scudstorm") ||
+		containsIgnoreCase(templateName, "palace");
+}
+
+Real getObjectHealthForStrategicFoundation(Object* obj)
+{
+	if (obj == nullptr)
+	{
+		return -1.0f;
+	}
+	BodyModuleInterface* body = obj->getBodyModule();
+	return body != nullptr ? body->getHealth() : -1.0f;
+}
+
+bool hasActiveBuilderForFoundation(Player* player, ObjectID foundationId)
+{
+	if (player == nullptr || TheGameLogic == nullptr || static_cast<Int>(foundationId) <= 0)
+	{
+		return false;
+	}
+	for (Object* worker = TheGameLogic->getFirstObject(); worker != nullptr; worker = worker->getNextObject())
+	{
+		if (worker == nullptr || worker->isEffectivelyDead())
+		{
+			continue;
+		}
+		if (worker->getControllingPlayer() != player)
+		{
+			continue;
+		}
+		if (!worker->isKindOf(KINDOF_DOZER))
+		{
+			continue;
+		}
+		if (worker->getBuilderID() == foundationId)
 		{
 			return true;
 		}
@@ -357,6 +402,14 @@ void updateConstructionTaskLifecycle(Player* player)
 				{
 					// Construction complete!
 					m_autonomy.taskReservationManager.completeTask(task->taskId, "structure_finished");
+					if (isPhase79StrategicFoundationTemplate(task->expectedTemplate))
+					{
+						m_autonomy.state.strategicFoundationHealth.erase(static_cast<UnsignedInt>(foundFoundation->getID()));
+						adapterLog(
+							"strategic_foundation_released template=%s foundation=%u reason=completed",
+							task->expectedTemplate.c_str(),
+							static_cast<unsigned int>(foundFoundation->getID()));
+					}
 					adapterLog(
 						"special_task_state task=%u state=Complete reason=structure_finished foundation=%u template=%s",
 						task->taskId,
@@ -377,6 +430,26 @@ void updateConstructionTaskLifecycle(Player* player)
 					// Check if anyone is actively building it
 					const ObjectID foundationId = foundFoundation->getID();
 					bool hasActiveBuilder = false;
+					const bool isPhase79Strategic = isPhase79StrategicFoundationTemplate(task->expectedTemplate);
+					if (isPhase79Strategic)
+					{
+						AutonomyStrategicFoundationState& foundationState =
+							m_autonomy.state.strategicFoundationHealth[static_cast<UnsignedInt>(foundationId)];
+						if (foundationState.firstSeenTick == 0u)
+						{
+							foundationState.firstSeenTick = now;
+							foundationState.lastProgressTick = now;
+						}
+						foundationState.templateName = task->expectedTemplate;
+						foundationState.lastSeenTick = now;
+						const Real currentHealth = getObjectHealthForStrategicFoundation(foundFoundation);
+						if (foundationState.lastHealth < 0.0f || currentHealth > foundationState.lastHealth + 1.0f)
+						{
+							foundationState.lastProgressTick = now;
+							foundationState.reason = "healthy_in_progress";
+						}
+						foundationState.lastHealth = currentHealth;
+					}
 
 					// Check if original worker is building it
 					if (workerExists)
@@ -422,6 +495,12 @@ void updateConstructionTaskLifecycle(Player* player)
 					if (!hasActiveBuilder)
 					{
 						const DWORD stalledDuration = now - task->lastUpdateTick;
+						if (isPhase79Strategic)
+						{
+							AutonomyStrategicFoundationState& foundationState =
+								m_autonomy.state.strategicFoundationHealth[static_cast<UnsignedInt>(foundationId)];
+							foundationState.reason = workerExists ? "no_active_builder" : "worker_dead";
+						}
 						if (stalledDuration > 15000u) // 15 seconds without progress
 						{
 							adapterLog(
@@ -462,6 +541,17 @@ void updateConstructionTaskLifecycle(Player* player)
 			{
 				// We had a foundation tracked by ID, and now it's truly gone
 				m_autonomy.taskReservationManager.failTask(task->taskId, "foundation_disappeared");
+				if (isPhase79StrategicFoundationTemplate(task->expectedTemplate))
+				{
+					AutonomyStrategicFoundationState& foundationState =
+						m_autonomy.state.strategicFoundationHealth[static_cast<UnsignedInt>(task->targetObjectId)];
+					foundationState.templateName = task->expectedTemplate;
+					foundationState.reason = "destroyed";
+					adapterLog(
+						"strategic_foundation_released template=%s foundation=%u reason=destroyed",
+						task->expectedTemplate.c_str(),
+						task->targetObjectId);
+				}
 				adapterLog(
 					"special_task_state task=%u state=Failed reason=foundation_disappeared template=%s foundation_was=%u",
 					task->taskId,
@@ -501,6 +591,7 @@ void attemptAbandonedFoundationRecovery(Player* player)
 	{
 		return;
 	}
+	const DWORD now = ::GetTickCount();
 
 	// Get all active build tasks
 	std::vector<SpecialTaskReservation*> buildTasks = m_autonomy.taskReservationManager.findBuildTasks();
@@ -542,10 +633,98 @@ void attemptAbandonedFoundationRecovery(Player* player)
 		{
 			continue;
 		}
+		const bool isPhase79Strategic = isPhase79StrategicFoundationTemplate(task->expectedTemplate);
+		AutonomyStrategicFoundationState* strategicState = nullptr;
+		if (isPhase79Strategic)
+		{
+			strategicState = &m_autonomy.state.strategicFoundationHealth[static_cast<UnsignedInt>(foundation->getID())];
+			if (strategicState->firstSeenTick == 0u)
+			{
+				strategicState->firstSeenTick = now;
+				strategicState->lastProgressTick = now;
+			}
+			strategicState->templateName = task->expectedTemplate;
+			strategicState->lastSeenTick = now;
+			const Real currentHealth = getObjectHealthForStrategicFoundation(foundation);
+			if (strategicState->lastHealth < 0.0f || currentHealth > strategicState->lastHealth + 1.0f)
+			{
+				strategicState->lastProgressTick = now;
+			}
+			strategicState->lastHealth = currentHealth;
+
+			const DWORD noProgressMs = now - strategicState->lastProgressTick;
+			const bool workerDead = (task->sourceObjectId != 0u &&
+				(TheGameLogic->findObjectByID(static_cast<ObjectID>(task->sourceObjectId)) == nullptr ||
+				 TheGameLogic->findObjectByID(static_cast<ObjectID>(task->sourceObjectId))->isEffectivelyDead()));
+			if (strategicState->recoveryAttempts >= 1 && noProgressMs >= 60000u)
+			{
+				const char* stopReason = workerDead ? "worker_dead" : "stale_no_progress";
+				std::string stopCommandReason;
+				const bool stopIssued = executeScopedSelectionCommand(player, std::vector<ObjectID>(1, foundation->getID()), stopCommandReason, [&]() -> bool
+				{
+					GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_STOP);
+					if (msg == nullptr)
+					{
+						stopCommandReason = "message_stream_not_ready";
+						return false;
+					}
+					return true;
+				});
+				strategicState->stopIssued = stopIssued;
+				strategicState->reason = workerDead ? "stopped_worker_dead" : "stopped_stale_no_progress";
+				adapterLog(
+					"strategic_foundation_stop template=%s foundation=%u issued=%d reason=%s",
+					task->expectedTemplate.c_str(),
+					static_cast<unsigned int>(foundation->getID()),
+					stopIssued ? 1 : 0,
+					stopIssued ? stopReason : stopCommandReason.c_str());
+				if (stopIssued)
+				{
+					m_autonomy.taskReservationManager.failTask(task->taskId, strategicState->reason);
+					adapterLog(
+						"strategic_foundation_released template=%s foundation=%u reason=%s",
+						task->expectedTemplate.c_str(),
+						static_cast<unsigned int>(foundation->getID()),
+						strategicState->reason.c_str());
+				}
+				continue;
+			}
+			if (strategicState->recoveryAttempts >= 2)
+			{
+				adapterLog(
+					"strategic_foundation_recovery template=%s foundation=%u worker=0 issued=0 reason=max_recovery_attempts",
+					task->expectedTemplate.c_str(),
+					static_cast<unsigned int>(foundation->getID()));
+				continue;
+			}
+		}
 
 		// Find nearby idle workers to reassign
 		Object* bestWorker = nullptr;
-		Real bestDistSq = 9999999.0f;
+		Real bestScore = 999999999.0f;
+		Real bestDistSq = 999999999.0f;
+		Int foundationZoneId = -1;
+		if (m_autonomy.state.telemetryZones.is_array())
+		{
+			Real bestZoneDistSq = m_autonomy.state.zoneRadius * m_autonomy.state.zoneRadius;
+			for (const auto& zone : m_autonomy.state.telemetryZones)
+			{
+				if (!zone.is_object())
+				{
+					continue;
+				}
+				const Real zx = zone.value("center_x", 0.0f);
+				const Real zy = zone.value("center_y", 0.0f);
+				const Real dx = zx - foundationPos->x;
+				const Real dy = zy - foundationPos->y;
+				const Real distSq = dx * dx + dy * dy;
+				if (distSq < bestZoneDistSq)
+				{
+					bestZoneDistSq = distSq;
+					foundationZoneId = zone.value("anchor_id", -1);
+				}
+			}
+		}
 
 		// Get all active build tasks to check if workers are already assigned
 		std::vector<SpecialTaskReservation*> allBuildTasks = m_autonomy.taskReservationManager.findBuildTasks();
@@ -622,10 +801,38 @@ void attemptAbandonedFoundationRecovery(Player* player)
 			const Real dx = workerPos->x - foundationPos->x;
 			const Real dy = workerPos->y - foundationPos->y;
 			const Real distSq = dx * dx + dy * dy;
+			Real score = distSq;
+			Int workerZoneId = -1;
+			if (foundationZoneId >= 0 && m_autonomy.state.telemetryZones.is_array())
+			{
+				Real bestZoneDistSq = m_autonomy.state.zoneRadius * m_autonomy.state.zoneRadius;
+				for (const auto& zone : m_autonomy.state.telemetryZones)
+				{
+					if (!zone.is_object())
+					{
+						continue;
+					}
+					const Real zx = zone.value("center_x", 0.0f);
+					const Real zy = zone.value("center_y", 0.0f);
+					const Real zdx = zx - workerPos->x;
+					const Real zdy = zy - workerPos->y;
+					const Real zoneDistSq = zdx * zdx + zdy * zdy;
+					if (zoneDistSq < bestZoneDistSq)
+					{
+						bestZoneDistSq = zoneDistSq;
+						workerZoneId = zone.value("anchor_id", -1);
+					}
+				}
+				if (workerZoneId == foundationZoneId)
+				{
+					score -= 1000000.0f;
+				}
+			}
 
-			if (distSq < bestDistSq && distSq < 1000.0f * 1000.0f) // Within 1000 units
+			if (distSq < 1800.0f * 1800.0f && score < bestScore)
 			{
 				bestWorker = worker;
+				bestScore = score;
 				bestDistSq = distSq;
 			}
 		}
@@ -634,12 +841,26 @@ void attemptAbandonedFoundationRecovery(Player* player)
 		{
 			// Attempt to reassign worker to complete the foundation
 			adapterLog(
-				"construction_task_recovery task=%u template=%s foundation=%u action=reassign worker=%u distance=%.1f reason=no_active_builder",
+					"construction_task_recovery task=%u template=%s foundation=%u action=reassign worker=%u distance=%.1f reason=no_active_builder",
 				task->taskId,
 				task->expectedTemplate.c_str(),
 				static_cast<unsigned int>(foundation->getID()),
 				static_cast<unsigned int>(bestWorker->getID()),
 				std::sqrt(bestDistSq));
+			if (isPhase79Strategic && strategicState != nullptr)
+			{
+				++strategicState->recoveryAttempts;
+				strategicState->lastRecoveryTick = now;
+				const char* source = bestScore < bestDistSq ? "same_zone" : (bestDistSq < 1000.0f * 1000.0f ? "nearby_zone" : "global_fallback");
+				adapterLog(
+					"construction_worker_selection task=%u template=%s zone=%d worker=%u distance=%.1f source=%s reason=strategic_foundation_recovery",
+					task->taskId,
+					task->expectedTemplate.c_str(),
+					foundationZoneId,
+					static_cast<unsigned int>(bestWorker->getID()),
+					std::sqrt(bestDistSq),
+					source);
+			}
 
 			// Telemetry event
 			recordAutonomyTelemetryEvent(
@@ -722,6 +943,16 @@ void attemptAbandonedFoundationRecovery(Player* player)
 				std::string moveReason;
 				moveWorkerToPosition(bestWorker, foundationPos, moveReason);
 			}
+			if (isPhase79Strategic)
+			{
+				adapterLog(
+					"strategic_foundation_recovery template=%s foundation=%u worker=%u issued=%d reason=%s",
+					task->expectedTemplate.c_str(),
+					static_cast<unsigned int>(foundation->getID()),
+					static_cast<unsigned int>(bestWorker->getID()),
+					buildCommandIssued ? 1 : 0,
+					buildCommandIssued ? "replacement_worker" : "resume_failed_move_fallback");
+			}
 
 			// Update task: reset stalled state and update source worker
 			task->sourceObjectId = bestWorker->getID();
@@ -739,6 +970,15 @@ void attemptAbandonedFoundationRecovery(Player* player)
 
 			if (stalledDuration > 60000u) // 60 seconds total stall - give up
 			{
+				if (isPhase79Strategic && strategicState != nullptr)
+				{
+					++strategicState->recoveryAttempts;
+					adapterLog(
+						"strategic_foundation_recovery template=%s foundation=%u worker=0 issued=0 reason=no_local_worker",
+						task->expectedTemplate.c_str(),
+						static_cast<unsigned int>(foundation->getID()));
+					continue;
+				}
 				m_autonomy.taskReservationManager.failTask(task->taskId, "recovery_timeout_no_worker");
 				adapterLog(
 					"special_task_state task=%u state=Failed reason=recovery_timeout_no_worker template=%s foundation=%u stalled_duration=%u",
@@ -755,6 +995,92 @@ void attemptAbandonedFoundationRecovery(Player* player)
 					foundationPos);
 			}
 		}
+	}
+}
+
+void logStrategicFoundationHealth(Player* player)
+{
+	if (player == nullptr || TheGameLogic == nullptr)
+	{
+		return;
+	}
+
+	struct Counts
+	{
+		int live = 0;
+		int inProgress = 0;
+		int healthy = 0;
+		int stale = 0;
+		int noBuilder = 0;
+		int damaged = 0;
+	};
+	std::map<std::string, Counts> countsByTemplate;
+	const DWORD now = ::GetTickCount();
+
+	for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
+	{
+		if (obj == nullptr || obj->isEffectivelyDead())
+		{
+			continue;
+		}
+		if (obj->getControllingPlayer() != player || !obj->isKindOf(KINDOF_STRUCTURE))
+		{
+			continue;
+		}
+		const ThingTemplate* tt = obj->getTemplate();
+		const std::string templateName = tt != nullptr ? tt->getName().str() : "";
+		if (!isPhase79StrategicFoundationTemplate(templateName))
+		{
+			continue;
+		}
+
+		Counts& counts = countsByTemplate[templateName];
+		++counts.live;
+		const bool underConstruction = obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION);
+		if (!underConstruction)
+		{
+			continue;
+		}
+		++counts.inProgress;
+		const UnsignedInt objectId = static_cast<UnsignedInt>(obj->getID());
+		const auto stateIt = m_autonomy.state.strategicFoundationHealth.find(objectId);
+		const bool stopped = (stateIt != m_autonomy.state.strategicFoundationHealth.end() && stateIt->second.stopIssued);
+		const bool stale = (stateIt != m_autonomy.state.strategicFoundationHealth.end() &&
+			(now - stateIt->second.lastProgressTick) >= 60000u);
+		const bool hasBuilder = hasActiveBuilderForFoundation(player, obj->getID());
+		if (!hasBuilder)
+		{
+			++counts.noBuilder;
+		}
+		if (stale || stopped)
+		{
+			++counts.stale;
+		}
+		else
+		{
+			++counts.healthy;
+		}
+		BodyModuleInterface* body = obj->getBodyModule();
+		if (body != nullptr && body->getMaxHealth() > 0.0f && body->getHealth() < body->getMaxHealth() * 0.98f)
+		{
+			++counts.damaged;
+		}
+	}
+
+	for (const auto& pair : countsByTemplate)
+	{
+		const Counts& counts = pair.second;
+		const char* reason = counts.stale > 0 ? "stale_no_progress" : (counts.noBuilder > 0 ? "no_active_builder" : "healthy_in_progress");
+		adapterLog(
+			"strategic_foundation_health template=%s live=%d in_progress=%d healthy=%d stale=%d no_builder=%d damaged=%d reason=%s",
+			pair.first.c_str(),
+			counts.live,
+			counts.inProgress,
+			counts.healthy,
+			counts.stale,
+			counts.noBuilder,
+			counts.damaged,
+			reason);
 	}
 }
 
@@ -777,4 +1103,6 @@ void updateSpecialTaskReservations(Player* player)
 
 	// Attempt recovery for abandoned foundations
 	attemptAbandonedFoundationRecovery(player);
+
+	logStrategicFoundationHealth(player);
 }

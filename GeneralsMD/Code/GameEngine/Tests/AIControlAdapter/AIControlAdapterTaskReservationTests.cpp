@@ -265,6 +265,31 @@ TEST_F(AIControlAdapterTaskReservationTests, FindBuildTasks_FiltersBy Template)
 	}
 }
 
+TEST_F(AIControlAdapterTaskReservationTests, FindBuildTasks_ExcludesTerminalBuildTasks)
+{
+	const unsigned int activeTask = manager.createReservation(
+		SpecialTaskType::BuildStructure,
+		100,
+		"GLAScudStorm",
+		Coord3D{1000.0f, 2000.0f, 0.0f},
+		"smart_build",
+		90000);
+
+	const unsigned int stoppedTask = manager.createReservation(
+		SpecialTaskType::BuildStructure,
+		101,
+		"GLAScudStorm",
+		Coord3D{1100.0f, 2100.0f, 0.0f},
+		"smart_build",
+		90000);
+	manager.failTask(stoppedTask, "stopped_stale_no_progress");
+
+	std::vector<SpecialTaskReservation*> scudTasks = manager.findBuildTasks("ScudStorm");
+	EXPECT_EQ(scudTasks.size(), 1u);
+	ASSERT_NE(scudTasks[0], nullptr);
+	EXPECT_EQ(scudTasks[0]->taskId, activeTask);
+}
+
 TEST_F(AIControlAdapterTaskReservationTests, FindActiveTasks_ExcludesTerminalStates)
 {
 	const unsigned int task1 = manager.createReservation(

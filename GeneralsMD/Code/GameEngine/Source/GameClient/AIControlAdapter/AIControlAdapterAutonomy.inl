@@ -175,6 +175,7 @@
 			state.telemetryZonesDirty = true;
 			state.telemetryZones = nlohmann::json::array();
 			state.telemetryEvents = nlohmann::json::array();
+			enemyMemory.clear();
 		}
 
 		/**
@@ -210,4 +211,5 @@
 		AIControlAdapterTaskReservationManager taskReservationManager;  ///< Special operations task reservations (Phase 6.1)
 		AIControlAdapterCombatTaskManager combatTaskManager;  ///< Combat task ownership and unit reservations (Phase 9)
 		AIControlAdapterWMDTargetTracker wmdTargetTracker;  ///< WMD threat detection and tracking (Phase 7.4)
+		AIControlAdapterEnemyMemory enemyMemory;  ///< Enemy map intelligence and last-known positions (Phase 8.1)
 	};

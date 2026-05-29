@@ -3516,6 +3516,46 @@
 			return std::string();
 		}
 
+		std::string inferRocketBuggyTemplateForProducer(Object* producer) const
+		{
+			if (producer == nullptr || TheThingFactory == nullptr || TheBuildAssistant == nullptr)
+			{
+				return std::string();
+			}
+			auto isPotentiallyQueueable = [&](const ThingTemplate* tt) -> bool
+			{
+				if (tt == nullptr)
+				{
+					return false;
+				}
+				const CanMakeType canMake = TheBuildAssistant->canMakeUnit(producer, tt);
+				return canMake == CANMAKE_OK ||
+					canMake == CANMAKE_NO_MONEY ||
+					canMake == CANMAKE_QUEUE_FULL ||
+					canMake == CANMAKE_PARKING_PLACES_FULL;
+			};
+			const char* candidates[] = {
+				"GLAVehicleRocketBuggy"
+			};
+			for (const char* name : candidates)
+			{
+				const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(name), false);
+				if (tt != nullptr && isPotentiallyQueueable(tt))
+				{
+					return name;
+				}
+			}
+			for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
+			{
+				const std::string templateName = tt->getName().str();
+				if (containsIgnoreCase(templateName, "rocketbuggy") && isPotentiallyQueueable(tt))
+				{
+					return templateName;
+				}
+			}
+			return std::string();
+		}
+
 		std::string inferRadarVanTemplateForProducer(Object* producer) const
 		{
 			if (producer == nullptr || TheThingFactory == nullptr || TheBuildAssistant == nullptr)
@@ -3783,6 +3823,59 @@
 				const std::string unitTemplateName = inferScorpionTemplateForProducer(producer);
 				if (unitTemplateName.empty())
 				{
+					continue;
+				}
+				for (Int i = 0; i < count; ++i)
+				{
+					std::string queueReason;
+					if (queueTemplateAtProducer(message, producer, unitTemplateName, queueReason))
+					{
+						++queued;
+						continue;
+					}
+					lastReason = queueReason;
+					if (queueReason == "queue_full" || queueReason == "no_money")
+					{
+						break;
+					}
+				}
+			}
+
+			if (queued <= 0)
+			{
+				reason = lastReason;
+				return false;
+			}
+			return true;
+		}
+
+		bool executeGameQueueRocketBuggiesAllWarFactories(const nlohmann::json& message, std::string& reason)
+		{
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			ProducerCollectContext ctx;
+			ctx.matchBarracks = false;
+			ctx.matchWarFactory = true;
+			player->iterateObjects(collectProducersCallback, &ctx);
+			if (ctx.producers.empty())
+			{
+				reason = "no_war_factory_found";
+				return false;
+			}
+
+			const Int count = parseQueueCountArg(message);
+			Int queued = 0;
+			std::string lastReason = "queue_failed";
+			for (Object* producer : ctx.producers)
+			{
+				const std::string unitTemplateName = inferRocketBuggyTemplateForProducer(producer);
+				if (unitTemplateName.empty())
+				{
+					lastReason = "rocket_buggy_template_not_found";
 					continue;
 				}
 				for (Int i = 0; i < count; ++i)
