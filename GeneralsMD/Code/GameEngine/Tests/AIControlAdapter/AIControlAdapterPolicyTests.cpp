@@ -1,6 +1,8 @@
 #include "GameClient/AIControlAdapter/AIControlAdapterPolicy.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterEnemyMemory.h"
 
 #include <cmath>
+#include <cstring>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -1677,6 +1679,233 @@ int main()
 			"Phase 6.3: should not produce beyond armyCap + desiredCaptureSources");
 		expect(result.reason != nullptr && std::strcmp(result.reason, "army_cap_reached") == 0,
 			"Phase 6.3: should return army_cap_reached when exceeded bound");
+	}
+
+	{
+		const AIControlAdapterScudStormConstructionPolicyInputs inputs = {
+			true,      // prereqReady
+			true,      // productionNeeded
+			12000u,    // money
+			10000u,    // reserveCash
+			5000u,     // scudStormCost
+			10,
+			10,
+			5,
+			0,
+			1,
+			25000u
+		};
+		const auto result = AIControlAdapterEvaluateScudStormConstruction(inputs);
+		expect(!result.spendAllowed, "SCUD Storm construction should not spend reserve cash");
+		expect(std::strcmp(result.reason, "reserve_protected") == 0,
+			"SCUD Storm construction should report reserve_protected below reserve plus cost");
+	}
+
+	{
+		const AIControlAdapterScudStormConstructionPolicyInputs inputs = {
+			true,
+			true,
+			25000u,
+			10000u,
+			5000u,
+			3,      // current zones
+			10,     // desired zones, gap 7
+			5,
+			0,
+			1,
+			25000u
+		};
+		const auto result = AIControlAdapterEvaluateScudStormConstruction(inputs);
+		expect(!result.spendAllowed, "Urgent expansion should block SCUD Storm construction without high cash float");
+		expect(result.zoneExpansionUrgent, "SCUD Storm policy should use the zone expansion urgency threshold");
+		expect(std::strcmp(result.reason, "urgent_expansion_priority") == 0,
+			"SCUD Storm construction should report urgent expansion priority");
+	}
+
+	{
+		const AIControlAdapterScudStormConstructionPolicyInputs inputs = {
+			true,
+			true,
+			35000u,
+			10000u,
+			5000u,
+			3,
+			10,
+			5,
+			0,
+			1,
+			25000u
+		};
+		const auto result = AIControlAdapterEvaluateScudStormConstruction(inputs);
+		expect(result.spendAllowed, "Very high cash float should allow SCUD Storm construction despite urgent expansion");
+		expect(result.highCashOverride, "Very high cash float should be tagged as a high-cash override");
+		expect(result.maxInProgress == 2, "Very high cash float should allow two in-progress SCUD Storms");
+		expect(std::strcmp(result.reason, "high_cash_override") == 0,
+			"SCUD Storm construction should report high_cash_override");
+	}
+
+	{
+		const AIControlAdapterScudStormConstructionPolicyInputs inputs = {
+			true,
+			true,
+			20000u,
+			10000u,
+			5000u,
+			10,
+			10,
+			5,
+			1,
+			1,
+			25000u
+		};
+		const auto result = AIControlAdapterEvaluateScudStormConstruction(inputs);
+		expect(!result.spendAllowed, "Normal SCUD Storm in-progress cap should block another build");
+		expect(std::strcmp(result.reason, "in_progress_cap") == 0,
+			"SCUD Storm construction should report in_progress_cap");
+	}
+
+	{
+		const AIControlAdapterScudStormConstructionPolicyInputs inputs = {
+			true,
+			false,
+			100000u,
+			10000u,
+			5000u,
+			3,
+			10,
+			5,
+			0,
+			1,
+			25000u
+		};
+		const auto result = AIControlAdapterEvaluateScudStormConstruction(inputs);
+		expect(!result.spendAllowed, "SCUD Storm construction gate should block only new construction when target is reached");
+		expect(std::strcmp(result.reason, "target_reached") == 0,
+			"SCUD Storm construction should report target_reached independently of firing policy");
+	}
+
+	{
+		expect(
+			AIControlAdapterEnemyMemory::classifyTemplate("ChinaNuclearMissileLauncher", true) == EnemyMemoryKind::Wmd,
+			"Enemy memory should classify nuclear missile launcher as wmd");
+		expect(
+			AIControlAdapterEnemyMemory::classifyTemplate("GLAScudStorm", true) == EnemyMemoryKind::Wmd,
+			"Enemy memory should classify SCUD Storm as wmd");
+		expect(
+			AIControlAdapterEnemyMemory::classifyTemplate("ChinaWarFactory", true) == EnemyMemoryKind::Production,
+			"Enemy memory should classify War Factory as production");
+		expect(
+			AIControlAdapterEnemyMemory::classifyTemplate("GLAArmsDealer", true) == EnemyMemoryKind::Production,
+			"Enemy memory should classify Arms Dealer as production");
+		expect(
+			AIControlAdapterEnemyMemory::classifyTemplate("GLASupplyStash", true) == EnemyMemoryKind::Economy,
+			"Enemy memory should classify Supply Stash as economy");
+		expect(
+			AIControlAdapterEnemyMemory::classifyTemplate("AmericaPatriotBattery", true) == EnemyMemoryKind::Defense,
+			"Enemy memory should classify Patriot as defense");
+	}
+
+	{
+		AIControlAdapterEnemyMemory memory;
+		EnemyMemoryObservation observation;
+		observation.objectId = 4123u;
+		observation.playerIndex = 2;
+		observation.team = 1;
+		observation.templateName = "GLABarracks";
+		observation.isStructure = true;
+		observation.isUnit = false;
+		observation.position.x = 4200.0f;
+		observation.position.y = 1800.0f;
+		observation.position.z = 0.0f;
+		observation.seenTick = 1000u;
+
+		memory.beginUpdate(1000u);
+		memory.observe(observation);
+		memory.finishUpdate(1000u);
+		expect(memory.getItems().size() == 1u, "Enemy memory should store visible enemy structure");
+		expect(memory.getItems()[0].visible, "Enemy memory item should be visible after observation");
+		expect(!memory.getItems()[0].stale, "Enemy memory item should not be stale while visible");
+
+		memory.beginUpdate(2500u);
+		memory.finishUpdate(2500u);
+		expect(memory.getItems().size() == 1u, "Enemy memory should preserve last-known structure after visibility loss");
+		expect(!memory.getItems()[0].visible, "Enemy memory item should become non-visible without a new observation");
+		expect(memory.getItems()[0].stale, "Enemy memory item should become stale without a new observation");
+		expect(memory.buildTelemetry(2500u)["items"][0]["age_ms"].get<unsigned int>() == 1500u,
+			"Enemy memory telemetry should expose stale age");
+	}
+
+	{
+		AIControlAdapterEnemyMemory memory;
+		EnemyMemoryObservation observation;
+		observation.objectId = 81u;
+		observation.playerIndex = 3;
+		observation.team = -1;
+		observation.templateName = "GLASneakAttackTunnelNetwork";
+		observation.isStructure = true;
+		observation.isUnit = false;
+		observation.position.x = 231.0f;
+		observation.position.y = 610.0f;
+		observation.seenTick = 1000u;
+
+		memory.beginUpdate(1000u);
+		memory.observe(observation);
+		memory.finishUpdate(1000u);
+		expect(memory.getItems().empty(), "Enemy memory should ignore transient Sneak Attack tunnel markers");
+	}
+
+	{
+		AIControlAdapterEnemyMemory memory;
+		memory.beginUpdate(9000u);
+		for (unsigned int i = 0; i < 3u; ++i)
+		{
+			EnemyMemoryObservation unit;
+			unit.objectId = 5000u + i;
+			unit.playerIndex = 3;
+			unit.team = 2;
+			unit.templateName = "ChinaTankBattleMaster";
+			unit.isStructure = false;
+			unit.isUnit = true;
+			unit.position.x = 3000.0f + static_cast<float>(i * 40u);
+			unit.position.y = 2600.0f;
+			unit.seenTick = 9000u;
+			memory.observe(unit);
+		}
+		memory.finishUpdate(9000u);
+		expect(memory.getItems().empty(), "Enemy memory should not store ordinary units as individual permanent items");
+		expect(memory.getClusters().size() == 1u, "Enemy memory should cluster visible enemy units");
+		expect(memory.getClusters()[0].visibleCount == 3, "Enemy unit cluster should preserve visible count");
+	}
+
+	{
+		const AIControlAdapterRocketBuggyMixResult result = AIControlAdapterChooseRocketBuggyMix({
+			true,
+			true,
+			false,
+			0,
+			0,
+			8,
+			8,
+			0
+		});
+		expect(result.desiredBuggies >= 3, "Rocket Buggies should have a baseline late-game vehicle mix target without siege detection");
+		expect(result.productionNeeded, "Rocket Buggy baseline mix should request production when below target");
+		expect(std::strcmp(result.reason, "late_game_mix") == 0, "Rocket Buggy baseline production should report late_game_mix");
+	}
+
+	{
+		const AIControlAdapterRocketBuggyMixResult result = AIControlAdapterChooseRocketBuggyMix({
+			true,
+			true,
+			false,
+			4,
+			0,
+			8,
+			8,
+			0
+		});
+		expect(!result.productionNeeded, "Rocket Buggy baseline mix should stop once current buggies meet the target");
+		expect(std::strcmp(result.reason, "late_game_mix") == 0, "Satisfied Rocket Buggy baseline should still report late_game_mix");
 	}
 
 	std::cout << "AIControlAdapterPolicyTests passed\n";

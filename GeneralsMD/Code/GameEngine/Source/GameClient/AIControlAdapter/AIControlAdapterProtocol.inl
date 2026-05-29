@@ -713,6 +713,19 @@
 				return;
 			}
 
+			if (cmd == "Game.QueueRocketBuggiesAllWarFactories")
+			{
+				std::string reason;
+				if (!executeGameQueueRocketBuggiesAllWarFactories(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+
+				sendActionAck(requestId, true);
+				return;
+			}
+
 			if (cmd == "Game.QueueRadarVansAllWarFactories")
 			{
 				std::string reason;

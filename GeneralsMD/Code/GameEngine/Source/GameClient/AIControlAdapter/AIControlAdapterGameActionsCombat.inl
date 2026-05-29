@@ -609,11 +609,15 @@
 				std::vector<GuardCommand> commands;
 				// Phase 6.2: Pass task reservation manager to filter capture-reserved units
 				const AIControlAdapterTaskReservationManager* taskReservationManager;
+				AIControlAdapterState* adapter;
 				std::vector<ObjectID> skippedReservedUnits; // Track skipped for logging
+				std::vector<ObjectID> skippedCombatReservedUnits;
+				std::vector<ObjectID> skippedGarrisonReservedUnits;
 			};
 
 			GuardCollectContext collectCtx;
 			collectCtx.taskReservationManager = &m_autonomy.taskReservationManager;
+			collectCtx.adapter = this;
 			player->iterateObjects([](Object* obj, void* userData)
 			{
 				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
@@ -653,6 +657,18 @@
 					ctx->skippedReservedUnits.push_back(obj->getID());
 					return;
 				}
+				if (ctx->adapter != nullptr &&
+					ctx->adapter->m_autonomy.combatTaskManager.isUnitReserved(obj->getID()))
+				{
+					ctx->skippedCombatReservedUnits.push_back(obj->getID());
+					return;
+				}
+				if (ctx->adapter != nullptr &&
+					ctx->adapter->isGarrisonReservedUnit(static_cast<UnsignedInt>(obj->getID())))
+				{
+					ctx->skippedGarrisonReservedUnits.push_back(obj->getID());
+					return;
+				}
 
 				GuardCommand command = {};
 				command.id = obj->getID();
@@ -682,6 +698,18 @@
 						break;
 					}
 				}
+			}
+			for (ObjectID skippedId : collectCtx.skippedCombatReservedUnits)
+			{
+				adapterLog(
+					"guard_skip_reserved_combat unit=%u reason=combat_task",
+					static_cast<unsigned int>(skippedId));
+			}
+			for (ObjectID skippedId : collectCtx.skippedGarrisonReservedUnits)
+			{
+				adapterLog(
+					"guard_skip_reserved_garrison unit=%u reason=garrison_assignment",
+					static_cast<unsigned int>(skippedId));
 			}
 
 			if (collectCtx.commands.empty())
@@ -761,6 +789,15 @@
 			// Phase 7.4: WMD-aware defense discipline - cap unit count when WMD threat exists
 			const bool hasWMDThreat = m_autonomy.wmdTargetTracker.hasActiveWMDThreat();
 			std::size_t maxDefenseUnits = combatUnits.size(); // Default: use all units
+			const auto maxUnitsIt = argsIt->find("max_units");
+			if (maxUnitsIt != argsIt->end() && maxUnitsIt->is_number_integer())
+			{
+				const Int requestedMaxUnits = maxUnitsIt->get<Int>();
+				if (requestedMaxUnits > 0)
+				{
+					maxDefenseUnits = std::min<std::size_t>(maxDefenseUnits, static_cast<std::size_t>(requestedMaxUnits));
+				}
+			}
 
 			if (hasWMDThreat)
 			{
@@ -843,4 +880,3 @@
 
 			return commandSuccess;
 		}
-

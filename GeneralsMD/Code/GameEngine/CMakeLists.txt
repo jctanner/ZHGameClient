@@ -1275,33 +1275,48 @@ add_compile_definitions(_DISABLE_CONSTEXPR_MUTEX_CONSTRUCTOR)
 add_compile_definitions(GENERALS_ONLINE)
 
 if(BUILD_TESTING)
-    add_executable(z_gameengine_adapter_tests
-        Tests/AIControlAdapter/AIControlAdapterPolicyTests.cpp
+    set(AI_CONTROL_ADAPTER_POLICY_SOURCES
+        Source/GameClient/AIControlAdapter/AIControlAdapterPolicy.cpp
     )
 
-    target_link_libraries(z_gameengine_adapter_tests PRIVATE
-        z_gameengine
+    function(configure_ai_control_adapter_unit_test target_name)
+        target_link_libraries(${target_name} PRIVATE
+            zi_gameengine_include
+            corei_libraries_source_wwvegas
+            corei_libraries_source_wwvegas_wwlib
+            zi_always
+        )
+        target_include_directories(${target_name} PRIVATE
+            Include/Precompiled
+            Include/GameNetwork/GeneralsOnline/Vendor/
+        )
+    endfunction()
+
+    add_executable(z_gameengine_adapter_tests
+        Tests/AIControlAdapter/AIControlAdapterPolicyTests.cpp
+        ${AI_CONTROL_ADAPTER_POLICY_SOURCES}
     )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_tests)
 
     add_test(NAME z_gameengine_adapter_tests COMMAND z_gameengine_adapter_tests)
 
     add_executable(z_gameengine_adapter_techmanager_tests
         Tests/AIControlAdapter/AIControlAdapterTechManagerTests.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterTechManager.cpp
     )
 
-    target_link_libraries(z_gameengine_adapter_techmanager_tests PRIVATE
-        z_gameengine
-    )
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_techmanager_tests)
 
     add_test(NAME z_gameengine_adapter_techmanager_tests COMMAND z_gameengine_adapter_techmanager_tests)
 
     add_executable(z_gameengine_adapter_productionmanager_tests
         Tests/AIControlAdapter/AIControlAdapterProductionManagerTests.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterProductionManager.cpp
+        ${AI_CONTROL_ADAPTER_POLICY_SOURCES}
     )
 
-    target_link_libraries(z_gameengine_adapter_productionmanager_tests PRIVATE
-        z_gameengine
-    )
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_productionmanager_tests)
 
     add_test(NAME z_gameengine_adapter_productionmanager_tests COMMAND z_gameengine_adapter_productionmanager_tests)
 
@@ -1309,49 +1324,40 @@ if(BUILD_TESTING)
         Tests/AIControlAdapter/AIControlAdapterUITests.cpp
     )
 
-    target_link_libraries(z_gameengine_adapter_ui_tests PRIVATE
-        z_gameengine
-    )
-
-    add_test(NAME z_gameengine_adapter_ui_tests COMMAND z_gameengine_adapter_ui_tests)
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_ui_tests)
 
     add_executable(z_gameengine_adapter_telemetry_tests
         Tests/AIControlAdapter/AIControlAdapterTelemetryCacheTests.cpp
     )
 
-    target_link_libraries(z_gameengine_adapter_telemetry_tests PRIVATE
-        z_gameengine
-    )
-
-    add_test(NAME z_gameengine_adapter_telemetry_tests COMMAND z_gameengine_adapter_telemetry_tests)
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_telemetry_tests)
 
     add_executable(z_gameengine_adapter_zonedefense_tests
         Tests/AIControlAdapter/AIControlAdapterZoneDefenseTests.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterZoneManager.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterDefenseManager.cpp
+        ${AI_CONTROL_ADAPTER_POLICY_SOURCES}
     )
 
-    target_link_libraries(z_gameengine_adapter_zonedefense_tests PRIVATE
-        z_gameengine
-    )
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_zonedefense_tests)
 
     add_test(NAME z_gameengine_adapter_zonedefense_tests COMMAND z_gameengine_adapter_zonedefense_tests)
 
     add_executable(z_gameengine_adapter_scheduler_tests
         Tests/AIControlAdapter/AIControlAdapterSchedulerTests.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterScheduler.cpp
     )
 
-    target_link_libraries(z_gameengine_adapter_scheduler_tests PRIVATE
-        z_gameengine
-    )
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_scheduler_tests)
 
     add_test(NAME z_gameengine_adapter_scheduler_tests COMMAND z_gameengine_adapter_scheduler_tests)
 
     add_executable(z_gameengine_adapter_economymanager_tests
         Tests/AIControlAdapter/AIControlAdapterEconomyManagerTests.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterEconomyManager.cpp
     )
 
-    target_link_libraries(z_gameengine_adapter_economymanager_tests PRIVATE
-        z_gameengine
-    )
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_economymanager_tests)
 
     add_test(NAME z_gameengine_adapter_economymanager_tests COMMAND z_gameengine_adapter_economymanager_tests)
 
@@ -1359,31 +1365,26 @@ if(BUILD_TESTING)
         Tests/AIControlAdapter/AIControlAdapterDistributedPlacementTests.cpp
     )
 
-    target_link_libraries(z_gameengine_adapter_distributedplacement_tests PRIVATE
-        z_gameengine
-    )
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_distributedplacement_tests)
 
     add_test(NAME z_gameengine_adapter_distributedplacement_tests COMMAND z_gameengine_adapter_distributedplacement_tests)
 
     # Phase 6.2: Capture Task Lifecycle Tests
     add_executable(z_gameengine_adapter_capturetask_tests
         Tests/AIControlAdapter/AIControlAdapterCaptureTaskLifecycleTests.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterTaskReservation.cpp
     )
 
-    target_link_libraries(z_gameengine_adapter_capturetask_tests PRIVATE
-        z_gameengine
-    )
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_capturetask_tests)
 
     add_test(NAME z_gameengine_adapter_capturetask_tests COMMAND z_gameengine_adapter_capturetask_tests)
 
     # Phase 9: Combat Task Ownership Tests
     add_executable(z_gameengine_adapter_combattask_tests
         Tests/AIControlAdapter/AIControlAdapterCombatTaskTests.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterCombatTask.cpp
     )
 
-    target_link_libraries(z_gameengine_adapter_combattask_tests PRIVATE
-        z_gameengine
-    )
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_combattask_tests)
 
-    add_test(NAME z_gameengine_adapter_combattask_tests COMMAND z_gameengine_adapter_combattask_tests)
 endif()

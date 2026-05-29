@@ -258,6 +258,12 @@ std::vector<SpecialTaskReservation*> AIControlAdapterTaskReservationManager::fin
 		SpecialTaskReservation& task = pair.second;
 		if (task.type == SpecialTaskType::BuildStructure)
 		{
+			if (task.state == SpecialTaskState::Complete ||
+				task.state == SpecialTaskState::Failed ||
+				task.state == SpecialTaskState::Expired)
+			{
+				continue;
+			}
 			if (templateFilter.empty() || task.expectedTemplate.find(templateFilter) != std::string::npos)
 			{
 				result.push_back(&task);

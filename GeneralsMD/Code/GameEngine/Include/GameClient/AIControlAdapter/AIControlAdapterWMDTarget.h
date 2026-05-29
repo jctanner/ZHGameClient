@@ -51,7 +51,26 @@ public:
 	int getActiveWMDCount() const;
 
 	// Check if a template is a WMD structure
-	static bool isWMDTemplate(const std::string& templateName);
+	static bool isWMDTemplate(const std::string& templateName)
+	{
+		if (templateName.find("NuclearMissile") != std::string::npos)
+		{
+			return true;
+		}
+		if (templateName.find("NukeSilo") != std::string::npos)
+		{
+			return true;
+		}
+		if (templateName.find("ParticleCannon") != std::string::npos)
+		{
+			return true;
+		}
+		if (templateName.find("ScudStorm") != std::string::npos)
+		{
+			return true;
+		}
+		return false;
+	}
 
 	// Clear all tracked targets
 	void clear();

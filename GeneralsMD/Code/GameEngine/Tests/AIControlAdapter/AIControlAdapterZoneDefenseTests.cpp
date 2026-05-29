@@ -966,6 +966,212 @@ namespace Phase71
 	}
 }
 
+namespace Phase78
+{
+	void testTwoThreatsReceiveCappedAllocations()
+	{
+		const AIControlAdapterZoneDefenseBudgetResult highBudget = AIControlAdapterChooseZoneDefenseBudget({
+			"high",
+			30,
+			0,
+			0,
+			false,
+			true,
+			false,
+			false,
+			false
+		});
+		const AIControlAdapterZoneDefenseBudgetResult mediumBudget = AIControlAdapterChooseZoneDefenseBudget({
+			"medium",
+			30 - highBudget.maxNewAssignments,
+			1,
+			0,
+			false,
+			true,
+			false,
+			false,
+			false
+		});
+
+		expect(highBudget.maxNewAssignments > 0, "High threat should receive a capped allocation");
+		expect(mediumBudget.maxNewAssignments > 0, "Second simultaneous threat should still receive a separate allocation");
+		expect(highBudget.maxNewAssignments < 30, "High threat should not consume the full army blob");
+		expect(mediumBudget.maxNewAssignments < 30, "Medium threat should not consume the full army blob");
+
+		std::cout << "PASS: testTwoThreatsReceiveCappedAllocations\n";
+	}
+
+	void testActiveAllocationSuppressesRepeatedBroadMobilization()
+	{
+		const AIControlAdapterZoneDefenseAllocationResult result = AIControlAdapterEvaluateZoneDefenseAllocation({
+			true,
+			3,
+			3,
+			20000u,
+			50000u,
+			100000u,
+			8,
+			8,
+			100.0f,
+			100.0f,
+			120.0f,
+			110.0f,
+			300.0f
+		});
+
+		expect(!result.shouldIssueCommand, "Active same-severity allocation should suppress broad remobilization");
+		expectEq(std::string(result.reason), std::string("min_hold"), "Suppression reason should be min_hold");
+
+		std::cout << "PASS: testActiveAllocationSuppressesRepeatedBroadMobilization\n";
+	}
+
+	void testMinHoldBlocksEqualSeverityRetask()
+	{
+		const AIControlAdapterZoneDefenseAllocationResult result = AIControlAdapterEvaluateZoneDefenseAllocation({
+			true,
+			2,
+			2,
+			25000u,
+			60000u,
+			100000u,
+			5,
+			8,
+			100.0f,
+			100.0f,
+			130.0f,
+			120.0f,
+			300.0f
+		});
+
+		expect(!result.shouldIssueCommand, "Equal-severity threat should not steal an allocation during minimum hold");
+		expectEq(std::string(result.reason), std::string("min_hold"), "Expected min_hold reason");
+
+		std::cout << "PASS: testMinHoldBlocksEqualSeverityRetask\n";
+	}
+
+	void testCriticalThreatOverride()
+	{
+		const AIControlAdapterZoneDefenseBudgetResult budget = AIControlAdapterChooseZoneDefenseBudget({
+			"critical",
+			18,
+			2,
+			0,
+			false,
+			false,
+			true,
+			true,
+			true
+		});
+
+		expect(budget.criticalOverride, "Critical threat should enable explicit override");
+		expect(budget.allowFrontDonors, "Critical threat may pull from front donors");
+		expect(budget.maxNewAssignments > 0, "Critical threat should still receive help under allocation pressure");
+		expectEq(std::string(budget.reason), std::string("critical_preserve_other_fronts"), "Critical reason should preserve other fronts");
+
+		std::cout << "PASS: testCriticalThreatOverride\n";
+	}
+
+	void testLocalReservesPreserved()
+	{
+		const AIControlAdapterZoneDefenseBudgetResult mainBudget = AIControlAdapterChooseZoneDefenseBudget({
+			"high",
+			10,
+			0,
+			0,
+			true,
+			false,
+			false,
+			false,
+			false
+		});
+		const AIControlAdapterZoneDefenseBudgetResult frontierLowBudget = AIControlAdapterChooseZoneDefenseBudget({
+			"low",
+			20,
+			0,
+			0,
+			false,
+			false,
+			true,
+			true,
+			false
+		});
+
+		expectEq(mainBudget.localReserve, 8, "Main base reserve should be preserved");
+		expect(mainBudget.maxNewAssignments <= 2, "Main base budget should not spend below reserve");
+		expectEq(frontierLowBudget.maxNewAssignments, 0, "Low threat should not pull from active/front zones");
+		expectEq(std::string(frontierLowBudget.reason), std::string("front_reserve"), "Frontier block should explain reserve protection");
+
+		std::cout << "PASS: testLocalReservesPreserved\n";
+	}
+
+	void testReinforcementAddsOnlyDelta()
+	{
+		const AIControlAdapterZoneDefenseAllocationResult result = AIControlAdapterEvaluateZoneDefenseAllocation({
+			true,
+			2,
+			3,
+			70000u,
+			60000u,
+			120000u,
+			5,
+			12,
+			100.0f,
+			100.0f,
+			110.0f,
+			110.0f,
+			300.0f
+		});
+
+		expect(result.shouldIssueCommand, "Escalated threat should reinforce existing allocation");
+		expect(result.shouldReinforce, "Escalated threat should be marked as reinforcement");
+		expectEq(result.requestedNewAssignments, 7, "Reinforcement should request only the missing delta");
+		expectEq(std::string(result.reason), std::string("threat_escalated"), "Expected threat_escalated reason");
+
+		std::cout << "PASS: testReinforcementAddsOnlyDelta\n";
+	}
+
+	void testMissingDefendersTriggerReinforcement()
+	{
+		const AIControlAdapterZoneDefenseAllocationResult result = AIControlAdapterEvaluateZoneDefenseAllocation({
+			true,
+			3,
+			3,
+			80000u,
+			60000u,
+			120000u,
+			2,
+			10,
+			100.0f,
+			100.0f,
+			100.0f,
+			100.0f,
+			300.0f
+		});
+
+		expect(result.shouldIssueCommand, "Missing defenders should trigger reinforcement");
+		expect(result.shouldReinforce, "Missing defenders should be marked as reinforcement");
+		expectEq(result.requestedNewAssignments, 8, "Missing defender reinforcement should request delta only");
+		expectEq(std::string(result.reason), std::string("defenders_missing"), "Expected defenders_missing reason");
+
+		std::cout << "PASS: testMissingDefendersTriggerReinforcement\n";
+	}
+
+	void runAllPhase78Tests()
+	{
+		std::cout << "\nRunning Phase 7.8 Multi-Front Defense Allocation tests...\n";
+
+		testTwoThreatsReceiveCappedAllocations();
+		testActiveAllocationSuppressesRepeatedBroadMobilization();
+		testMinHoldBlocksEqualSeverityRetask();
+		testCriticalThreatOverride();
+		testLocalReservesPreserved();
+		testReinforcementAddsOnlyDelta();
+		testMissingDefendersTriggerReinforcement();
+
+		std::cout << "All Phase 7.8 Multi-Front Defense Allocation tests passed!\n";
+	}
+}
+
 // Phase 5.8 Tests: Non-Supply Zone Anchor Types
 
 void testZoneAnchorTypeToString()
@@ -1228,6 +1434,543 @@ void testBuildSpaceValidation()
 	std::cout << "PASS: testBuildSpaceValidation\n";
 }
 
+namespace Phase79
+{
+	void testWmdStrikeWithoutLocalEnemySuppressesDefense()
+	{
+		const AIControlAdapterZoneThreatSourceResult result = AIControlAdapterClassifyZoneThreatSource({
+			0,
+			0,
+			true,
+			0.45f,
+			900.0f,
+			2,
+			1
+		});
+
+		expect(std::string(result.type) == "wmd_strike", "Severe recent-WMD damage with no local enemies should classify as wmd_strike");
+		expect(std::string(result.response) == "rebuild_only", "WMD-only strike should choose rebuild_only response");
+		expect(std::string(result.reason) == "severe_damage_no_local_enemy_recent_wmd", "WMD-only strike should expose concrete reason");
+		std::cout << "PASS: Phase79::testWmdStrikeWithoutLocalEnemySuppressesDefense\n";
+	}
+
+	void testWmdDamageWithLocalEnemyAllowsDefense()
+	{
+		const AIControlAdapterZoneThreatSourceResult result = AIControlAdapterClassifyZoneThreatSource({
+			3,
+			0,
+			true,
+			0.45f,
+			900.0f,
+			2,
+			0
+		});
+
+		expect(std::string(result.type) == "unit_attack", "Visible local enemies should override WMD-only classification");
+		expect(std::string(result.response) == "defend", "Visible local enemies should allow defense response");
+		std::cout << "PASS: Phase79::testWmdDamageWithLocalEnemyAllowsDefense\n";
+	}
+
+	void testUnitAttackStillMobilizesDefense()
+	{
+		const AIControlAdapterZoneThreatSourceResult result = AIControlAdapterClassifyZoneThreatSource({
+			2,
+			0,
+			false,
+			0.08f,
+			120.0f,
+			1,
+			0
+		});
+
+		expect(std::string(result.type) == "unit_attack", "Local visible enemy damage should classify as unit_attack");
+		expect(std::string(result.response) == "defend", "Unit attack should preserve normal defense behavior");
+		std::cout << "PASS: Phase79::testUnitAttackStillMobilizesDefense\n";
+	}
+
+	void testUnknownDamageUsesLimitedScout()
+	{
+		const AIControlAdapterZoneThreatSourceResult result = AIControlAdapterClassifyZoneThreatSource({
+			0,
+			0,
+			false,
+			0.08f,
+			120.0f,
+			1,
+			0
+		});
+
+		expect(std::string(result.type) == "unknown", "Damage without evidence should classify as unknown");
+		expect(std::string(result.response) == "limited_scout", "Unknown damage should use limited scout response");
+		std::cout << "PASS: Phase79::testUnknownDamageUsesLimitedScout\n";
+	}
+
+	void testArtilleryThreatUsesCounterbattery()
+	{
+		const AIControlAdapterZoneThreatSourceResult result = AIControlAdapterClassifyZoneThreatSource({
+			0,
+			1,
+			false,
+			0.12f,
+			180.0f,
+			1,
+			0
+		});
+
+		expect(std::string(result.type) == "artillery_attack", "Visible artillery without local enemies should classify as artillery_attack");
+		expect(std::string(result.response) == "counterbattery", "Artillery attack should prefer counterbattery response");
+		std::cout << "PASS: Phase79::testArtilleryThreatUsesCounterbattery\n";
+	}
+
+	void runAllPhase79Tests()
+	{
+		std::cout << "\nRunning Phase 7.9 Increment 2 threat-source tests...\n";
+		testWmdStrikeWithoutLocalEnemySuppressesDefense();
+		testWmdDamageWithLocalEnemyAllowsDefense();
+		testUnitAttackStillMobilizesDefense();
+		testUnknownDamageUsesLimitedScout();
+		testArtilleryThreatUsesCounterbattery();
+		std::cout << "All Phase 7.9 Increment 2 tests passed!\n";
+	}
+}
+
+namespace Phase793
+{
+	void testFrontierRequestsMoreStaticDefenseThanRear()
+	{
+		const AIControlAdapterStaticDefensePolicyResult rear = AIControlAdapterChooseStaticDefensePolicy({
+			"rear", false, false, false, false, false, false,
+			0, 0, 0, 0, 0, 0
+		});
+		const AIControlAdapterStaticDefensePolicyResult frontier = AIControlAdapterChooseStaticDefensePolicy({
+			"frontier", false, true, true, false, false, false,
+			0, 0, 0, 0, 0, 0
+		});
+
+		expect(frontier.desiredTunnels > rear.desiredTunnels, "Frontier zones should request more tunnels than rear zones");
+		expect(frontier.desiredStingers > rear.desiredStingers, "Frontier zones should request more stingers than rear zones");
+		expect(frontier.shouldBuildTunnel, "Undersupplied frontier should request a tunnel");
+		expect(frontier.shouldBuildStinger, "Undersupplied frontier should request a stinger");
+		std::cout << "PASS: Phase793::testFrontierRequestsMoreStaticDefenseThanRear\n";
+	}
+
+	void testRepeatedAttackRaisesStingerDesired()
+	{
+		const AIControlAdapterStaticDefensePolicyResult normal = AIControlAdapterChooseStaticDefensePolicy({
+			"developed_rear", false, true, false, false, false, false,
+			1, 0, 0, 0, 0, 0
+		});
+		const AIControlAdapterStaticDefensePolicyResult repeated = AIControlAdapterChooseStaticDefensePolicy({
+			"developed_rear", false, true, false, false, false, true,
+			1, 0, 0, 0, 0, 0
+		});
+
+		expect(repeated.desiredStingers == normal.desiredStingers + 1, "Repeated attacks should add one desired stinger");
+		expect(std::string(repeated.reason) == "repeated_attack", "Repeated attack should expose explicit reason");
+		std::cout << "PASS: Phase793::testRepeatedAttackRaisesStingerDesired\n";
+	}
+
+	void testReservedStaticDefensePreventsDuplicateSpam()
+	{
+		const AIControlAdapterStaticDefensePolicyResult result = AIControlAdapterChooseStaticDefensePolicy({
+			"frontier", false, true, true, false, false, false,
+			1, 1, 0, 0, 1, 1
+		});
+
+		expect(result.effectiveTunnels == 2, "Reserved tunnel build task should count toward desired tunnel total");
+		expect(result.effectiveStingers == 2, "Reserved stinger build task should count toward desired stinger total");
+		expect(!result.shouldBuildTunnel, "Policy should not duplicate tunnel while effective total meets desired");
+		expect(!result.shouldBuildStinger, "Policy should not duplicate stinger while effective total meets desired");
+		std::cout << "PASS: Phase793::testReservedStaticDefensePreventsDuplicateSpam\n";
+	}
+
+	void testPalaceRedundancyRequiresReserveAndCashFloat()
+	{
+		const AIControlAdapterPalaceRedundancyResult allowed = AIControlAdapterEvaluatePalaceRedundancy({
+			"frontier", true, true, true, false,
+			true, false, 20000u,
+			1, 0, 0, 0
+		});
+		const AIControlAdapterPalaceRedundancyResult blockedReserve = AIControlAdapterEvaluatePalaceRedundancy({
+			"frontier", true, true, true, false,
+			false, false, 20000u,
+			1, 0, 0, 0
+		});
+		const AIControlAdapterPalaceRedundancyResult blockedUrgent = AIControlAdapterEvaluatePalaceRedundancy({
+			"frontier", true, true, true, false,
+			true, true, 20000u,
+			1, 0, 0, 0
+		});
+
+		expect(allowed.shouldBuild, "Mature frontier zone should request redundant Palace when reserve and cash are healthy");
+		expect(allowed.spendAllowed, "Allowed redundant Palace should mark spend allowed");
+		expect(!blockedReserve.shouldBuild, "Palace redundancy should not bypass reserve policy");
+		expect(std::string(blockedReserve.reason) == "reserve_protected", "Reserve block should expose concrete reason");
+		expect(!blockedUrgent.shouldBuild, "Palace redundancy should not bypass urgent expansion");
+		expect(std::string(blockedUrgent.reason) == "urgent_expansion_priority", "Urgent expansion block should expose concrete reason");
+		std::cout << "PASS: Phase793::testPalaceRedundancyRequiresReserveAndCashFloat\n";
+	}
+
+	void runAllPhase793Tests()
+	{
+		std::cout << "\nRunning Phase 7.9 Increment 3 static-defense and Palace tests...\n";
+		testFrontierRequestsMoreStaticDefenseThanRear();
+		testRepeatedAttackRaisesStingerDesired();
+		testReservedStaticDefensePreventsDuplicateSpam();
+		testPalaceRedundancyRequiresReserveAndCashFloat();
+		std::cout << "All Phase 7.9 Increment 3 tests passed!\n";
+	}
+}
+
+namespace Phase794
+{
+	void testNukeCannonCreatesCounterbatteryDemand()
+	{
+		expect(AIControlAdapterIsBattlefieldArtilleryTemplate("ChinaNukeCannon", false), "Visible Nuke Cannon should classify as battlefield artillery");
+		expect(AIControlAdapterIsBattlefieldArtilleryTemplate("ChinaVehicleInfernoCannon", false), "Visible Inferno Cannon should classify as battlefield artillery");
+		const AIControlAdapterCounterbatteryPolicyResult result = AIControlAdapterChooseCounterbatteryPolicy({
+			1,
+			3,
+			0,
+			true,
+			0,
+			0,
+			2
+		});
+		expect(result.shouldAssign, "Available counter units should be assigned to visible artillery");
+		expectEq(result.desiredGroups, 1, "Visible artillery should request one bounded counterbattery group");
+		expectEq(std::string(result.reason), std::string("mobile_siege_visible"), "Counterbattery demand should expose mobile_siege_visible reason");
+		std::cout << "PASS: Phase794::testNukeCannonCreatesCounterbatteryDemand\n";
+	}
+
+	void testProjectileTemplatesDoNotCreateMobileSiegeDemand()
+	{
+		const AIControlAdapterMobileSiegeTemplateResult shell = AIControlAdapterClassifyMobileSiegeTemplate(
+			"StrategyCenterArtilleryShell",
+			false,
+			true);
+		const AIControlAdapterMobileSiegeTemplateResult artilleryCannon = AIControlAdapterClassifyMobileSiegeTemplate(
+			"ChinaArtilleryCannon",
+			false,
+			true);
+		const AIControlAdapterMobileSiegeTemplateResult nonEnemy = AIControlAdapterClassifyMobileSiegeTemplate(
+			"ChinaVehicleNukeCannon",
+			false,
+			false);
+		expect(!shell.accepted, "Artillery shell projectile should not classify as mobile siege");
+		expectEq(std::string(shell.reason), std::string("projectile_rejected"), "Projectile rejection reason should be explicit");
+		expect(!artilleryCannon.accepted, "Artillery barrage cannon object should not classify as mobile siege");
+		expectEq(std::string(artilleryCannon.reason), std::string("projectile_rejected"), "Artillery cannon rejection reason should be explicit");
+		expect(!nonEnemy.accepted, "Friendly or neutral artillery should not classify as enemy mobile siege");
+		expectEq(std::string(nonEnemy.reason), std::string("not_enemy"), "Non-enemy rejection reason should be explicit");
+		std::cout << "PASS: Phase794::testProjectileTemplatesDoNotCreateMobileSiegeDemand\n";
+	}
+
+	void testWmdStructureDoesNotCreateMobileCounterbatteryDemand()
+	{
+		expect(!AIControlAdapterIsBattlefieldArtilleryTemplate("ChinaNuclearMissileLauncher", true), "Enemy WMD structure should not classify as battlefield artillery");
+		expect(!AIControlAdapterIsBattlefieldArtilleryTemplate("GLAScudStorm", true), "SCUD Storm structure should remain WMD defense, not mobile artillery counterbattery");
+		const AIControlAdapterCounterbatteryPolicyResult result = AIControlAdapterChooseCounterbatteryPolicy({
+			0,
+			3,
+			0,
+			true,
+			0,
+			0,
+			2
+		});
+		expect(!result.shouldAssign, "No battlefield artillery should not assign counterbattery");
+		expectEq(std::string(result.reason), std::string("no_artillery_threat"), "No-threat reason should be explicit");
+		std::cout << "PASS: Phase794::testWmdStructureDoesNotCreateMobileCounterbatteryDemand\n";
+	}
+
+	void testNoCounterAvailableRequestsBoundedProduction()
+	{
+		const AIControlAdapterCounterbatteryPolicyResult result = AIControlAdapterChooseCounterbatteryPolicy({
+			1,
+			0,
+			0,
+			true,
+			0,
+			0,
+			2
+		});
+		expect(!result.shouldAssign, "No available counters should not assign a task");
+		expect(result.productionNeeded, "Missing counters with prerequisites should request bounded production");
+		expectEq(std::string(result.reason), std::string("production_needed"), "Production-needed reason should be explicit");
+		std::cout << "PASS: Phase794::testNoCounterAvailableRequestsBoundedProduction\n";
+	}
+
+	void testMobileScudProductionIsBounded()
+	{
+		const AIControlAdapterCounterbatteryPolicyResult capped = AIControlAdapterChooseCounterbatteryPolicy({
+			1,
+			0,
+			0,
+			true,
+			2,
+			0,
+			2
+		});
+		expect(!capped.productionNeeded, "Counterbattery SCUD production should stop at bounded cap");
+		expectEq(std::string(capped.reason), std::string("no_counter_available"), "Cap block should not restore generic WMD baseline reserve");
+		std::cout << "PASS: Phase794::testMobileScudProductionIsBounded\n";
+	}
+
+	void testActiveTaskSuppressesDuplicateCounterbattery()
+	{
+		const AIControlAdapterCounterbatteryPolicyResult result = AIControlAdapterChooseCounterbatteryPolicy({
+			1,
+			3,
+			1,
+			true,
+			0,
+			0,
+			2
+		});
+		expect(!result.shouldAssign, "Existing active task should suppress duplicate broad response");
+		expectEq(std::string(result.reason), std::string("active_task_exists"), "Duplicate suppression reason should be explicit");
+		std::cout << "PASS: Phase794::testActiveTaskSuppressesDuplicateCounterbattery\n";
+	}
+
+	void testLateGameVehicleMixRequestsRocketBuggies()
+	{
+		const AIControlAdapterRocketBuggyMixResult result = AIControlAdapterChooseRocketBuggyMix({
+			true,
+			true,
+			false,
+			0,
+			0,
+			6,
+			4,
+			0
+		});
+		expect(result.productionNeeded, "Late-game vehicle mix should request Rocket Buggies once prerequisites are ready");
+		expect(result.desiredBuggies >= 2, "Rocket Buggy target should be a bounded share of late-game vehicles");
+		expectEq(std::string(result.reason), std::string("late_game_mix"), "Late-game mix reason should be explicit");
+		std::cout << "PASS: Phase794::testLateGameVehicleMixRequestsRocketBuggies\n";
+	}
+
+	void testMobileSiegeThreatRaisesRocketBuggyDesired()
+	{
+		const AIControlAdapterRocketBuggyMixResult baseline = AIControlAdapterChooseRocketBuggyMix({
+			true,
+			true,
+			false,
+			0,
+			0,
+			4,
+			4,
+			0
+		});
+		const AIControlAdapterRocketBuggyMixResult siege = AIControlAdapterChooseRocketBuggyMix({
+			true,
+			true,
+			true,
+			0,
+			0,
+			4,
+			4,
+			0
+		});
+		expect(siege.desiredBuggies > baseline.desiredBuggies, "Mobile siege threat should temporarily raise desired Rocket Buggy count");
+		expectEq(std::string(siege.reason), std::string("mobile_siege_counter"), "Siege mix reason should be explicit");
+		std::cout << "PASS: Phase794::testMobileSiegeThreatRaisesRocketBuggyDesired\n";
+	}
+
+	void testRocketBuggyPrereqsAndQueuedCount()
+	{
+		const AIControlAdapterRocketBuggyMixResult missingPrereq = AIControlAdapterChooseRocketBuggyMix({
+			false,
+			true,
+			true,
+			0,
+			0,
+			8,
+			8,
+			0
+		});
+		const AIControlAdapterRocketBuggyMixResult queuedMeetsTarget = AIControlAdapterChooseRocketBuggyMix({
+			true,
+			true,
+			true,
+			0,
+			5,
+			8,
+			8,
+			0
+		});
+		expect(!missingPrereq.productionNeeded, "Missing Rocket Buggy prerequisites should block production");
+		expectEq(std::string(missingPrereq.reason), std::string("prereq_missing"), "Missing prereq reason should be explicit");
+		expect(!queuedMeetsTarget.productionNeeded, "Queued Rocket Buggies should count toward desired target");
+		std::cout << "PASS: Phase794::testRocketBuggyPrereqsAndQueuedCount\n";
+	}
+
+	void runAllPhase794Tests()
+	{
+		std::cout << "\nRunning Phase 7.9 Increment 4 battlefield counterbattery tests...\n";
+		testNukeCannonCreatesCounterbatteryDemand();
+		testProjectileTemplatesDoNotCreateMobileSiegeDemand();
+		testWmdStructureDoesNotCreateMobileCounterbatteryDemand();
+		testNoCounterAvailableRequestsBoundedProduction();
+		testMobileScudProductionIsBounded();
+		testActiveTaskSuppressesDuplicateCounterbattery();
+		testLateGameVehicleMixRequestsRocketBuggies();
+		testMobileSiegeThreatRaisesRocketBuggyDesired();
+		testRocketBuggyPrereqsAndQueuedCount();
+		std::cout << "All Phase 7.9 Increment 4 tests passed!\n";
+	}
+}
+
+namespace Phase795
+{
+	void testHighExpansionGapBeatsHardeningLuxury()
+	{
+		const AIControlAdapterBrutalPressureResult result = AIControlAdapterChooseBrutalPressurePriority({
+			6,
+			false,
+			4,
+			2,
+			0,
+			0,
+			0,
+			true,
+			12000u,
+			true,
+			false
+		});
+		expectEq(std::string(result.chosenPriority), std::string("urgent_expansion"), "High zone gap should outrank non-emergency hardening");
+		expectEq(std::string(result.reason), std::string("distributed_survival_expansion"), "Expansion priority reason should be explicit");
+		std::cout << "PASS: Phase795::testHighExpansionGapBeatsHardeningLuxury\n";
+	}
+
+	void testStaleFoundationRecoveryBeatsLuxurySpend()
+	{
+		const AIControlAdapterBrutalPressureResult result = AIControlAdapterChooseBrutalPressurePriority({
+			0,
+			false,
+			3,
+			2,
+			0,
+			1,
+			0,
+			true,
+			30000u,
+			true,
+			false
+		});
+		expectEq(std::string(result.chosenPriority), std::string("foundation_recovery"), "Stale strategic foundations should outrank luxury hardening");
+		expectEq(std::string(result.reason), std::string("stale_foundation_recovery"), "Foundation recovery reason should be explicit");
+		std::cout << "PASS: Phase795::testStaleFoundationRecoveryBeatsLuxurySpend\n";
+	}
+
+	void testLocalWorkerLiquidityRespectsGlobalCap()
+	{
+		const AIControlAdapterLocalWorkerLiquidityResult capped = AIControlAdapterChooseLocalWorkerLiquidity({
+			80,
+			80,
+			20000u,
+			0,
+			2,
+			true
+		});
+		const AIControlAdapterLocalWorkerLiquidityResult allowed = AIControlAdapterChooseLocalWorkerLiquidity({
+			20,
+			80,
+			20000u,
+			0,
+			2,
+			true
+		});
+		expect(!capped.shouldQueue, "Local worker liquidity should stop at global worker cap");
+		expectEq(std::string(capped.reason), std::string("worker_cap_reached"), "Worker cap reason should be explicit");
+		expect(allowed.shouldQueue, "Local worker liquidity should queue when below cap and local gap exists");
+		expectEq(std::string(allowed.reason), std::string("queued_local_worker"), "Allowed local worker reason should be explicit");
+		std::cout << "PASS: Phase795::testLocalWorkerLiquidityRespectsGlobalCap\n";
+	}
+
+	void testLocalWorkerLiquidityProtectsReserve()
+	{
+		const AIControlAdapterLocalWorkerLiquidityResult result = AIControlAdapterChooseLocalWorkerLiquidity({
+			20,
+			80,
+			1200u,
+			0,
+			2,
+			true
+		});
+		expect(!result.shouldQueue, "Local worker liquidity should not spend below cash float threshold");
+		expectEq(std::string(result.reason), std::string("cash_reserved"), "Cash-reserve worker block should be explicit");
+		std::cout << "PASS: Phase795::testLocalWorkerLiquidityProtectsReserve\n";
+	}
+
+	void testNormalAttackOnlyAfterSurvivalBudgetsSatisfied()
+	{
+		const AIControlAdapterBrutalPressureResult blockedByDefense = AIControlAdapterChooseBrutalPressurePriority({
+			0,
+			false,
+			2,
+			0,
+			0,
+			0,
+			0,
+			true,
+			20000u,
+			true,
+			false
+		});
+		const AIControlAdapterBrutalPressureResult attackReady = AIControlAdapterChooseBrutalPressurePriority({
+			0,
+			false,
+			0,
+			0,
+			0,
+			0,
+			0,
+			true,
+			20000u,
+			true,
+			false
+		});
+		expectEq(std::string(blockedByDefense.chosenPriority), std::string("harden_frontier"), "Defense gap should defer normal attacks");
+		expectEq(std::string(attackReady.chosenPriority), std::string("offensive_pressure"), "Normal attacks should resume when survival budgets are satisfied");
+		expectEq(std::string(attackReady.reason), std::string("defense_budget_satisfied"), "Attack-ready reason should be explicit");
+		std::cout << "PASS: Phase795::testNormalAttackOnlyAfterSurvivalBudgetsSatisfied\n";
+	}
+
+	void testEmergencyUnitAttackOverridesLowerPriorityWork()
+	{
+		const AIControlAdapterBrutalPressureResult result = AIControlAdapterChooseBrutalPressurePriority({
+			8,
+			true,
+			5,
+			3,
+			2,
+			1,
+			1,
+			true,
+			50000u,
+			true,
+			true
+		});
+		expectEq(std::string(result.chosenPriority), std::string("emergency_survival"), "Active unit attacks should override lower-priority work");
+		expectEq(std::string(result.reason), std::string("active_unit_attack"), "Emergency reason should be explicit");
+		std::cout << "PASS: Phase795::testEmergencyUnitAttackOverridesLowerPriorityWork\n";
+	}
+
+	void runAllPhase795Tests()
+	{
+		std::cout << "\nRunning Phase 7.9 Increment 5 brutal-pressure integration tests...\n";
+		testHighExpansionGapBeatsHardeningLuxury();
+		testStaleFoundationRecoveryBeatsLuxurySpend();
+		testLocalWorkerLiquidityRespectsGlobalCap();
+		testLocalWorkerLiquidityProtectsReserve();
+		testNormalAttackOnlyAfterSurvivalBudgetsSatisfied();
+		testEmergencyUnitAttackOverridesLowerPriorityWork();
+		std::cout << "All Phase 7.9 Increment 5 tests passed!\n";
+	}
+}
+
 int main()
 {
 	std::cout << "Running ZoneManager and DefenseManager tests...\n";
@@ -1246,6 +1989,21 @@ int main()
 
 	// Phase 7.1: Zone Defense Response tests
 	Phase71::runAllPhase71Tests();
+
+	// Phase 7.8: Multi-front defense allocation tests
+	Phase78::runAllPhase78Tests();
+
+	// Phase 7.9 Increment 2: Threat-source classification tests
+	Phase79::runAllPhase79Tests();
+
+	// Phase 7.9 Increment 3: Static-defense density and Palace redundancy tests
+	Phase793::runAllPhase793Tests();
+
+	// Phase 7.9 Increment 4: Battlefield artillery counterbattery tests
+	Phase794::runAllPhase794Tests();
+
+	// Phase 7.9 Increment 5: Brutal-pressure integration policy tests
+	Phase795::runAllPhase795Tests();
 
 	// Phase 5.8: Zone anchor type tests
 	std::cout << "\nRunning Phase 5.8 Zone Anchor Type tests...\n";
