@@ -878,6 +878,54 @@ struct AIControlAdapterScudStormConstructionPolicyResult
 AIControlAdapterScudStormConstructionPolicyResult AIControlAdapterEvaluateScudStormConstruction(
 	const AIControlAdapterScudStormConstructionPolicyInputs& inputs);
 
+struct AIControlAdapterScudStormStrategicTargetCandidate
+{
+	unsigned int objectId = 0u;
+	int playerIndex = -1;
+	int team = -1;
+	std::string targetKind;
+	std::string templateName;
+	bool visible = false;
+	bool stale = true;
+	bool enemyOwned = true;
+	bool alive = true;
+	unsigned int ageMs = 0u;
+	float x = 0.0f;
+	float y = 0.0f;
+	float z = 0.0f;
+};
+
+struct AIControlAdapterScudStormStrategicTargetInputs
+{
+	bool hasReadyScudStorm = false;
+	bool hasActiveWmdTarget = false;
+	bool fireCooldownActive = false;
+	unsigned int staleMaxAgeMs = 120000u;
+	std::vector<AIControlAdapterScudStormStrategicTargetCandidate> candidates;
+};
+
+struct AIControlAdapterScudStormStrategicTargetResult
+{
+	bool hasTarget = false;
+	unsigned int objectId = 0u;
+	int playerIndex = -1;
+	int team = -1;
+	std::string targetKind;
+	std::string templateName;
+	bool visible = false;
+	bool stale = false;
+	unsigned int ageMs = 0u;
+	float x = 0.0f;
+	float y = 0.0f;
+	float z = 0.0f;
+	int score = 0;
+	int maxFireCount = 1;
+	const char* reason = "no_known_enemy_structures";
+};
+
+AIControlAdapterScudStormStrategicTargetResult AIControlAdapterSelectScudStormStrategicTarget(
+	const AIControlAdapterScudStormStrategicTargetInputs& inputs);
+
 // =============================================================================
 // ZONE DEFENSE ALLOCATION POLICY
 // =============================================================================
@@ -1122,6 +1170,163 @@ struct AIControlAdapterBrutalPressureResult
 
 AIControlAdapterBrutalPressureResult AIControlAdapterChooseBrutalPressurePriority(
 	const AIControlAdapterBrutalPressureInputs& inputs);
+
+struct AIControlAdapterEmergencySurvivalProductionInputs
+{
+	bool brutalEmergencyPriority;
+	bool mainUnderPressure;
+	bool activeUnitAttack;
+	int criticalThreatZones;
+	int localEnemyCount;
+	int enemyArtilleryCount;
+	unsigned int money;
+	unsigned int reserveCash;
+	int armsDealers;
+	int barracks;
+	int palaces;
+	int quads;
+	int scorpions;
+	int rpg;
+	int soldiers;
+	int armyCount;
+	int armyCap;
+};
+
+struct AIControlAdapterEmergencySurvivalProductionDecision
+{
+	bool active;
+	bool allowReserveSpend;
+	bool suppressCaptureSourceProduction;
+	bool bypassArmyCapBuffer;
+	int emergencyArmyCap;
+	std::vector<std::string> commands;
+	const char* reason;
+};
+
+AIControlAdapterEmergencySurvivalProductionDecision AIControlAdapterChooseEmergencySurvivalProduction(
+	const AIControlAdapterEmergencySurvivalProductionInputs& inputs);
+
+struct AIControlAdapterPalaceRecoveryInputs
+{
+	int palaces;
+	int palacesInProgress;
+	bool enemyWmdThreat;
+	bool mobileSiegeThreat;
+	unsigned int money;
+	unsigned int palaceCost;
+	bool buildAttemptReady;
+};
+
+struct AIControlAdapterPalaceRecoveryDecision
+{
+	bool shouldBuild;
+	const char* reason;
+};
+
+AIControlAdapterPalaceRecoveryDecision AIControlAdapterChoosePalaceRecovery(
+	const AIControlAdapterPalaceRecoveryInputs& inputs);
+
+struct AIControlAdapterTerrainPoint
+{
+	float x = 0.0f;
+	float y = 0.0f;
+};
+
+struct AIControlAdapterTerrainFeature
+{
+	std::string id;
+	std::string kind;
+	std::string source;
+	std::vector<AIControlAdapterTerrainPoint> points;
+	bool hasPosition = false;
+	AIControlAdapterTerrainPoint position;
+	float width = 0.0f;
+	bool trusted = false;
+	std::vector<std::string> connects;
+};
+
+struct AIControlAdapterTerrainExtent
+{
+	float minX = 0.0f;
+	float minY = 0.0f;
+	float maxX = 0.0f;
+	float maxY = 0.0f;
+};
+
+struct AIControlAdapterTerrainExtractionMetadata
+{
+	std::string mapName;
+	std::string selectedSource;
+	std::string fallbackSource;
+	std::string reason;
+	AIControlAdapterTerrainExtent extent;
+	int sampleStep = 0;
+	int blockedSamples = 0;
+	int passableSamples = 0;
+	int cliffSamples = 0;
+	int unknownSamples = 0;
+	int bridgeCount = 0;
+	int waypointCount = 0;
+	bool fallbackUsed = false;
+};
+
+struct AIControlAdapterTerrainFacts
+{
+	std::string mapName;
+	std::string source;
+	AIControlAdapterTerrainExtractionMetadata extraction;
+	std::vector<AIControlAdapterTerrainFeature> features;
+	std::vector<nlohmann::json> strategicObjects;
+	nlohmann::json mapFileCacheTelemetry;
+};
+
+struct AIControlAdapterZoneTerrainInputs
+{
+	float centerX;
+	float centerY;
+	float radius;
+	bool isMainBase;
+};
+
+struct AIControlAdapterZoneTerrainResult
+{
+	float effectiveRadius;
+	bool terrainLimited;
+	bool hasEntrance;
+	AIControlAdapterTerrainPoint entrancePosition;
+	std::string entranceId;
+	const char* reason;
+};
+
+AIControlAdapterTerrainFacts AIControlAdapterBuildTerrainFacts(
+	const std::string& mapName,
+	bool hasMainBase,
+	float mainBaseX,
+	float mainBaseY);
+
+AIControlAdapterTerrainFacts AIControlAdapterSelectTerrainFacts(
+	const AIControlAdapterTerrainFacts& extractedFacts,
+	const AIControlAdapterTerrainFacts& fixtureFacts);
+
+AIControlAdapterTerrainFacts AIControlAdapterMergeMapFileCacheFacts(
+	const AIControlAdapterTerrainFacts& extractedFacts,
+	const AIControlAdapterTerrainFacts& fixtureFacts,
+	const AIControlAdapterTerrainFacts& mapFileCacheFacts);
+
+std::string AIControlAdapterNormalizeMapFileCacheKey(const std::string& mapName);
+
+bool AIControlAdapterParseMapFileCacheJson(
+	const nlohmann::json& cacheJson,
+	const std::string& mapName,
+	const std::string& sourcePath,
+	AIControlAdapterTerrainFacts& outFacts,
+	std::string& outReason);
+
+nlohmann::json AIControlAdapterSerializeTerrainFacts(const AIControlAdapterTerrainFacts& facts);
+
+AIControlAdapterZoneTerrainResult AIControlAdapterApplyZoneTerrainFacts(
+	const AIControlAdapterTerrainFacts& facts,
+	const AIControlAdapterZoneTerrainInputs& inputs);
 
 /**
  * Decide whether to abort upgrade plan based on failure reason.

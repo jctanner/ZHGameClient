@@ -26,6 +26,30 @@ namespace
 			std::exit(1);
 		}
 	}
+
+	AIControlAdapterScudStormStrategicTargetCandidate makeScudStormTarget(
+		unsigned int objectId,
+		const char* kind,
+		const char* templateName,
+		bool visible,
+		unsigned int ageMs)
+	{
+		AIControlAdapterScudStormStrategicTargetCandidate candidate;
+		candidate.objectId = objectId;
+		candidate.playerIndex = 2;
+		candidate.team = 1;
+		candidate.targetKind = kind;
+		candidate.templateName = templateName;
+		candidate.visible = visible;
+		candidate.stale = !visible;
+		candidate.enemyOwned = true;
+		candidate.alive = true;
+		candidate.ageMs = ageMs;
+		candidate.x = 1000.0f + static_cast<float>(objectId);
+		candidate.y = 2000.0f + static_cast<float>(objectId);
+		candidate.z = 0.0f;
+		return candidate;
+	}
 }
 
 int main()
@@ -1785,6 +1809,111 @@ int main()
 	}
 
 	{
+		AIControlAdapterScudStormStrategicTargetInputs inputs;
+		inputs.hasReadyScudStorm = true;
+		inputs.hasActiveWmdTarget = true;
+		inputs.candidates.push_back(makeScudStormTarget(100u, "base/command", "ChinaCommandCenter", true, 0u));
+		const auto result = AIControlAdapterSelectScudStormStrategicTarget(inputs);
+		expect(!result.hasTarget, "Enemy WMD targets should preempt strategic SCUD Storm fallback targets");
+		expect(std::strcmp(result.reason, "enemy_wmd_preempts") == 0,
+			"Strategic SCUD Storm target selection should report enemy_wmd_preempts");
+	}
+
+	{
+		AIControlAdapterScudStormStrategicTargetInputs inputs;
+		inputs.hasReadyScudStorm = true;
+		inputs.candidates.push_back(makeScudStormTarget(201u, "production", "ChinaWarFactory", true, 0u));
+		inputs.candidates.push_back(makeScudStormTarget(200u, "base/command", "ChinaCommandCenter", true, 0u));
+		const auto result = AIControlAdapterSelectScudStormStrategicTarget(inputs);
+		expect(result.hasTarget && result.objectId == 200u, "Ready SCUD Storm should prefer enemy command structures");
+		expect(result.targetKind == "base/command", "Command target should be reported as base/command");
+	}
+
+	{
+		AIControlAdapterScudStormStrategicTargetInputs inputs;
+		inputs.hasReadyScudStorm = true;
+		inputs.candidates.push_back(makeScudStormTarget(301u, "economy", "GLASupplyStash", true, 0u));
+		inputs.candidates.push_back(makeScudStormTarget(300u, "production", "GLAArmsDealer", true, 0u));
+		const auto result = AIControlAdapterSelectScudStormStrategicTarget(inputs);
+		expect(result.hasTarget && result.objectId == 300u, "SCUD Storm strategic fallback should prefer production over economy");
+		expect(result.targetKind == "production", "Production fallback should report production kind");
+	}
+
+	{
+		AIControlAdapterScudStormStrategicTargetInputs inputs;
+		inputs.hasReadyScudStorm = true;
+		inputs.candidates.push_back(makeScudStormTarget(400u, "production", "ChinaWarFactory", false, 10000u));
+		inputs.candidates.push_back(makeScudStormTarget(401u, "economy", "ChinaSupplyCenter", true, 0u));
+		const auto result = AIControlAdapterSelectScudStormStrategicTarget(inputs);
+		expect(result.hasTarget && result.objectId == 401u, "Visible high-value targets should beat stale strategic targets");
+		expect(result.visible, "Selected strategic target should be visible when a visible high-value target exists");
+	}
+
+	{
+		AIControlAdapterScudStormStrategicTargetInputs inputs;
+		inputs.hasReadyScudStorm = true;
+		inputs.candidates.push_back(makeScudStormTarget(500u, "base/command", "AmericaCommandCenter", false, 119000u));
+		const auto result = AIControlAdapterSelectScudStormStrategicTarget(inputs);
+		expect(result.hasTarget && result.objectId == 500u, "Fresh stale command structures should be valid strategic fallback targets");
+		expect(!result.visible && result.stale, "Fresh stale SCUD Storm strategic target should report stale state");
+	}
+
+	{
+		AIControlAdapterScudStormStrategicTargetInputs inputs;
+		inputs.hasReadyScudStorm = true;
+		inputs.candidates.push_back(makeScudStormTarget(600u, "production", "ChinaWarFactory", false, 121000u));
+		const auto result = AIControlAdapterSelectScudStormStrategicTarget(inputs);
+		expect(!result.hasTarget, "Stale SCUD Storm strategic targets beyond freshness window should be rejected");
+		expect(std::strcmp(result.reason, "no_valid_fresh_targets") == 0,
+			"Expired stale SCUD Storm strategic targets should report no_valid_fresh_targets");
+	}
+
+	{
+		AIControlAdapterScudStormStrategicTargetInputs inputs;
+		inputs.hasReadyScudStorm = true;
+		AIControlAdapterScudStormStrategicTargetCandidate friendly =
+			makeScudStormTarget(700u, "base/command", "ChinaCommandCenter", true, 0u);
+		friendly.enemyOwned = false;
+		inputs.candidates.push_back(friendly);
+		AIControlAdapterScudStormStrategicTargetCandidate destroyed =
+			makeScudStormTarget(701u, "production", "ChinaWarFactory", true, 0u);
+		destroyed.alive = false;
+		inputs.candidates.push_back(destroyed);
+		const auto result = AIControlAdapterSelectScudStormStrategicTarget(inputs);
+		expect(!result.hasTarget, "SCUD Storm strategic fallback should reject friendly/captured and destroyed targets");
+	}
+
+	{
+		AIControlAdapterScudStormStrategicTargetInputs inputs;
+		inputs.hasReadyScudStorm = false;
+		inputs.candidates.push_back(makeScudStormTarget(800u, "base/command", "ChinaCommandCenter", true, 0u));
+		const auto result = AIControlAdapterSelectScudStormStrategicTarget(inputs);
+		expect(!result.hasTarget, "Strategic SCUD Storm fallback should hold without a ready SCUD Storm");
+		expect(std::strcmp(result.reason, "no_ready_scud_storm") == 0,
+			"No-ready strategic SCUD Storm fallback should report no_ready_scud_storm");
+	}
+
+	{
+		AIControlAdapterScudStormStrategicTargetInputs inputs;
+		inputs.hasReadyScudStorm = true;
+		inputs.fireCooldownActive = true;
+		inputs.candidates.push_back(makeScudStormTarget(900u, "base/command", "ChinaCommandCenter", true, 0u));
+		const auto result = AIControlAdapterSelectScudStormStrategicTarget(inputs);
+		expect(!result.hasTarget, "Strategic SCUD Storm fallback should respect the fire cooldown");
+		expect(std::strcmp(result.reason, "cooldown") == 0,
+			"Cooldown strategic SCUD Storm fallback should report cooldown");
+	}
+
+	{
+		AIControlAdapterScudStormStrategicTargetInputs inputs;
+		inputs.hasReadyScudStorm = true;
+		inputs.candidates.push_back(makeScudStormTarget(1000u, "economy", "GLABlackMarket", true, 0u));
+		const auto result = AIControlAdapterSelectScudStormStrategicTarget(inputs);
+		expect(result.hasTarget, "Strategic SCUD Storm fallback should select one valid target");
+		expect(result.maxFireCount == 1, "Strategic SCUD Storm fallback should conservatively fire one SCUD Storm per interval");
+	}
+
+	{
 		expect(
 			AIControlAdapterEnemyMemory::classifyTemplate("ChinaNuclearMissileLauncher", true) == EnemyMemoryKind::Wmd,
 			"Enemy memory should classify nuclear missile launcher as wmd");
@@ -1906,6 +2035,460 @@ int main()
 		});
 		expect(!result.productionNeeded, "Rocket Buggy baseline mix should stop once current buggies meet the target");
 		expect(std::strcmp(result.reason, "late_game_mix") == 0, "Satisfied Rocket Buggy baseline should still report late_game_mix");
+	}
+
+	{
+		const AIControlAdapterEmergencySurvivalProductionDecision result =
+			AIControlAdapterChooseEmergencySurvivalProduction({
+				false,
+				true,
+				false,
+				0,
+				6,
+				1,
+				1200u,
+				10000u,
+				2,
+				1,
+				0,
+				0,
+				1,
+				0,
+				0,
+				20,
+				100
+			});
+		expect(result.active, "Emergency survival should activate when main base is under pressure");
+		expect(result.allowReserveSpend, "Emergency survival should allow combat reserve spend");
+		expect(result.suppressCaptureSourceProduction, "Emergency survival should suppress capture-source production");
+		expect(result.bypassArmyCapBuffer, "Emergency survival should bypass the normal army-cap buffer");
+		expect(!result.commands.empty(), "Emergency survival should choose immediate combat production");
+		expect(result.commands[0] == "Game.QueueQuadsAllWarFactories", "Emergency survival should prefer Quads first under pressure");
+		expect(result.commands.size() >= 3u, "Emergency survival should keep Scorpions and RPGs ahead of optional Rebels");
+		expect(result.commands[1] == "Game.QueueScorpionsAllWarFactories", "Emergency survival should prefer Scorpions before Barracks fallback");
+		expect(result.commands[2] == "Game.QueueRpgTroopersAllBarracks", "Emergency survival should choose RPGs before Rebels");
+	}
+
+	{
+		const AIControlAdapterEmergencySurvivalProductionDecision result =
+			AIControlAdapterChooseEmergencySurvivalProduction({
+				true,
+				false,
+				false,
+				0,
+				2,
+				0,
+				15000u,
+				10000u,
+				3,
+				3,
+				0,
+				5,
+				5,
+				6,
+				4,
+				151,
+				100
+			});
+		expect(result.active, "Brutal pressure emergency priority should activate emergency survival production");
+		expect(result.emergencyArmyCap == 150, "Emergency survival should use a bounded 150 percent army cap override");
+		expect(result.commands.empty(), "Emergency survival should stop producing at the bounded emergency cap");
+		expect(std::strcmp(result.reason, "emergency_cap_reached") == 0, "Emergency cap block should be explicit");
+	}
+
+	{
+		const AIControlAdapterEmergencySurvivalProductionDecision result =
+			AIControlAdapterChooseEmergencySurvivalProduction({
+				false,
+				false,
+				false,
+				1,
+				4,
+				0,
+				11000u,
+				10000u,
+				0,
+				1,
+				0,
+				0,
+				0,
+				0,
+				0,
+				15,
+				60
+			});
+		expect(result.active, "High or critical zone threats with local enemies should activate emergency survival");
+		expect(result.commands.size() == 1u && result.commands[0] == "Game.QueueRpgTroopersAllBarracks",
+			"Emergency survival should choose RPGs before optional Rebels when only Barracks are available");
+	}
+
+	{
+		const AIControlAdapterEmergencySurvivalProductionDecision result =
+			AIControlAdapterChooseEmergencySurvivalProduction({
+				false,
+				false,
+				false,
+				0,
+				0,
+				0,
+				9000u,
+				10000u,
+				2,
+				2,
+				0,
+				0,
+				0,
+				0,
+				0,
+				10,
+				100
+			});
+		expect(!result.active, "Non-emergency production should leave normal reserve behavior unchanged");
+		expect(!result.allowReserveSpend, "Non-emergency production should not spend reserve");
+		expect(!result.suppressCaptureSourceProduction, "Capture-source production should remain available outside emergency survival");
+	}
+
+	{
+		const AIControlAdapterPalaceRecoveryDecision result = AIControlAdapterChoosePalaceRecovery({
+			0,
+			0,
+			true,
+			false,
+			3000u,
+			2500u,
+			true
+		});
+		expect(result.shouldBuild, "Missing Palace under WMD threat should request Palace recovery");
+		expect(std::strcmp(result.reason, "missing_palace_under_wmd_threat") == 0, "Palace recovery should report WMD recovery reason");
+	}
+
+	{
+		const AIControlAdapterPalaceRecoveryDecision result = AIControlAdapterChoosePalaceRecovery({
+			0,
+			1,
+			true,
+			true,
+			12000u,
+			2500u,
+			true
+		});
+		expect(!result.shouldBuild, "Healthy Palace in progress should prevent duplicate Palace recovery");
+		expect(std::strcmp(result.reason, "healthy_in_progress") == 0, "Palace recovery duplicate block should be explicit");
+	}
+
+	{
+		const AIControlAdapterTerrainFacts facts = AIControlAdapterBuildTerrainFacts("Maps/Death Valley/Death Valley.map", true, 1200.0f, 1200.0f);
+		expect(facts.source == "manual_fixture", "Death Valley terrain facts should use a manual fixture when map identity is known");
+		expect(facts.features.size() >= 4u, "Death Valley terrain facts should include barriers and base entrances");
+		const nlohmann::json telemetry = AIControlAdapterSerializeTerrainFacts(facts);
+		expect(telemetry["terrain_features"].is_array(), "Terrain telemetry should serialize features as an array");
+		expect(telemetry["terrain_features"].size() == facts.features.size(), "Terrain telemetry should preserve feature count");
+		expect(telemetry["terrain_features"][0]["id"].is_string(), "Terrain telemetry should include feature ids");
+		expect(telemetry["terrain_features"][0]["kind"].is_string(), "Terrain telemetry should include feature kinds");
+		expect(telemetry["terrain_features"][0]["source"].is_string(), "Terrain telemetry should include feature sources");
+	}
+
+	{
+		const AIControlAdapterTerrainFacts facts = AIControlAdapterBuildTerrainFacts("Maps/Unknown/Unknown.map", true, 1200.0f, 1200.0f);
+		const AIControlAdapterZoneTerrainResult result = AIControlAdapterApplyZoneTerrainFacts(facts, {
+			1200.0f,
+			1200.0f,
+			700.0f,
+			true
+		});
+		expect(facts.source == "unavailable", "Unknown maps should explicitly report unavailable terrain facts");
+		expect(facts.features.empty(), "Unknown maps should not invent terrain features");
+		expect(!result.terrainLimited, "Missing terrain facts should not change zone radius behavior");
+		expect(result.effectiveRadius == 700.0f, "Missing terrain facts should preserve original zone radius");
+		expect(std::strcmp(result.reason, "unavailable") == 0, "Missing terrain facts should report unavailable zone adjustment");
+	}
+
+	{
+		const AIControlAdapterTerrainFacts facts = AIControlAdapterBuildTerrainFacts("DeathValley", true, 1200.0f, 1200.0f);
+		const AIControlAdapterZoneTerrainResult result = AIControlAdapterApplyZoneTerrainFacts(facts, {
+			1200.0f,
+			1200.0f,
+			1200.0f,
+			true
+		});
+		expect(result.terrainLimited, "Known barriers should reduce an oversized zone radius");
+		expect(result.effectiveRadius < 1200.0f, "Known barriers should produce a smaller effective radius");
+		expect(result.hasEntrance, "Main-base terrain facts should select a base entrance");
+		expect(!result.entranceId.empty(), "Selected terrain entrance should expose an id");
+	}
+
+	{
+		AIControlAdapterTerrainFacts extracted;
+		extracted.mapName = "TestMap";
+		extracted.source = "engine_sample";
+		extracted.extraction.mapName = "TestMap";
+		extracted.extraction.sampleStep = 128;
+		extracted.extraction.cliffSamples = 3;
+		extracted.extraction.passableSamples = 12;
+		extracted.extraction.reason = "engine_sampling_available";
+		AIControlAdapterTerrainFeature sample;
+		sample.id = "cliff-sample-test";
+		sample.kind = "cliff_sample";
+		sample.source = "engine_sample";
+		sample.hasPosition = true;
+		sample.position.x = 100.0f;
+		sample.position.y = 200.0f;
+		extracted.features.push_back(sample);
+
+		const AIControlAdapterTerrainFacts fixture = AIControlAdapterBuildTerrainFacts("DeathValley", true, 1200.0f, 1200.0f);
+		const AIControlAdapterTerrainFacts selected = AIControlAdapterSelectTerrainFacts(extracted, fixture);
+		expect(selected.source == "engine_sample", "Extracted terrain facts should win provider selection when available");
+		expect(!selected.extraction.fallbackUsed, "Extracted provider should not mark fixture fallback as used");
+		expect(selected.extraction.fallbackSource == "manual_fixture", "Provider selection should record available fixture fallback");
+		const nlohmann::json telemetry = AIControlAdapterSerializeTerrainFacts(selected);
+		expect(telemetry["terrain_source"] == "engine_sample", "Terrain telemetry should expose selected extraction source");
+		expect(telemetry["terrain_extraction"]["sample_step"] == 128, "Terrain telemetry should expose sample step");
+		expect(telemetry["terrain_extraction"]["cliff_samples"] == 3, "Terrain telemetry should expose cliff sample count");
+		expect(telemetry["terrain_extraction"]["fallback_used"] == false, "Terrain telemetry should expose fallback usage");
+	}
+
+	{
+		AIControlAdapterTerrainFacts extracted;
+		extracted.mapName = "DeathValley";
+		extracted.source = "unavailable";
+		extracted.extraction.mapName = "DeathValley";
+		extracted.extraction.reason = "engine_probe_no_features";
+		const AIControlAdapterTerrainFacts fixture = AIControlAdapterBuildTerrainFacts("DeathValley", true, 1200.0f, 1200.0f);
+		const AIControlAdapterTerrainFacts selected = AIControlAdapterSelectTerrainFacts(extracted, fixture);
+		expect(selected.source == "manual_fixture", "Manual fixture should be used when extraction is unavailable");
+		expect(selected.extraction.fallbackUsed, "Fixture selection should report fallback usage");
+		expect(selected.extraction.fallbackSource == "unavailable", "Fixture fallback should record unavailable extraction source");
+	}
+
+	{
+		AIControlAdapterTerrainFacts extracted;
+		extracted.mapName = "Unknown";
+		extracted.source = "unavailable";
+		extracted.extraction.mapName = "Unknown";
+		const AIControlAdapterTerrainFacts fixture;
+		const AIControlAdapterTerrainFacts selected = AIControlAdapterSelectTerrainFacts(extracted, fixture);
+		expect(selected.source == "unavailable", "Terrain provider should remain unavailable without extraction or fixture");
+		expect(selected.features.empty(), "Unavailable terrain provider should not add features");
+	}
+
+	{
+		expect(AIControlAdapterNormalizeMapFileCacheKey("Maps\\Death Valley\\Death Valley.map") == "death-valley",
+			"Map cache normalization should handle Windows map paths");
+		expect(AIControlAdapterNormalizeMapFileCacheKey("DeathValley.map") == "death-valley",
+			"Map cache normalization should split compact camel-case launch names");
+		expect(AIControlAdapterNormalizeMapFileCacheKey("  Death_Valley!.map") == "death-valley",
+			"Map cache normalization should collapse punctuation to hyphens");
+	}
+
+	{
+		nlohmann::json cache = nlohmann::json::object({
+			{"schema_version", 1},
+			{"map", nlohmann::json::object({ {"name", "Death Valley"}, {"hash", "abc123"} })},
+			{"metadata", nlohmann::json::object({
+				{"decoded_waypoint_count", 1},
+				{"decoded_waypoint_link_count", 1},
+				{"decoded_cliff_cell_count", 12},
+				{"derived_barrier_feature_count", 1}
+			})},
+			{"features", nlohmann::json::array({
+				nlohmann::json::object({
+					{"id", "waypoint-1"},
+					{"kind", "waypoint"},
+					{"source", "map_file"},
+					{"position", nlohmann::json::object({ {"x", 100.0}, {"y", 200.0} })},
+					{"labels", nlohmann::json::array({ "Center1" })}
+				}),
+				nlohmann::json::object({
+					{"id", "waypoint-lane-1-2"},
+					{"kind", "lane"},
+					{"source", "map_file"},
+					{"points", nlohmann::json::array({
+						nlohmann::json::object({ {"x", 100.0}, {"y", 200.0} }),
+						nlohmann::json::object({ {"x", 300.0}, {"y", 400.0} })
+					})},
+					{"labels", nlohmann::json::array({ "Center1" })}
+				}),
+				nlohmann::json::object({
+					{"id", "terrain-barrier-1"},
+					{"kind", "impassable_barrier"},
+					{"source", "map_file_terrain"},
+					{"points", nlohmann::json::array({
+						nlohmann::json::object({ {"x", 500.0}, {"y", 1200.0} }),
+						nlohmann::json::object({ {"x", 1500.0}, {"y", 1200.0} })
+					})},
+					{"width", 300.0}
+				}),
+				nlohmann::json::object({
+					{"id", "pending-entry"},
+					{"kind", "base_entrance"},
+					{"source", "manual_annotation"},
+					{"position", nlohmann::json::object({ {"x", 1.0}, {"y", 2.0} })}
+				}),
+				nlohmann::json::object({
+					{"id", "trusted-entry"},
+					{"kind", "base_entrance"},
+					{"source", "manual_annotation"},
+					{"trusted", true},
+					{"position", nlohmann::json::object({ {"x", 900.0}, {"y", 4200.0} })},
+					{"width", 450.0},
+					{"connects", nlohmann::json::array({ "main_base", "lower_approach" })}
+				})
+			})},
+			{"objects", nlohmann::json::array({
+				nlohmann::json::object({
+					{"id", "SupplyDock 1"},
+					{"kind", "economy"},
+					{"template", "SupplyDock"},
+					{"position", nlohmann::json::object({ {"x", 500.0}, {"y", 600.0} })}
+				})
+			})},
+			{"warnings", nlohmann::json::array()}
+		});
+
+		AIControlAdapterTerrainFacts facts;
+		std::string reason;
+		expect(AIControlAdapterParseMapFileCacheJson(cache, "Death Valley.map", "death-valley.json", facts, reason),
+			"Valid map-file cache fixture should parse");
+		expect(facts.source == "map_file_cache", "Parsed cache should identify map_file_cache as source");
+		expect(facts.features.size() == 4, "Parsed cache should include waypoint, lane, terrain barrier, and trusted entrance");
+		expect(facts.strategicObjects.size() == 1, "Parsed cache should expose strategic objects");
+		expect(facts.mapFileCacheTelemetry["loaded"] == true, "Parsed cache telemetry should mark loaded");
+		expect(facts.mapFileCacheTelemetry["ignored_semantic_features"] == 1, "Pending base entrance cache features should be ignored");
+		expect(facts.mapFileCacheTelemetry["annotation_features"] == 2, "Parsed cache telemetry should count annotation features");
+		expect(facts.mapFileCacheTelemetry["trusted_entrances"] == 1, "Parsed cache telemetry should count trusted entrances");
+		expect(facts.mapFileCacheTelemetry["semantic_features_loaded"] == 1, "Parsed cache telemetry should count loaded semantic features");
+		expect(facts.mapFileCacheTelemetry["derived_barriers"] == 1, "Parsed cache telemetry should expose derived barrier count");
+		expect(facts.features[0].source == "map_file_cache", "Parsed cache features should be tagged map_file_cache");
+		expect(facts.features[0].connects.size() == 1 && facts.features[0].connects[0] == "Center1",
+			"Parsed cache labels should be retained for UI/telemetry");
+		expect(facts.features[2].kind == "impassable_barrier" && facts.features[2].width == 300.0f,
+			"Parsed cache should expose generated terrain barriers with width");
+		expect(facts.features[3].kind == "base_entrance" && facts.features[3].trusted,
+			"Parsed cache should accept trusted annotation entrances");
+		expect(facts.features[3].connects.size() == 2 && facts.features[3].connects[1] == "lower_approach",
+			"Parsed cache should retain annotation entrance connects");
+	}
+
+	{
+		AIControlAdapterTerrainFacts facts;
+		std::string reason;
+		expect(!AIControlAdapterParseMapFileCacheJson(nlohmann::json::object({ {"schema_version", 99} }),
+			"Bad.map", "bad.json", facts, reason), "Unsupported cache schema should fail cleanly");
+		expect(reason == "unsupported_schema", "Unsupported cache schema should report unsupported_schema");
+	}
+
+	{
+		AIControlAdapterTerrainFacts extracted;
+		extracted.mapName = "DeathValley";
+		extracted.source = "engine_query";
+		extracted.extraction.mapName = "DeathValley";
+		AIControlAdapterTerrainFeature runtimeLane;
+		runtimeLane.id = "waypoint-lane-1-2";
+		runtimeLane.kind = "lane";
+		runtimeLane.source = "engine_query";
+		runtimeLane.points.push_back({ 100.0f, 200.0f });
+		runtimeLane.points.push_back({ 300.0f, 400.0f });
+		extracted.features.push_back(runtimeLane);
+
+		AIControlAdapterTerrainFacts cacheFacts;
+		cacheFacts.mapName = "DeathValley";
+		cacheFacts.source = "map_file_cache";
+		cacheFacts.mapFileCacheTelemetry = nlohmann::json::object({ {"loaded", true}, {"reason", "matched_normalized_map_name"} });
+		cacheFacts.features.push_back(runtimeLane);
+		cacheFacts.features.back().source = "map_file_cache";
+		AIControlAdapterTerrainFeature cacheWaypoint;
+		cacheWaypoint.id = "waypoint-1";
+		cacheWaypoint.kind = "waypoint";
+		cacheWaypoint.source = "map_file_cache";
+		cacheWaypoint.hasPosition = true;
+		cacheWaypoint.position.x = 100.0f;
+		cacheWaypoint.position.y = 200.0f;
+		cacheFacts.features.push_back(cacheWaypoint);
+
+		const AIControlAdapterTerrainFacts fixture = AIControlAdapterBuildTerrainFacts("DeathValley", true, 1200.0f, 1200.0f);
+		const AIControlAdapterTerrainFacts merged = AIControlAdapterMergeMapFileCacheFacts(extracted, fixture, cacheFacts);
+		expect(merged.source == "engine_query", "Runtime terrain source should remain selected when available");
+		expect(merged.features.size() > extracted.features.size(), "Cache waypoint and fixture semantics should supplement runtime facts");
+		int runtimeLaneCount = 0;
+		int cacheWaypointCount = 0;
+		int entranceCount = 0;
+		for (std::size_t i = 0; i < merged.features.size(); ++i)
+		{
+			if (merged.features[i].id == "waypoint-lane-1-2")
+			{
+				++runtimeLaneCount;
+			}
+			if (merged.features[i].id == "waypoint-1" && merged.features[i].source == "map_file_cache")
+			{
+				++cacheWaypointCount;
+			}
+			if (merged.features[i].kind == "base_entrance")
+			{
+				++entranceCount;
+			}
+		}
+		expect(runtimeLaneCount == 1, "Cache merge should not duplicate runtime lane ids");
+		expect(cacheWaypointCount == 1, "Cache merge should add non-duplicate waypoint features");
+		expect(entranceCount > 0, "Fixture entrance semantics should remain present after cache merge");
+		const nlohmann::json telemetry = AIControlAdapterSerializeTerrainFacts(merged);
+		expect(telemetry["map_file_cache"]["loaded"] == true, "Merged telemetry should expose loaded map-file cache");
+	}
+
+	{
+		AIControlAdapterTerrainFacts extracted;
+		extracted.mapName = "DeathValley";
+		extracted.source = "engine_query";
+		extracted.extraction.mapName = "DeathValley";
+		AIControlAdapterTerrainFeature runtimeLane;
+		runtimeLane.id = "waypoint-lane-1-2";
+		runtimeLane.kind = "lane";
+		runtimeLane.source = "engine_query";
+		runtimeLane.points.push_back({ 100.0f, 200.0f });
+		runtimeLane.points.push_back({ 300.0f, 400.0f });
+		extracted.features.push_back(runtimeLane);
+
+		AIControlAdapterTerrainFacts cacheFacts;
+		cacheFacts.mapName = "DeathValley";
+		cacheFacts.source = "map_file_cache";
+		cacheFacts.mapFileCacheTelemetry = nlohmann::json::object({
+			{"loaded", true},
+			{"trusted_entrances", 1},
+			{"reason", "matched_normalized_map_name"}
+		});
+		AIControlAdapterTerrainFeature trustedEntry;
+		trustedEntry.id = "death-valley-main-base-lower-entry";
+		trustedEntry.kind = "base_entrance";
+		trustedEntry.source = "map_file_cache";
+		trustedEntry.trusted = true;
+		trustedEntry.hasPosition = true;
+		trustedEntry.position.x = 900.0f;
+		trustedEntry.position.y = 4200.0f;
+		trustedEntry.width = 450.0f;
+		cacheFacts.features.push_back(trustedEntry);
+
+		const AIControlAdapterTerrainFacts fixture = AIControlAdapterBuildTerrainFacts("DeathValley", true, 1200.0f, 1200.0f);
+		const AIControlAdapterTerrainFacts merged = AIControlAdapterMergeMapFileCacheFacts(extracted, fixture, cacheFacts);
+		int fixtureEntrances = 0;
+		bool foundTrustedEntry = false;
+		for (std::size_t i = 0; i < merged.features.size(); ++i)
+		{
+			if (merged.features[i].kind == "base_entrance" && merged.features[i].source == "manual_fixture")
+			{
+				++fixtureEntrances;
+			}
+			if (merged.features[i].id == "death-valley-main-base-lower-entry"
+				&& merged.features[i].source == "map_file_cache"
+				&& merged.features[i].trusted
+				&& merged.features[i].hasPosition
+				&& merged.features[i].position.x == 900.0f)
+			{
+				foundTrustedEntry = true;
+			}
+		}
+		expect(foundTrustedEntry, "Trusted cache entrance should replace the Death Valley fixture entrance");
+		expect(fixtureEntrances == 0, "Trusted cache entrance should demote hardcoded fixture entrances");
+		expect(merged.mapFileCacheTelemetry["fixture_skipped"] == true,
+			"Trusted cache entrance should report fixture skip telemetry");
 	}
 
 	std::cout << "AIControlAdapterPolicyTests passed\n";
