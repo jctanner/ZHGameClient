@@ -24,6 +24,7 @@
 #include "Common/ThingTemplate.h"
 #include "Common/Upgrade.h"
 #include "Common/BuildAssistant.h"
+#include "Common/GlobalData.h"
 #include "Common/KindOf.h"
 #include "Common/MessageStream.h"
 #include "GameClient/GameWindow.h"
@@ -73,6 +74,8 @@ extern void skirmishUpdateSlotList();
 #include <map>
 #include <set>
 #include <unordered_map>
+#include <fstream>
+#include <iterator>
 #include <cstdarg>
 #include <cstdio>
 #include <share.h>
@@ -534,6 +537,8 @@ namespace
 		nlohmann::json garrisonTelemetry;
 		nlohmann::json counterbatteryTelemetry;
 		nlohmann::json brutalPressureTelemetry;
+		nlohmann::json emergencySurvivalTelemetry;
+		nlohmann::json pathingTelemetry;
 
 		// Phase 7: Zone Defense Response state
 		UnsignedInt lastDefendedZoneAnchor = 0;
@@ -607,6 +612,9 @@ namespace
 			m_cache.reset();
 			m_automation.reset();
 			resetAutonomyState();
+			m_mapFileTerrainCacheByKey.clear();
+			m_mapFileTerrainCacheLoggedKeys.clear();
+			m_mapFileTerrainMergeLoggedKeys.clear();
 			m_transport.resetClientConnection();
 		}
 
@@ -660,6 +668,9 @@ namespace
 		AdapterObjectCache m_cache;
 		AdapterAutomationState m_automation;
 		AdapterAutonomyState m_autonomy;
+		std::unordered_map<std::string, AIControlAdapterTerrainFacts> m_mapFileTerrainCacheByKey;
+		std::set<std::string> m_mapFileTerrainCacheLoggedKeys;
+		std::set<std::string> m_mapFileTerrainMergeLoggedKeys;
 
 		void resetAutonomyState()
 		{
@@ -726,6 +737,8 @@ namespace
 			m_autonomy.state.garrisonTelemetry = nlohmann::json::array();
 			m_autonomy.state.counterbatteryTelemetry = nlohmann::json::object();
 			m_autonomy.state.brutalPressureTelemetry = nlohmann::json::object();
+			m_autonomy.state.emergencySurvivalTelemetry = nlohmann::json::object();
+			m_autonomy.state.pathingTelemetry = nlohmann::json::object();
 		}
 
 		bool isAutonomyModeActive() const
@@ -1599,6 +1612,100 @@ namespace
 			if (Object* cc = findPrimaryCommandCenter(player))
 			{
 				pushZone(cc, true, ZoneAnchorType::MainBase);
+			}
+			std::string mapName;
+			if (TheGlobalData != nullptr)
+			{
+				mapName = TheGlobalData->m_mapName.str();
+			}
+			if (mapName.empty() && TheTerrainLogic != nullptr)
+			{
+				mapName = TheTerrainLogic->getSourceFilename().str();
+			}
+			bool hasMainBaseTerrainAnchor = false;
+			float mainBaseTerrainX = 0.0f;
+			float mainBaseTerrainY = 0.0f;
+			for (std::size_t zoneIdx = 0; zoneIdx < zones.size(); ++zoneIdx)
+			{
+				if (zones[zoneIdx].isMainBase)
+				{
+					hasMainBaseTerrainAnchor = true;
+					mainBaseTerrainX = zones[zoneIdx].center.x;
+					mainBaseTerrainY = zones[zoneIdx].center.y;
+					break;
+				}
+			}
+				const AIControlAdapterTerrainFacts extractedTerrainFacts = buildEngineTerrainFacts(
+					mapName,
+					hasMainBaseTerrainAnchor,
+					mainBaseTerrainX,
+					mainBaseTerrainY);
+				const AIControlAdapterTerrainFacts fixtureTerrainFacts = AIControlAdapterBuildTerrainFacts(
+					mapName,
+					hasMainBaseTerrainAnchor,
+					mainBaseTerrainX,
+					mainBaseTerrainY);
+				const AIControlAdapterTerrainFacts mapFileCacheFacts = loadMapFileCacheFactsForMap(mapName);
+				const AIControlAdapterTerrainFacts terrainFacts = AIControlAdapterMergeMapFileCacheFacts(
+					extractedTerrainFacts,
+					fixtureTerrainFacts,
+					mapFileCacheFacts);
+				m_autonomy.state.pathingTelemetry = AIControlAdapterSerializeTerrainFacts(terrainFacts);
+				const std::string mapFileCacheKey = AIControlAdapterNormalizeMapFileCacheKey(mapName);
+				if (m_mapFileTerrainMergeLoggedKeys.insert(mapFileCacheKey).second)
+				{
+					adapterLog(
+						"map_file_cache_merge map=%s cache_features=%d runtime_features=%d fixture_features=%d final_features=%d reason=%s",
+						mapName.empty() ? "unknown" : mapName.c_str(),
+						static_cast<int>(mapFileCacheFacts.features.size()),
+						static_cast<int>(extractedTerrainFacts.features.size()),
+						static_cast<int>(fixtureTerrainFacts.features.size()),
+						static_cast<int>(terrainFacts.features.size()),
+						mapFileCacheFacts.mapFileCacheTelemetry.is_object()
+							? mapFileCacheFacts.mapFileCacheTelemetry.value("reason", std::string("not_evaluated")).c_str()
+							: "not_evaluated");
+				}
+				adapterLog(
+					"terrain_extraction_probe map=%s source=%s extent=%.1f,%.1f,%.1f,%.1f cliffs=%d bridges=%d waypoints=%d features=%d reason=%s",
+					mapName.empty() ? "unknown" : mapName.c_str(),
+					extractedTerrainFacts.source.c_str(),
+					extractedTerrainFacts.extraction.extent.minX,
+					extractedTerrainFacts.extraction.extent.minY,
+					extractedTerrainFacts.extraction.extent.maxX,
+					extractedTerrainFacts.extraction.extent.maxY,
+					extractedTerrainFacts.extraction.cliffSamples,
+					extractedTerrainFacts.extraction.bridgeCount,
+					extractedTerrainFacts.extraction.waypointCount,
+					static_cast<int>(extractedTerrainFacts.features.size()),
+					extractedTerrainFacts.extraction.reason.c_str());
+				adapterLog(
+					"terrain_sample_summary map=%s sample_step=%d blocked=%d passable=%d cliff=%d unknown=%d",
+					mapName.empty() ? "unknown" : mapName.c_str(),
+					extractedTerrainFacts.extraction.sampleStep,
+					extractedTerrainFacts.extraction.blockedSamples,
+					extractedTerrainFacts.extraction.passableSamples,
+					extractedTerrainFacts.extraction.cliffSamples,
+					extractedTerrainFacts.extraction.unknownSamples);
+				adapterLog(
+					"terrain_extraction_source map=%s selected=%s fallback=%s reason=%s",
+					mapName.empty() ? "unknown" : mapName.c_str(),
+					terrainFacts.source.c_str(),
+					terrainFacts.extraction.fallbackSource.empty() ? "none" : terrainFacts.extraction.fallbackSource.c_str(),
+					terrainFacts.extraction.reason.empty() ? "not_evaluated" : terrainFacts.extraction.reason.c_str());
+				adapterLog(
+					"terrain_facts_loaded map=%s features=%d source=%s",
+				mapName.empty() ? "unknown" : mapName.c_str(),
+				static_cast<int>(terrainFacts.features.size()),
+				terrainFacts.source.c_str());
+			for (std::size_t terrainIdx = 0; terrainIdx < terrainFacts.features.size(); ++terrainIdx)
+			{
+				const AIControlAdapterTerrainFeature& feature = terrainFacts.features[terrainIdx];
+				adapterLog(
+					"terrain_feature id=%s kind=%s source=%s points=%d",
+					feature.id.c_str(),
+					feature.kind.c_str(),
+					feature.source.c_str(),
+					static_cast<int>(feature.points.size()));
 			}
 			for (std::size_t i = 0; i < ownedObjects.size(); ++i)
 			{
@@ -2592,8 +2699,8 @@ namespace
 								const Real artilleryRadius = std::max<Real>(1600.0f, m_autonomy.state.zoneRadius * 4.0f);
 								const ZoneThreatEvidence evidence = collectZoneThreatEvidence(
 									player,
-									threatZone.center.x,
-									threatZone.center.y,
+									owned.object->getPosition()->x,
+									owned.object->getPosition()->y,
 									localEnemyRadius,
 									artilleryRadius);
 								const AIControlAdapterZoneThreatSourceResult source = AIControlAdapterClassifyZoneThreatSource({
@@ -2743,6 +2850,30 @@ namespace
 						zoneRadius,
 						zoneFrontDx,
 						zoneFrontDy);
+					const AIControlAdapterZoneTerrainResult terrainZone = AIControlAdapterApplyZoneTerrainFacts(
+						terrainFacts,
+						{ zones[i].center.x, zones[i].center.y, zoneRadius, zones[i].isMainBase });
+					Real frontPointX = zonePoints.frontPoint.x;
+					Real frontPointY = zonePoints.frontPoint.y;
+					std::string frontSourceValue = frontSource;
+					if (terrainZone.hasEntrance)
+					{
+						frontPointX = terrainZone.entrancePosition.x;
+						frontPointY = terrainZone.entrancePosition.y;
+						frontSourceValue = "terrain_entrance";
+						adapterLog(
+							"zone_entrance_selected zone=%u entrance=%s x=%.1f y=%.1f reason=main_base",
+							static_cast<unsigned int>(zones[i].anchorId),
+							terrainZone.entranceId.c_str(),
+							frontPointX,
+							frontPointY);
+					}
+					adapterLog(
+						"zone_terrain_adjust zone=%u old_radius=%.1f new_radius=%.1f reason=%s",
+						static_cast<unsigned int>(zones[i].anchorId),
+						zoneRadius,
+						terrainZone.effectiveRadius,
+						terrainZone.reason);
 					m_autonomy.state.telemetryZones.push_back(nlohmann::json::object({
 						{"anchor_id", static_cast<UnsignedInt>(zones[i].anchorId)},
 						{"anchor_type", zoneAnchorTypeToString(zones[i].anchorType)},
@@ -2750,11 +2881,15 @@ namespace
 						{"active", isActiveZone},
 						{"center_x", zones[i].center.x},
 						{"center_y", zones[i].center.y},
-						{"front_point_x", zonePoints.frontPoint.x},
-						{"front_point_y", zonePoints.frontPoint.y},
+						{"front_point_x", frontPointX},
+						{"front_point_y", frontPointY},
 						{"rear_point_x", zonePoints.rearPoint.x},
 						{"rear_point_y", zonePoints.rearPoint.y},
-						{"front_source", frontSource},
+						{"front_source", frontSourceValue},
+						{"effective_radius", terrainZone.effectiveRadius},
+						{"terrain_limited", terrainZone.terrainLimited},
+						{"terrain_reason", terrainZone.reason},
+						{"terrain_entrance_id", terrainZone.entranceId},
 						{"supply_stashes", zoneSupply},
 						{"barracks", zoneBarracks},
 						{"arms_dealers", zoneArms},
@@ -3316,7 +3451,7 @@ namespace
 				int localWorkerGap = 0;
 				auto countIdleWorkersNearZone = [&](const AutonomyZone& zone) -> int
 				{
-					const Real radius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius);
+						const Real radius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius);
 					const Real radiusSq = radius * radius;
 					int localIdle = 0;
 					for (const AutonomyOwnedObjectSnapshot& owned : ownedObjects)
@@ -3545,7 +3680,42 @@ namespace
 					brutalPressure.chosenPriority,
 					brutalPressure.reason);
 				std::string chosenCommand = "none";
-				if (requiredOpeningBuild != nullptr)
+				const bool enemyWmdThreat = m_autonomy.wmdTargetTracker.hasActiveWMDThreat();
+				const AIControlAdapterPalaceRecoveryDecision palaceRecovery = AIControlAdapterChoosePalaceRecovery({
+					counts.palaces,
+					counts.palacesInProgress,
+					enemyWmdThreat,
+					mobileSiegeThreats > 0,
+					money,
+					2500u,
+					isBuildAttemptReady("Game.BuildPalaceSmart", counts.palacesInProgress)
+				});
+				if (palaceRecovery.shouldBuild && openingInfrastructureReady)
+				{
+					chosenCommand = "Game.BuildPalaceSmart";
+					issued = tryMacroBuildWithFallback("Game.BuildPalaceSmart", false, reason);
+					recordBuildAttempt("Game.BuildPalaceSmart", issued, reason);
+				}
+				const char* palaceRecoveryLogReason = palaceRecovery.reason;
+				if (palaceRecovery.shouldBuild && !openingInfrastructureReady)
+				{
+					palaceRecoveryLogReason = "placement_unavailable";
+				}
+				else if (palaceRecovery.shouldBuild && chosenCommand == "Game.BuildPalaceSmart" && !issued)
+				{
+					palaceRecoveryLogReason = "placement_unavailable";
+				}
+				adapterLog(
+					"palace_recovery_policy live=%d in_progress=%d issued=%d reason=%s",
+					counts.palaces,
+					counts.palacesInProgress,
+					(chosenCommand == "Game.BuildPalaceSmart" && issued) ? 1 : 0,
+					palaceRecoveryLogReason);
+				if (chosenCommand == "Game.BuildPalaceSmart")
+				{
+					// Emergency Palace recovery intentionally leaves unit production to the production tick.
+				}
+				else if (requiredOpeningBuild != nullptr)
 				{
 					chosenCommand = requiredOpeningBuild;
 						if (std::strcmp(requiredOpeningBuild, "Game.BuildSupplyStashSmart") == 0)
@@ -4461,6 +4631,29 @@ namespace
 					AutonomyZoneDefenseAllocation& allocation = it->second;
 					const auto threatIt = m_autonomy.state.zoneThreats.find(allocation.zoneAnchorId);
 					const bool threatStillFresh = threatIt != m_autonomy.state.zoneThreats.end() && isFreshThreat(threatIt->second);
+					if (threatStillFresh)
+					{
+						const AutonomyZoneThreatState& threat = threatIt->second;
+						if ((threat.sourceType == "wmd_strike" || threat.sourceType == "special_power_strike" || threat.sourceType == "unknown_damage")
+							&& threat.localEnemyCount <= 0
+							&& threat.enemyArtilleryCount <= 0)
+						{
+							const char* releaseReason = threat.sourceType == "wmd_strike"
+								? "wmd_strike_no_local_enemy"
+								: (threat.sourceType == "special_power_strike" ? "special_power_no_local_enemy" : "unknown_damage_no_local_enemy");
+							for (std::size_t taskIdx = 0; taskIdx < allocation.taskIds.size(); ++taskIdx)
+							{
+								m_autonomy.combatTaskManager.completeTask(allocation.taskIds[taskIdx], releaseReason);
+							}
+							adapterLog(
+								"zone_defense_release zone=%u assigned=%d reason=%s",
+								allocation.zoneAnchorId,
+								countAliveAssigned(allocation),
+								releaseReason);
+							it = m_autonomy.state.zoneDefenseAllocations.erase(it);
+							continue;
+						}
+					}
 					if (allocation.expiryTick > 0 && now >= allocation.expiryTick)
 					{
 						for (std::size_t taskIdx = 0; taskIdx < allocation.taskIds.size(); ++taskIdx)
@@ -4577,10 +4770,16 @@ namespace
 						candidate.threat.damagedStructures,
 						candidate.threat.destroyedStructures,
 						sourceReason.c_str());
-					if (sourceType == "wmd_strike" && candidate.threat.localEnemyCount <= 0)
+					if ((sourceType == "wmd_strike" || sourceType == "special_power_strike" || sourceType == "unknown_damage")
+						&& candidate.threat.localEnemyCount <= 0
+						&& candidate.threat.enemyArtilleryCount <= 0)
 					{
 						adapterLog(
-							"zone_defense_response zone=%u issued=0 reason=wmd_strike_no_local_enemy",
+							"zone_defense_skip zone=%u source_type=%s reason=no_local_enemy_units",
+							candidate.zoneAnchor,
+							sourceType.c_str());
+						adapterLog(
+							"zone_defense_response zone=%u issued=0 reason=no_local_enemy_units",
 							candidate.zoneAnchor);
 						continue;
 					}
@@ -4660,7 +4859,7 @@ namespace
 					{
 						selectedMaxUnits = std::min(selectedMaxUnits, 2);
 					}
-					else if (sourceType == "unknown")
+					else if (sourceType == "unknown_damage" || sourceType == "unknown")
 					{
 						selectedMaxUnits = std::min(selectedMaxUnits, 1);
 					}
@@ -4685,7 +4884,7 @@ namespace
 					selectedDonors = donorIdsForLog(candidate.zoneAnchor, candidate.severity);
 					selectedReason = sourceType == "artillery_attack"
 						? "artillery_counterbattery"
-						: (sourceType == "unknown" ? "unknown_limited" : (sourceType == "unit_attack" ? "unit_attack" : allocationDecision.reason));
+						: ((sourceType == "unknown_damage" || sourceType == "unknown") ? "unknown_limited" : (sourceType == "unit_attack" ? "unit_attack" : allocationDecision.reason));
 					break;
 				}
 
@@ -4948,6 +5147,91 @@ namespace
 					capacityReason = "no_targets";
 				}
 
+				bool brutalEmergencyPriority = false;
+				bool mainUnderPressure = false;
+				if (m_autonomy.state.brutalPressureTelemetry.is_object())
+				{
+					brutalEmergencyPriority =
+						m_autonomy.state.brutalPressureTelemetry.value("chosen_priority", std::string()) == "emergency_survival";
+					mainUnderPressure = m_autonomy.state.brutalPressureTelemetry.value("main_under_pressure", false);
+				}
+				bool activeUnitAttack = false;
+				int criticalThreatZones = 0;
+				int localEnemyCount = 0;
+				int enemyArtilleryCount = 0;
+				for (const auto& threatPair : m_autonomy.state.zoneThreats)
+				{
+					const AutonomyZoneThreatState& threat = threatPair.second;
+					if ((now - threat.lastSeenTick) > 45000u)
+					{
+						continue;
+					}
+					localEnemyCount += threat.localEnemyCount;
+					enemyArtilleryCount += threat.enemyArtilleryCount;
+					if (threat.sourceType == "unit_attack")
+					{
+						activeUnitAttack = true;
+					}
+					if ((threat.level == "high" || threat.level == "critical") && threat.localEnemyCount > 0)
+					{
+						++criticalThreatZones;
+					}
+				}
+
+				const Int armyCapForLog = AIControlAdapterGetEffectiveArmyCap({
+					isBalancedSprawl,
+					money,
+					static_cast<int>(std::floor(m_autonomy.state.smoothedNetCashPerMinute)),
+					counts.barracks,
+					counts.armsDealers,
+					isBalancedSprawl ? 100 : 9999
+				});
+				const AIControlAdapterEmergencySurvivalProductionDecision emergencyDecision =
+					AIControlAdapterChooseEmergencySurvivalProduction({
+						brutalEmergencyPriority,
+						mainUnderPressure,
+						activeUnitAttack,
+						criticalThreatZones,
+						localEnemyCount,
+						enemyArtilleryCount,
+						money,
+						reserveCash,
+						counts.armsDealers,
+						counts.barracks,
+						counts.palaces,
+						counts.quads,
+						counts.scorpions,
+						counts.rpg,
+						counts.soldiers,
+						armyCount,
+						armyCapForLog
+					});
+				m_autonomy.state.emergencySurvivalTelemetry = nlohmann::json::object({
+					{"active", emergencyDecision.active},
+					{"allow_reserve_spend", emergencyDecision.allowReserveSpend},
+					{"suppress_capture_source_production", emergencyDecision.suppressCaptureSourceProduction},
+					{"bypass_army_cap_buffer", emergencyDecision.bypassArmyCapBuffer},
+					{"emergency_army_cap", emergencyDecision.emergencyArmyCap},
+					{"reason", emergencyDecision.reason}
+				});
+				adapterLog(
+					"emergency_survival_policy active=%d main_under_pressure=%d local_enemies=%d artillery=%d money=%lu reserve=%lu army=%d/%d reason=%s",
+					emergencyDecision.active ? 1 : 0,
+					mainUnderPressure ? 1 : 0,
+					localEnemyCount,
+					enemyArtilleryCount,
+					static_cast<unsigned long>(money),
+					static_cast<unsigned long>(reserveCash),
+					armyCount,
+					armyCapForLog,
+					emergencyDecision.reason);
+
+				if (emergencyDecision.suppressCaptureSourceProduction && captureSourcesLive > 0)
+				{
+					capacityReason = "suppressed_emergency_survival";
+					desiredCaptureSources = captureSourcesAvailable;
+				}
+
 				// Phase 6.3: Log capture source policy
 				const bool productionNeeded = captureSourcesAvailable < desiredCaptureSources && desiredCaptureSources > 0;
 				adapterLog(
@@ -5010,16 +5294,28 @@ namespace
 
 				// Get production decision from ProductionManager
 				ProductionIntent prodIntent = m_autonomy.productionManager.ChooseProduction(inputs, now);
-
-				// Phase 6.3: Compute armyCap for logging (same logic as later telemetry)
-				const Int armyCapForLog = AIControlAdapterGetEffectiveArmyCap({
-					isBalancedSprawl,
-					money,
-					static_cast<int>(std::floor(m_autonomy.state.smoothedNetCashPerMinute)),
-					counts.barracks,
-					counts.armsDealers,
-					isBalancedSprawl ? 100 : 9999
-				});
+				bool emergencyProductionCommand = false;
+				if (emergencyDecision.active)
+				{
+					if (!emergencyDecision.commands.empty())
+					{
+						prodIntent.shouldProduce = true;
+						prodIntent.commandName = emergencyDecision.commands[0];
+						prodIntent.producerKind = "any";
+						prodIntent.producerObjectId = -1;
+						prodIntent.unitTemplate = "";
+						prodIntent.reason = emergencyDecision.reason;
+						emergencyProductionCommand = true;
+					}
+					else
+					{
+						adapterLog(
+							"emergency_survival_production command=none issued=0 reserve_spend=%d army_cap_override=%d reason=%s",
+							emergencyDecision.allowReserveSpend ? 1 : 0,
+							emergencyDecision.bypassArmyCapBuffer ? 1 : 0,
+							emergencyDecision.reason);
+					}
+				}
 
 				// Phase 6.3: Log capture source production decisions
 				if (prodIntent.shouldProduce && prodIntent.reason == "capture_utility_reserve")
@@ -5080,7 +5376,8 @@ namespace
 					counts.queuedRocketBuggies,
 					buggyMix.desiredBuggies,
 					buggyMix.reason);
-				if (buggyMix.productionNeeded
+				if (!emergencyDecision.active
+					&& buggyMix.productionNeeded
 					&& counts.warFactoryLikeProducers > 0
 					&& (!prodIntent.shouldProduce
 						|| prodIntent.commandName == "Game.QueueQuadsAllWarFactories"
@@ -5115,7 +5412,7 @@ namespace
 				// (scudCounterbatteryOverride remains false)
 
 				// Economy policy enforcement: block or suppress production based on spending mode
-				if (!scudCounterbatteryOverride && prodIntent.shouldProduce && economyPolicy.combatSpendingMode == CombatSpendingMode::BlockedExceptDefense)
+				if (!emergencyDecision.allowReserveSpend && !scudCounterbatteryOverride && prodIntent.shouldProduce && economyPolicy.combatSpendingMode == CombatSpendingMode::BlockedExceptDefense)
 				{
 					// Block normal combat production during critical income/reserve pressure
 					// (Defense production would still be allowed via DefenseManager intents)
@@ -5144,13 +5441,28 @@ namespace
 
 				if (prodIntent.shouldProduce)
 				{
+					const bool emergencyProductionLog = emergencyProductionCommand;
+					const bool emergencyReserveSpend = emergencyDecision.allowReserveSpend;
+					const bool emergencyArmyCapOverride = emergencyDecision.bypassArmyCapBuffer;
+					const std::string emergencyReason = emergencyDecision.reason != nullptr ? emergencyDecision.reason : "";
 					// Capture production execution logic in callback
-					schedulerIntent.executeFunc = [&, prodIntent, producerSnapshots](std::string& resultReason) -> bool {
+					schedulerIntent.executeFunc = [&, prodIntent, producerSnapshots, emergencyProductionLog, emergencyReserveSpend, emergencyArmyCapOverride, emergencyReason](std::string& resultReason) -> bool {
 						if (prodIntent.producerObjectId == -1)
 						{
 							// Use "all" command (all eligible producers)
-							return tryCommand("auto_prod", prodIntent.commandName.c_str(),
+							const bool issued = tryCommand("auto_prod", prodIntent.commandName.c_str(),
 								nlohmann::json::object({ {"count", 1} }), resultReason);
+							if (emergencyProductionLog)
+							{
+								adapterLog(
+									"emergency_survival_production command=%s issued=%d reserve_spend=%d army_cap_override=%d reason=%s",
+									prodIntent.commandName.c_str(),
+									issued ? 1 : 0,
+									emergencyReserveSpend ? 1 : 0,
+									emergencyArmyCapOverride ? 1 : 0,
+									issued ? emergencyReason.c_str() : resultReason.c_str());
+							}
+							return issued;
 						}
 						else
 						{
@@ -5977,6 +6289,22 @@ namespace
 					{"chosen_priority", "not_evaluated"},
 					{"reason", "not_evaluated"}
 				});
+			result["emergency_survival"] = m_autonomy.state.emergencySurvivalTelemetry.is_object()
+				? m_autonomy.state.emergencySurvivalTelemetry
+				: nlohmann::json::object({
+					{"active", false},
+					{"allow_reserve_spend", false},
+					{"suppress_capture_source_production", false},
+					{"bypass_army_cap_buffer", false},
+					{"emergency_army_cap", 0},
+					{"reason", "not_evaluated"}
+				});
+			result["pathing"] = m_autonomy.state.pathingTelemetry.is_object()
+				? m_autonomy.state.pathingTelemetry
+				: nlohmann::json::object({
+					{"source", "unavailable"},
+					{"terrain_features", nlohmann::json::array()}
+				});
 
 			nlohmann::json zoneThreats = nlohmann::json::array();
 			for (const auto& pair : m_autonomy.state.zoneThreats)
@@ -6284,6 +6612,53 @@ namespace
 			const int inProgressScudStorms = scudStormTelCtx.healthyUnderConstructionCount + scudStormBuildTasks;
 			const int desiredScudStorms = 10;
 			const int effectiveScudStorms = readyScudStorms + inProgressScudStorms;
+			std::vector<AIControlAdapterScudStormStrategicTargetCandidate> scudStormStrategicCandidates;
+			for (const EnemyMemoryItem& item : m_autonomy.enemyMemory.getItems())
+			{
+				AIControlAdapterScudStormStrategicTargetCandidate candidate;
+				candidate.objectId = item.objectId;
+				candidate.playerIndex = item.playerIndex;
+				candidate.team = item.team;
+				candidate.targetKind = AIControlAdapterEnemyMemory::kindToString(item.kind);
+				candidate.templateName = item.templateName;
+				candidate.visible = item.visible;
+				candidate.stale = item.stale;
+				candidate.enemyOwned = true;
+				candidate.alive = true;
+				candidate.ageMs = item.lastSeenTick == 0u ? 0u : static_cast<unsigned int>(telemetryNow - item.lastSeenTick);
+				candidate.x = item.position.x;
+				candidate.y = item.position.y;
+				candidate.z = item.position.z;
+				scudStormStrategicCandidates.push_back(candidate);
+			}
+			const AIControlAdapterScudStormStrategicTargetResult scudStormStrategicTarget =
+				AIControlAdapterSelectScudStormStrategicTarget({
+					readyScudStorms > 0,
+					hasWMDThreat,
+					false,
+					120000u,
+					scudStormStrategicCandidates
+				});
+			nlohmann::json scudStormStrategicTargetTelemetry = nlohmann::json::object({
+				{"reason", scudStormStrategicTarget.reason}
+			});
+			if (scudStormStrategicTarget.hasTarget)
+			{
+				scudStormStrategicTargetTelemetry = nlohmann::json::object({
+					{"object_id", scudStormStrategicTarget.objectId},
+					{"player_index", scudStormStrategicTarget.playerIndex},
+					{"team", scudStormStrategicTarget.team},
+					{"template", scudStormStrategicTarget.templateName},
+					{"target_kind", scudStormStrategicTarget.targetKind},
+					{"visible", scudStormStrategicTarget.visible},
+					{"stale", scudStormStrategicTarget.stale},
+					{"age_ms", scudStormStrategicTarget.ageMs},
+					{"x", scudStormStrategicTarget.x},
+					{"y", scudStormStrategicTarget.y},
+					{"z", scudStormStrategicTarget.z},
+					{"reason", scudStormStrategicTarget.reason}
+				});
+			}
 
 			// Phase 7.5: wmd_counter telemetry structure
 			result["wmd_targets"] = wmdTargetsArray;
@@ -6298,6 +6673,7 @@ namespace
 					{"stale_stopped", scudStormTelCtx.stoppedFoundationCount},
 					{"destroyed", 0},
 					{"production_needed", effectiveScudStorms < desiredScudStorms},
+					{"strategic_target", scudStormStrategicTargetTelemetry},
 					{"reason", hasWMDThreat ? "enemy_wmd_detected" : "defensive_baseline"}
 				})},
 				{"mobile_scud_launchers", nlohmann::json::object({
@@ -6428,13 +6804,289 @@ namespace
 			return result;
 		}
 
+		std::vector<std::string> buildMapFileCacheCandidatePaths(const std::string& key) const
+		{
+			std::vector<std::string> paths;
+			if (key.empty())
+			{
+				return paths;
+			}
+			const std::string filename = key + ".json";
+			paths.push_back("projects/data/map-terrain/" + filename);
+			paths.push_back("../projects/data/map-terrain/" + filename);
+			paths.push_back("../../projects/data/map-terrain/" + filename);
+			paths.push_back("../../../projects/data/map-terrain/" + filename);
+			paths.push_back("Z:\\home\\jtanner\\workspace\\github\\jctanner.personal\\zero.hour\\projects\\data\\map-terrain\\" + filename);
+			paths.push_back("/home/jtanner/workspace/github/jctanner.personal/zero.hour/projects/data/map-terrain/" + filename);
+			return paths;
+		}
+
+		bool readTextFile(const std::string& path, std::string& outText) const
+		{
+			std::ifstream in(path.c_str(), std::ios::in | std::ios::binary);
+			if (!in.good())
+			{
+				return false;
+			}
+			outText.assign(
+				(std::istreambuf_iterator<char>(in)),
+				std::istreambuf_iterator<char>());
+			return true;
+		}
+
+		AIControlAdapterTerrainFacts loadMapFileCacheFactsForMap(const std::string& mapName)
+		{
+			const std::string key = AIControlAdapterNormalizeMapFileCacheKey(mapName);
+			std::unordered_map<std::string, AIControlAdapterTerrainFacts>::const_iterator cached = m_mapFileTerrainCacheByKey.find(key);
+			if (cached != m_mapFileTerrainCacheByKey.end())
+			{
+				return cached->second;
+			}
+
+			AIControlAdapterTerrainFacts facts;
+			facts.mapName = mapName;
+			facts.source = "unavailable";
+			facts.extraction.mapName = mapName;
+			facts.extraction.selectedSource = "unavailable";
+			facts.extraction.fallbackSource = "none";
+			facts.extraction.reason = "cache_not_found";
+			facts.mapFileCacheTelemetry = nlohmann::json::object({
+				{"loaded", false},
+				{"reason", key.empty() ? "empty_map_name" : "cache_not_found"}
+			});
+
+			const std::vector<std::string> paths = buildMapFileCacheCandidatePaths(key);
+			std::string selectedPath;
+			std::string body;
+			for (std::size_t i = 0; i < paths.size(); ++i)
+			{
+				if (readTextFile(paths[i], body))
+				{
+					selectedPath = paths[i];
+					break;
+				}
+			}
+
+			if (selectedPath.empty())
+			{
+				if (m_mapFileTerrainCacheLoggedKeys.insert(key + ":missing").second)
+				{
+					const std::string firstPath = paths.empty() ? "" : paths.front();
+					adapterLog(
+						"map_file_cache_probe map=%s normalized=%s path=%s found=0 reason=cache_not_found",
+						mapName.empty() ? "unknown" : mapName.c_str(),
+						key.empty() ? "empty" : key.c_str(),
+						firstPath.empty() ? "none" : firstPath.c_str());
+					adapterLog(
+						"map_file_cache_unavailable map=%s reason=cache_not_found",
+						mapName.empty() ? "unknown" : mapName.c_str());
+				}
+				m_mapFileTerrainCacheByKey[key] = facts;
+				return facts;
+			}
+
+			if (m_mapFileTerrainCacheLoggedKeys.insert(key + ":probe").second)
+			{
+				adapterLog(
+					"map_file_cache_probe map=%s normalized=%s path=%s found=1 reason=matched_normalized_map_name",
+					mapName.empty() ? "unknown" : mapName.c_str(),
+					key.empty() ? "empty" : key.c_str(),
+					selectedPath.c_str());
+			}
+
+			try
+			{
+				const nlohmann::json parsed = nlohmann::json::parse(body);
+				std::string reason;
+				if (!AIControlAdapterParseMapFileCacheJson(parsed, mapName, selectedPath, facts, reason))
+				{
+					if (m_mapFileTerrainCacheLoggedKeys.insert(key + ":parse-failed").second)
+					{
+						adapterLog(
+							"map_file_cache_unavailable map=%s reason=%s",
+							mapName.empty() ? "unknown" : mapName.c_str(),
+							reason.empty() ? "parse_error" : reason.c_str());
+					}
+				}
+				else if (m_mapFileTerrainCacheLoggedKeys.insert(key + ":loaded").second)
+				{
+					adapterLog(
+						"map_file_cache_loaded map=%s path=%s waypoints=%d lanes=%d objects=%d hash=%s",
+						mapName.empty() ? "unknown" : mapName.c_str(),
+						selectedPath.c_str(),
+						facts.mapFileCacheTelemetry.value("waypoints", 0),
+						facts.mapFileCacheTelemetry.value("lanes", 0),
+						facts.mapFileCacheTelemetry.value("objects", 0),
+						facts.mapFileCacheTelemetry.value("map_hash", std::string()).c_str());
+				}
+			}
+			catch (const std::exception& ex)
+			{
+				facts.mapFileCacheTelemetry = nlohmann::json::object({
+					{"loaded", false},
+					{"source", selectedPath},
+					{"reason", "parse_error"},
+					{"error", ex.what()}
+				});
+				if (m_mapFileTerrainCacheLoggedKeys.insert(key + ":exception").second)
+				{
+					adapterLog(
+						"map_file_cache_unavailable map=%s reason=parse_error",
+						mapName.empty() ? "unknown" : mapName.c_str());
+				}
+			}
+
+			m_mapFileTerrainCacheByKey[key] = facts;
+			return facts;
+		}
+
+		AIControlAdapterTerrainFacts buildEngineTerrainFacts(
+			const std::string& mapName,
+			bool hasMainBase,
+			float mainBaseX,
+			float mainBaseY) const
+		{
+			AIControlAdapterTerrainFacts facts;
+			facts.mapName = mapName;
+			facts.source = "unavailable";
+			facts.extraction.mapName = mapName;
+			facts.extraction.selectedSource = "unavailable";
+			facts.extraction.fallbackSource = "none";
+			facts.extraction.reason = "terrain_logic_unavailable";
+			facts.extraction.sampleStep = 256;
+
+			if (TheTerrainLogic == nullptr || !hasMainBase)
+			{
+				return facts;
+			}
+
+			const float sampleHalfSize = 2304.0f;
+			facts.extraction.extent.minX = mainBaseX - sampleHalfSize;
+			facts.extraction.extent.minY = mainBaseY - sampleHalfSize;
+			facts.extraction.extent.maxX = mainBaseX + sampleHalfSize;
+			facts.extraction.extent.maxY = mainBaseY + sampleHalfSize;
+
+			int laneFeatureCount = 0;
+			for (Waypoint* waypoint = TheTerrainLogic->getFirstWaypoint(); waypoint != nullptr; waypoint = waypoint->getNext())
+			{
+				++facts.extraction.waypointCount;
+				if (laneFeatureCount >= 48)
+				{
+					continue;
+				}
+				const Coord3D* from = waypoint->getLocation();
+				if (from == nullptr)
+				{
+					continue;
+				}
+				for (Int linkIdx = 0; linkIdx < waypoint->getNumLinks() && laneFeatureCount < 48; ++linkIdx)
+				{
+					Waypoint* linked = waypoint->getLink(linkIdx);
+					const Coord3D* to = linked != nullptr ? linked->getLocation() : nullptr;
+					if (to == nullptr)
+					{
+						continue;
+					}
+					AIControlAdapterTerrainFeature lane;
+					lane.id = std::string("waypoint-lane-") + std::to_string(waypoint->getID()) + "-" + std::to_string(linked->getID());
+					lane.kind = "lane";
+					lane.source = "engine_query";
+					lane.points.push_back({ from->x, from->y });
+					lane.points.push_back({ to->x, to->y });
+					const std::string label = waypoint->getPathLabel1().str();
+					if (!label.empty())
+					{
+						lane.connects.push_back(label);
+					}
+					facts.features.push_back(lane);
+					++laneFeatureCount;
+				}
+			}
+
+			int bridgeFeatureCount = 0;
+			for (Bridge* bridge = TheTerrainLogic->getFirstBridge(); bridge != nullptr; bridge = bridge->getNext())
+			{
+				++facts.extraction.bridgeCount;
+				if (bridgeFeatureCount >= 16)
+				{
+					continue;
+				}
+				BridgeInfo info;
+				bridge->getBridgeInfo(&info);
+				AIControlAdapterTerrainFeature bridgeFeature;
+				bridgeFeature.id = std::string("bridge-") + std::to_string(bridgeFeatureCount);
+				bridgeFeature.kind = "chokepoint";
+				bridgeFeature.source = "engine_query";
+				bridgeFeature.hasPosition = true;
+				bridgeFeature.position.x = (info.from.x + info.to.x) * 0.5f;
+				bridgeFeature.position.y = (info.from.y + info.to.y) * 0.5f;
+				bridgeFeature.width = info.bridgeWidth;
+				bridgeFeature.points.push_back({ info.from.x, info.from.y });
+				bridgeFeature.points.push_back({ info.to.x, info.to.y });
+				facts.features.push_back(bridgeFeature);
+				++bridgeFeatureCount;
+			}
+
+			int cliffFeatureCount = 0;
+			const int step = std::max(64, facts.extraction.sampleStep);
+			for (float y = facts.extraction.extent.minY; y <= facts.extraction.extent.maxY; y += static_cast<float>(step))
+			{
+				for (float x = facts.extraction.extent.minX; x <= facts.extraction.extent.maxX; x += static_cast<float>(step))
+				{
+					const Bool cliff = TheTerrainLogic->isCliffCell(x, y);
+					if (cliff)
+					{
+						++facts.extraction.cliffSamples;
+						if (cliffFeatureCount < 96)
+						{
+							AIControlAdapterTerrainFeature sample;
+							sample.id = std::string("cliff-sample-") + std::to_string(cliffFeatureCount);
+							sample.kind = "cliff_sample";
+							sample.source = "engine_sample";
+							sample.hasPosition = true;
+							sample.position.x = x;
+							sample.position.y = y;
+							sample.width = static_cast<float>(step);
+							facts.features.push_back(sample);
+							++cliffFeatureCount;
+						}
+					}
+					else
+					{
+						++facts.extraction.passableSamples;
+					}
+				}
+			}
+
+			if (facts.extraction.bridgeCount > 0 || facts.extraction.waypointCount > 0)
+			{
+				facts.source = "engine_query";
+				facts.extraction.selectedSource = "engine_query";
+				facts.extraction.reason = "engine_waypoints_or_bridges_available";
+			}
+			else if (facts.extraction.cliffSamples > 0)
+			{
+				facts.source = "engine_sample";
+				facts.extraction.selectedSource = "engine_sample";
+				facts.extraction.reason = "engine_sampling_available";
+			}
+			else
+			{
+				facts.source = "unavailable";
+				facts.extraction.selectedSource = "unavailable";
+				facts.extraction.reason = "engine_probe_no_features";
+			}
+
+			return facts;
+		}
+
 		nlohmann::json buildAutonomyZonesSnapshot()
 		{
 			Player* player = resolveAutonomyPlayer();
 			updateEnemyMemory(player);
 
 			nlohmann::json zones = nlohmann::json::array();
-			const Real radius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius);
+			const Real defaultRadius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius);
 			const DWORD now = ::GetTickCount();
 
 			if (m_autonomy.state.telemetryZones.is_array())
@@ -6455,6 +7107,7 @@ namespace
 					const Int blackMarkets = zone.value("black_markets", 0);
 					const Int tunnels = zone.value("tunnels", 0);
 					const Int stingers = zone.value("stingers", 0);
+					const Real radius = std::max<Real>(160.0f, zone.value("effective_radius", defaultRadius));
 					const bool active =
 						m_autonomy.state.hasLastZone
 						&& anchorId == m_autonomy.state.lastZoneAnchorId
@@ -6500,6 +7153,10 @@ namespace
 							{"y", zone.value("center_y", 0.0f)}
 						})},
 						{"radius", radius},
+						{"base_radius", defaultRadius},
+						{"terrain_limited", zone.value("terrain_limited", false)},
+						{"terrain_reason", zone.value("terrain_reason", "")},
+						{"terrain_entrance_id", zone.value("terrain_entrance_id", "")},
 						{"front_point", nlohmann::json::object({
 							{"x", zone.value("front_point_x", 0.0f)},
 							{"y", zone.value("front_point_y", 0.0f)}
@@ -6542,6 +7199,12 @@ namespace
 					{"command", m_autonomy.state.lastDecisionCommand},
 					{"reason", m_autonomy.state.lastDecisionReason}
 				})},
+				{"pathing", m_autonomy.state.pathingTelemetry.is_object()
+					? m_autonomy.state.pathingTelemetry
+					: nlohmann::json::object({
+						{"source", "unavailable"},
+						{"terrain_features", nlohmann::json::array()}
+					})},
 				{"enemy_memory", m_autonomy.enemyMemory.buildTelemetry(now)},
 				{"zones", zones}
 			});
@@ -7743,26 +8406,115 @@ namespace
 				buildPolicy.spendAllowed ? 1 : 0,
 				policyReason.c_str());
 
-			// Fire at enemy WMD if ready
-			if (readyScudStorm != nullptr && hasWMDThreat)
+			std::vector<AIControlAdapterScudStormStrategicTargetCandidate> strategicCandidates;
+			for (const EnemyMemoryItem& item : m_autonomy.enemyMemory.getItems())
+			{
+				AIControlAdapterScudStormStrategicTargetCandidate candidate;
+				candidate.objectId = item.objectId;
+				candidate.playerIndex = item.playerIndex;
+				candidate.team = item.team;
+				candidate.targetKind = AIControlAdapterEnemyMemory::kindToString(item.kind);
+				candidate.templateName = item.templateName;
+				candidate.visible = item.visible;
+				candidate.stale = item.stale;
+				candidate.enemyOwned = true;
+				candidate.alive = true;
+				candidate.ageMs = item.lastSeenTick == 0u ? 0u : static_cast<unsigned int>(now - item.lastSeenTick);
+				candidate.x = item.position.x;
+				candidate.y = item.position.y;
+				candidate.z = item.position.z;
+				strategicCandidates.push_back(candidate);
+			}
+
+			const bool scudStormFireCooldownActive = AIControlAdapterIsTickInFuture(s_nextScudStormFireTick, now);
+			if (readyScudStorm == nullptr)
+			{
+				adapterLog("scud_storm_target_policy mode=hold reason=no_ready_scud_storm");
+			}
+			else if (hasWMDThreat)
 			{
 				const WMDTarget* wmdTarget = m_autonomy.wmdTargetTracker.getHighestPriorityTarget();
-				if (wmdTarget != nullptr && wmdTarget->alive && !AIControlAdapterIsTickInFuture(s_nextScudStormFireTick, now))
+				if (wmdTarget != nullptr && wmdTarget->alive)
 				{
-					s_nextScudStormFireTick = now + 10000u;
+					adapterLog(
+						"scud_storm_target_policy mode=wmd target=%u template=%s reason=enemy_wmd_detected",
+						wmdTarget->objectId,
+						wmdTarget->templateName.c_str());
+					if (!scudStormFireCooldownActive)
+					{
+						s_nextScudStormFireTick = now + 10000u;
 
-					// Issue SCUD Storm fire command
+						char requestIdBuffer[96];
+						sprintf_s(requestIdBuffer, "scud_storm_wmd_%08X", static_cast<unsigned int>(wmdTarget->objectId));
+
+						nlohmann::json message = {
+							{"type", "SessionCommand"},
+							{"request_id", std::string(requestIdBuffer)},
+							{"cmd", "Game.ScudStormAtPosition"},
+							{"args", nlohmann::json::object({
+								{"x", wmdTarget->position.x},
+								{"y", wmdTarget->position.y},
+								{"z", wmdTarget->position.z}
+							})}
+						};
+
+						if (m_autonomy.state.hasExplicitPlayerIndex)
+						{
+							message["args"]["player"] = player->getPlayerIndex();
+						}
+
+						std::string fireReason;
+						const bool fired = executeGameScudStormAtPosition(message, fireReason);
+
+						adapterLog(
+							"scud_storm_fire mode=wmd target=%u template=%s issued=%d reason=%s x=%.1f y=%.1f",
+							wmdTarget->objectId,
+							wmdTarget->templateName.c_str(),
+							fired ? 1 : 0,
+							fired ? "fired_at_enemy_wmd" : fireReason.c_str(),
+							wmdTarget->position.x,
+							wmdTarget->position.y);
+					}
+					else
+					{
+						adapterLog("scud_storm_target_policy mode=hold reason=cooldown");
+					}
+				}
+			}
+			else
+			{
+				const AIControlAdapterScudStormStrategicTargetResult strategicTarget =
+					AIControlAdapterSelectScudStormStrategicTarget({
+						readyScudStorm != nullptr,
+						false,
+						scudStormFireCooldownActive,
+						120000u,
+						strategicCandidates
+					});
+				if (strategicTarget.hasTarget)
+				{
+					adapterLog(
+						"scud_storm_target_policy mode=strategic_siege target=%u template=%s kind=%s visible=%d age_ms=%u reason=%s",
+						strategicTarget.objectId,
+						strategicTarget.templateName.c_str(),
+						strategicTarget.targetKind.c_str(),
+						strategicTarget.visible ? 1 : 0,
+						strategicTarget.ageMs,
+						strategicTarget.reason);
+
+					s_nextScudStormFireTick = now + 10000u;
 					char requestIdBuffer[96];
-					sprintf_s(requestIdBuffer, "scud_storm_fire_%08X", static_cast<unsigned int>(wmdTarget->objectId));
+					sprintf_s(requestIdBuffer, "scud_storm_siege_%08X", static_cast<unsigned int>(strategicTarget.objectId));
 
 					nlohmann::json message = {
 						{"type", "SessionCommand"},
 						{"request_id", std::string(requestIdBuffer)},
 						{"cmd", "Game.ScudStormAtPosition"},
 						{"args", nlohmann::json::object({
-							{"x", wmdTarget->position.x},
-							{"y", wmdTarget->position.y},
-							{"z", wmdTarget->position.z}
+							{"x", strategicTarget.x},
+							{"y", strategicTarget.y},
+							{"z", strategicTarget.z},
+							{"target_object_id", strategicTarget.objectId}
 						})}
 					};
 
@@ -7773,15 +8525,18 @@ namespace
 
 					std::string fireReason;
 					const bool fired = executeGameScudStormAtPosition(message, fireReason);
-
 					adapterLog(
-						"scud_storm_fire target=%u template=%s issued=%d reason=%s x=%.1f y=%.1f",
-						wmdTarget->objectId,
-						wmdTarget->templateName.c_str(),
+						"scud_storm_fire mode=strategic_siege target=%u template=%s issued=%d reason=%s x=%.1f y=%.1f",
+						strategicTarget.objectId,
+						strategicTarget.templateName.c_str(),
 						fired ? 1 : 0,
-						fired ? "fired_at_enemy_wmd" : fireReason.c_str(),
-						wmdTarget->position.x,
-						wmdTarget->position.y);
+						fired ? strategicTarget.reason : fireReason.c_str(),
+						strategicTarget.x,
+						strategicTarget.y);
+				}
+				else
+				{
+					adapterLog("scud_storm_target_policy mode=hold reason=%s", strategicTarget.reason);
 				}
 			}
 

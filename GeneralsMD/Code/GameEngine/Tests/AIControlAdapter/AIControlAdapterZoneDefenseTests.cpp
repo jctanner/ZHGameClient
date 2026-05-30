@@ -1449,8 +1449,8 @@ namespace Phase79
 		});
 
 		expect(std::string(result.type) == "wmd_strike", "Severe recent-WMD damage with no local enemies should classify as wmd_strike");
-		expect(std::string(result.response) == "rebuild_only", "WMD-only strike should choose rebuild_only response");
-		expect(std::string(result.reason) == "severe_damage_no_local_enemy_recent_wmd", "WMD-only strike should expose concrete reason");
+		expect(std::string(result.response) == "hold_rebuild_recover", "WMD-only strike should choose hold/rebuild/recover response");
+		expect(std::string(result.reason) == "recent_wmd_no_local_enemy", "WMD-only strike should expose concrete reason");
 		std::cout << "PASS: Phase79::testWmdStrikeWithoutLocalEnemySuppressesDefense\n";
 	}
 
@@ -1468,6 +1468,7 @@ namespace Phase79
 
 		expect(std::string(result.type) == "unit_attack", "Visible local enemies should override WMD-only classification");
 		expect(std::string(result.response) == "defend", "Visible local enemies should allow defense response");
+		expect(std::string(result.reason) == "local_enemy_units_recent_wmd", "Recent WMD plus real units should explain local units are present");
 		std::cout << "PASS: Phase79::testWmdDamageWithLocalEnemyAllowsDefense\n";
 	}
 
@@ -1488,7 +1489,7 @@ namespace Phase79
 		std::cout << "PASS: Phase79::testUnitAttackStillMobilizesDefense\n";
 	}
 
-	void testUnknownDamageUsesLimitedScout()
+	void testUnknownDamageUsesHoldRecover()
 	{
 		const AIControlAdapterZoneThreatSourceResult result = AIControlAdapterClassifyZoneThreatSource({
 			0,
@@ -1500,9 +1501,10 @@ namespace Phase79
 			0
 		});
 
-		expect(std::string(result.type) == "unknown", "Damage without evidence should classify as unknown");
-		expect(std::string(result.response) == "limited_scout", "Unknown damage should use limited scout response");
-		std::cout << "PASS: Phase79::testUnknownDamageUsesLimitedScout\n";
+		expect(std::string(result.type) == "unknown_damage", "Damage without evidence should classify as unknown_damage");
+		expect(std::string(result.response) == "hold_rebuild_recover", "Unknown damage should not request full mobile defense");
+		expect(std::string(result.reason) == "damage_no_local_enemy", "Unknown damage should expose no-local-enemy reason");
+		std::cout << "PASS: Phase79::testUnknownDamageUsesHoldRecover\n";
 	}
 
 	void testArtilleryThreatUsesCounterbattery()
@@ -1519,7 +1521,31 @@ namespace Phase79
 
 		expect(std::string(result.type) == "artillery_attack", "Visible artillery without local enemies should classify as artillery_attack");
 		expect(std::string(result.response) == "counterbattery", "Artillery attack should prefer counterbattery response");
+		expect(std::string(result.reason) == "enemy_artillery_detected", "Artillery attack should expose artillery evidence reason");
 		std::cout << "PASS: Phase79::testArtilleryThreatUsesCounterbattery\n";
+	}
+
+	void testNonUnitThreatAllocationDoesNotIssueDefense()
+	{
+		const AIControlAdapterZoneDefenseAllocationResult result = AIControlAdapterEvaluateZoneDefenseAllocation({
+			false,
+			0,
+			2,
+			10000u,
+			0u,
+			0u,
+			0,
+			0,
+			0.0f,
+			0.0f,
+			100.0f,
+			100.0f,
+			300.0f
+		});
+
+		expect(!result.shouldIssueCommand, "No requested defenders should prevent mobile defense allocation");
+		expect(std::string(result.reason) == "no_budget", "No requested defenders should report no budget");
+		std::cout << "PASS: Phase79::testNonUnitThreatAllocationDoesNotIssueDefense\n";
 	}
 
 	void runAllPhase79Tests()
@@ -1528,8 +1554,9 @@ namespace Phase79
 		testWmdStrikeWithoutLocalEnemySuppressesDefense();
 		testWmdDamageWithLocalEnemyAllowsDefense();
 		testUnitAttackStillMobilizesDefense();
-		testUnknownDamageUsesLimitedScout();
+		testUnknownDamageUsesHoldRecover();
 		testArtilleryThreatUsesCounterbattery();
+		testNonUnitThreatAllocationDoesNotIssueDefense();
 		std::cout << "All Phase 7.9 Increment 2 tests passed!\n";
 	}
 }

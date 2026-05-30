@@ -10,6 +10,8 @@
 #include <cstring>
 #include <cctype>
 #include <map>
+#include <limits>
+#include <set>
 
 namespace
 {
@@ -31,6 +33,89 @@ namespace
 	{
 		const std::string lower = AIControlAdapterLowerCopy(templateName);
 		return AIControlAdapterContainsToken(lower, "sneakattack");
+	}
+
+	bool AIControlAdapterReadTerrainPoint(const nlohmann::json& value, AIControlAdapterTerrainPoint& outPoint)
+	{
+		if (!value.is_object() || !value.contains("x") || !value.contains("y"))
+		{
+			return false;
+		}
+		outPoint.x = value.value("x", 0.0f);
+		outPoint.y = value.value("y", 0.0f);
+		return true;
+	}
+
+	bool AIControlAdapterIsTrustedMapFileCacheFeature(const nlohmann::json& featureJson)
+	{
+		const std::string kind = featureJson.value("kind", "");
+		if (kind == "waypoint"
+			|| kind == "lane"
+			|| kind == "impassable_barrier"
+			|| kind == "blocked_area")
+		{
+			return true;
+		}
+		if (kind == "base_entrance" || kind == "chokepoint")
+		{
+			const std::string source = featureJson.value("source", "");
+			return featureJson.value("trusted", false)
+				&& (source == "manual_annotation" || source == "map_file_annotation");
+		}
+		return false;
+	}
+
+	float AIControlAdapterDistancePointToSegmentSq(
+		float px,
+		float py,
+		const AIControlAdapterTerrainPoint& a,
+		const AIControlAdapterTerrainPoint& b)
+	{
+		const float vx = b.x - a.x;
+		const float vy = b.y - a.y;
+		const float wx = px - a.x;
+		const float wy = py - a.y;
+		const float lenSq = (vx * vx) + (vy * vy);
+		float t = 0.0f;
+		if (lenSq > 0.0001f)
+		{
+			t = ((wx * vx) + (wy * vy)) / lenSq;
+			t = std::max(0.0f, std::min(1.0f, t));
+		}
+		const float cx = a.x + (t * vx);
+		const float cy = a.y + (t * vy);
+		const float dx = px - cx;
+		const float dy = py - cy;
+		return (dx * dx) + (dy * dy);
+	}
+
+	float AIControlAdapterDistancePointToFeatureSq(
+		float px,
+		float py,
+		const AIControlAdapterTerrainFeature& feature)
+	{
+		if (feature.hasPosition)
+		{
+			const float dx = px - feature.position.x;
+			const float dy = py - feature.position.y;
+			return (dx * dx) + (dy * dy);
+		}
+		if (feature.points.empty())
+		{
+			return std::numeric_limits<float>::max();
+		}
+		if (feature.points.size() == 1u)
+		{
+			const float dx = px - feature.points[0].x;
+			const float dy = py - feature.points[0].y;
+			return (dx * dx) + (dy * dy);
+		}
+		float best = std::numeric_limits<float>::max();
+		for (std::size_t i = 1; i < feature.points.size(); ++i)
+		{
+			best = std::min(best, AIControlAdapterDistancePointToSegmentSq(px, py, feature.points[i - 1], feature.points[i]));
+		}
+		return best;
 	}
 }
 
@@ -646,6 +731,188 @@ AIControlAdapterScudStormConstructionPolicyResult AIControlAdapterEvaluateScudSt
 	return result;
 }
 
+namespace
+{
+	int AIControlAdapterScudStormStrategicKindPriority(
+		const AIControlAdapterScudStormStrategicTargetCandidate& candidate,
+		std::string& normalizedKind)
+	{
+		const std::string kindLower = AIControlAdapterLowerCopy(candidate.targetKind);
+		const std::string templateLower = AIControlAdapterLowerCopy(candidate.templateName);
+		if (AIControlAdapterContainsToken(kindLower, "base") ||
+			AIControlAdapterContainsToken(kindLower, "command") ||
+			AIControlAdapterContainsToken(templateLower, "commandcenter") ||
+			AIControlAdapterContainsToken(templateLower, "command_center") ||
+			AIControlAdapterContainsToken(templateLower, "command"))
+		{
+			normalizedKind = "base/command";
+			return 4000;
+		}
+		if (AIControlAdapterContainsToken(kindLower, "production") ||
+			AIControlAdapterContainsToken(templateLower, "barracks") ||
+			AIControlAdapterContainsToken(templateLower, "armsdealer") ||
+			AIControlAdapterContainsToken(templateLower, "warf") ||
+			AIControlAdapterContainsToken(templateLower, "warfactory") ||
+			AIControlAdapterContainsToken(templateLower, "airfield") ||
+			AIControlAdapterContainsToken(templateLower, "strategycenter") ||
+			AIControlAdapterContainsToken(templateLower, "propagandacenter") ||
+			AIControlAdapterContainsToken(templateLower, "palace"))
+		{
+			normalizedKind = "production";
+			return 3000;
+		}
+		if (AIControlAdapterContainsToken(kindLower, "economy") ||
+			AIControlAdapterContainsToken(templateLower, "supply") ||
+			AIControlAdapterContainsToken(templateLower, "stash") ||
+			AIControlAdapterContainsToken(templateLower, "blackmarket") ||
+			AIControlAdapterContainsToken(templateLower, "market") ||
+			AIControlAdapterContainsToken(templateLower, "dropzone") ||
+			AIControlAdapterContainsToken(templateLower, "internetcenter") ||
+			AIControlAdapterContainsToken(templateLower, "hack"))
+		{
+			normalizedKind = "economy";
+			return 2000;
+		}
+		if (AIControlAdapterContainsToken(kindLower, "defense") ||
+			AIControlAdapterContainsToken(templateLower, "stinger") ||
+			AIControlAdapterContainsToken(templateLower, "tunnel") ||
+			AIControlAdapterContainsToken(templateLower, "patriot") ||
+			AIControlAdapterContainsToken(templateLower, "firebase") ||
+			AIControlAdapterContainsToken(templateLower, "bunker") ||
+			AIControlAdapterContainsToken(templateLower, "gatling") ||
+			AIControlAdapterContainsToken(templateLower, "defense") ||
+			AIControlAdapterContainsToken(templateLower, "tower"))
+		{
+			normalizedKind = "defense";
+			return 1000;
+		}
+		return 0;
+	}
+}
+
+AIControlAdapterScudStormStrategicTargetResult AIControlAdapterSelectScudStormStrategicTarget(
+	const AIControlAdapterScudStormStrategicTargetInputs& inputs)
+{
+	AIControlAdapterScudStormStrategicTargetResult result;
+	result.reason = "no_known_enemy_structures";
+
+	if (!inputs.hasReadyScudStorm)
+	{
+		result.reason = "no_ready_scud_storm";
+		return result;
+	}
+	if (inputs.hasActiveWmdTarget)
+	{
+		result.reason = "enemy_wmd_preempts";
+		return result;
+	}
+	if (inputs.fireCooldownActive)
+	{
+		result.reason = "cooldown";
+		return result;
+	}
+
+	const AIControlAdapterScudStormStrategicTargetCandidate* best = nullptr;
+	std::string bestKind;
+	int bestScore = std::numeric_limits<int>::min();
+	bool hasKnownCandidate = false;
+	bool hasFreshCandidate = false;
+	bool hasVisibleHighValue = false;
+
+	for (const AIControlAdapterScudStormStrategicTargetCandidate& candidate : inputs.candidates)
+	{
+		std::string normalizedKind;
+		const int kindPriority = AIControlAdapterScudStormStrategicKindPriority(candidate, normalizedKind);
+		if (kindPriority <= 0)
+		{
+			continue;
+		}
+		hasKnownCandidate = true;
+		if (!candidate.visible && (!candidate.stale || candidate.ageMs > inputs.staleMaxAgeMs))
+		{
+			continue;
+		}
+		if (!candidate.enemyOwned || !candidate.alive)
+		{
+			continue;
+		}
+		hasFreshCandidate = true;
+		if (candidate.visible && kindPriority >= 2000)
+		{
+			hasVisibleHighValue = true;
+		}
+	}
+
+	for (const AIControlAdapterScudStormStrategicTargetCandidate& candidate : inputs.candidates)
+	{
+		std::string normalizedKind;
+		const int kindPriority = AIControlAdapterScudStormStrategicKindPriority(candidate, normalizedKind);
+		if (kindPriority <= 0 || !candidate.enemyOwned || !candidate.alive)
+		{
+			continue;
+		}
+		if (!candidate.visible)
+		{
+			if (!candidate.stale || candidate.ageMs > inputs.staleMaxAgeMs)
+			{
+				continue;
+			}
+			if (hasVisibleHighValue)
+			{
+				continue;
+			}
+		}
+		const int visibilityScore = candidate.visible ? 600 : 0;
+		const int freshnessPenalty = candidate.visible ? 0 : static_cast<int>(std::min<unsigned int>(candidate.ageMs / 1000u, 300u));
+		const int score = kindPriority + visibilityScore - freshnessPenalty;
+		if (best == nullptr || score > bestScore ||
+			(score == bestScore && candidate.objectId < best->objectId))
+		{
+			best = &candidate;
+			bestKind = normalizedKind;
+			bestScore = score;
+		}
+	}
+
+	if (best == nullptr)
+	{
+		result.reason = hasKnownCandidate && !hasFreshCandidate ? "no_valid_fresh_targets" : "no_known_enemy_structures";
+		return result;
+	}
+
+	result.hasTarget = true;
+	result.objectId = best->objectId;
+	result.playerIndex = best->playerIndex;
+	result.team = best->team;
+	result.targetKind = bestKind;
+	result.templateName = best->templateName;
+	result.visible = best->visible;
+	result.stale = !best->visible;
+	result.ageMs = best->ageMs;
+	result.x = best->x;
+	result.y = best->y;
+	result.z = best->z;
+	result.score = bestScore;
+	result.maxFireCount = 1;
+	if (bestKind == "base/command")
+	{
+		result.reason = best->visible ? "no_wmd_targets_visible_command" : "no_wmd_targets_stale_command";
+	}
+	else if (bestKind == "production")
+	{
+		result.reason = best->visible ? "no_wmd_targets_visible_production" : "no_wmd_targets_stale_production";
+	}
+	else if (bestKind == "economy")
+	{
+		result.reason = best->visible ? "no_wmd_targets_visible_economy" : "no_wmd_targets_stale_economy";
+	}
+	else
+	{
+		result.reason = best->visible ? "no_wmd_targets_visible_defense" : "no_wmd_targets_stale_defense";
+	}
+	return result;
+}
+
 AIControlAdapterZoneDefenseBudgetResult AIControlAdapterChooseZoneDefenseBudget(
 	const AIControlAdapterZoneDefenseBudgetInputs& inputs)
 {
@@ -839,7 +1106,7 @@ AIControlAdapterZoneThreatSourceResult AIControlAdapterClassifyZoneThreatSource(
 	{
 		result.type = "unit_attack";
 		result.response = "defend";
-		result.reason = severeDamage && inputs.recentWmd ? "local_enemy_after_wmd_damage" : "local_visible_enemy";
+		result.reason = inputs.recentWmd ? "local_enemy_units_recent_wmd" : "local_enemy_units";
 		return result;
 	}
 
@@ -847,17 +1114,21 @@ AIControlAdapterZoneThreatSourceResult AIControlAdapterClassifyZoneThreatSource(
 	{
 		result.type = "artillery_attack";
 		result.response = "counterbattery";
-		result.reason = "visible_enemy_artillery_no_local_enemy";
+		result.reason = "enemy_artillery_detected";
 		return result;
 	}
 
-	if (severeDamage && inputs.recentWmd)
+	if (inputs.recentWmd)
 	{
 		result.type = "wmd_strike";
-		result.response = "rebuild_only";
-		result.reason = "severe_damage_no_local_enemy_recent_wmd";
+		result.response = "hold_rebuild_recover";
+		result.reason = "recent_wmd_no_local_enemy";
 		return result;
 	}
+
+	result.type = "unknown_damage";
+	result.response = "hold_rebuild_recover";
+	result.reason = "damage_no_local_enemy";
 
 	return result;
 }
@@ -1192,6 +1463,738 @@ AIControlAdapterBrutalPressureResult AIControlAdapterChooseBrutalPressurePriorit
 		result.chosenPriority = "offensive_pressure";
 		result.reason = "defense_budget_satisfied";
 		return result;
+	}
+
+	return result;
+}
+
+AIControlAdapterEmergencySurvivalProductionDecision AIControlAdapterChooseEmergencySurvivalProduction(
+	const AIControlAdapterEmergencySurvivalProductionInputs& inputs)
+{
+	AIControlAdapterEmergencySurvivalProductionDecision result;
+	result.active = false;
+	result.allowReserveSpend = false;
+	result.suppressCaptureSourceProduction = false;
+	result.bypassArmyCapBuffer = false;
+	result.emergencyArmyCap = std::max(inputs.armyCap + 30, (inputs.armyCap * 3) / 2);
+	result.reason = "not_emergency";
+
+	if (result.emergencyArmyCap < inputs.armyCap)
+	{
+		result.emergencyArmyCap = inputs.armyCap;
+	}
+
+	if (inputs.brutalEmergencyPriority)
+	{
+		result.active = true;
+		result.reason = "brutal_pressure_emergency_survival";
+	}
+	else if (inputs.mainUnderPressure)
+	{
+		result.active = true;
+		result.reason = "main_under_pressure";
+	}
+	else if (inputs.activeUnitAttack)
+	{
+		result.active = true;
+		result.reason = "active_unit_attack";
+	}
+	else if (inputs.criticalThreatZones > 0 && inputs.localEnemyCount > 0)
+	{
+		result.active = true;
+		result.reason = "critical_zone_threat";
+	}
+
+	if (!result.active)
+	{
+		return result;
+	}
+
+	result.allowReserveSpend = true;
+	result.suppressCaptureSourceProduction = true;
+	result.bypassArmyCapBuffer = true;
+
+	if (inputs.armyCount >= result.emergencyArmyCap)
+	{
+		result.reason = "emergency_cap_reached";
+		return result;
+	}
+
+	if (inputs.armsDealers > 0)
+	{
+		if (inputs.quads <= 2 || inputs.enemyArtilleryCount > 0 || inputs.localEnemyCount > 0)
+		{
+			result.commands.push_back("Game.QueueQuadsAllWarFactories");
+		}
+		if (inputs.scorpions <= 3 || inputs.localEnemyCount > inputs.scorpions)
+		{
+			result.commands.push_back("Game.QueueScorpionsAllWarFactories");
+		}
+	}
+	if (inputs.barracks > 0 && (inputs.rpg <= 4 || inputs.localEnemyCount > 0 || inputs.enemyArtilleryCount > 0))
+	{
+		result.commands.push_back("Game.QueueRpgTroopersAllBarracks");
+	}
+	if (result.commands.empty() && inputs.barracks > 0 && inputs.soldiers <= 2)
+	{
+		result.commands.push_back("Game.QueueSoldiersAllBarracks");
+	}
+	if (result.commands.empty())
+	{
+		result.reason = "producer_missing";
+	}
+
+	return result;
+}
+
+AIControlAdapterPalaceRecoveryDecision AIControlAdapterChoosePalaceRecovery(
+	const AIControlAdapterPalaceRecoveryInputs& inputs)
+{
+	AIControlAdapterPalaceRecoveryDecision result;
+	result.shouldBuild = false;
+	result.reason = "no_threat";
+
+	if (inputs.palaces > 0)
+	{
+		result.reason = "palace_present";
+		return result;
+	}
+	if (inputs.palacesInProgress > 0)
+	{
+		result.reason = "healthy_in_progress";
+		return result;
+	}
+	if (!inputs.enemyWmdThreat && !inputs.mobileSiegeThreat)
+	{
+		result.reason = "no_threat";
+		return result;
+	}
+	if (inputs.money < inputs.palaceCost)
+	{
+		result.reason = "reserve_blocked";
+		return result;
+	}
+	if (!inputs.buildAttemptReady)
+	{
+		result.reason = "healthy_in_progress";
+		return result;
+	}
+
+	result.shouldBuild = true;
+	result.reason = "missing_palace_under_wmd_threat";
+	return result;
+}
+
+AIControlAdapterTerrainFacts AIControlAdapterBuildTerrainFacts(
+	const std::string& mapName,
+	bool hasMainBase,
+	float mainBaseX,
+	float mainBaseY)
+{
+	AIControlAdapterTerrainFacts facts;
+	facts.mapName = mapName;
+	facts.source = "unavailable";
+	facts.extraction.mapName = mapName;
+	facts.extraction.selectedSource = "unavailable";
+	facts.extraction.fallbackSource = "none";
+	facts.extraction.reason = "no_fixture";
+
+	const std::string lowerMap = AIControlAdapterLowerCopy(mapName);
+	const bool isDeathValley =
+		AIControlAdapterContainsToken(lowerMap, "deathvalley")
+		|| (AIControlAdapterContainsToken(lowerMap, "death") && AIControlAdapterContainsToken(lowerMap, "valley"));
+	if (!isDeathValley || !hasMainBase)
+	{
+		return facts;
+	}
+
+	facts.source = "manual_fixture";
+	facts.extraction.selectedSource = "manual_fixture";
+	facts.extraction.reason = "death_valley_fixture";
+
+	const float dirX = mainBaseX < 3000.0f ? 1.0f : -1.0f;
+	const float dirY = mainBaseY < 3000.0f ? 0.35f : -0.35f;
+	const float len = std::max(0.001f, std::sqrt((dirX * dirX) + (dirY * dirY)));
+	const float nx = dirX / len;
+	const float ny = dirY / len;
+	const float px = -ny;
+	const float py = nx;
+
+	auto point = [](float x, float y) -> AIControlAdapterTerrainPoint
+	{
+		AIControlAdapterTerrainPoint p;
+		p.x = x;
+		p.y = y;
+		return p;
+	};
+	auto offset = [&](float forward, float side) -> AIControlAdapterTerrainPoint
+	{
+		return point(mainBaseX + (nx * forward) + (px * side), mainBaseY + (ny * forward) + (py * side));
+	};
+
+	AIControlAdapterTerrainFeature northBarrier;
+	northBarrier.id = "death-valley-main-ridge-north";
+	northBarrier.kind = "impassable_barrier";
+	northBarrier.source = "manual_fixture";
+	northBarrier.points.push_back(offset(220.0f, 760.0f));
+	northBarrier.points.push_back(offset(720.0f, 900.0f));
+	northBarrier.points.push_back(offset(1420.0f, 820.0f));
+	facts.features.push_back(northBarrier);
+
+	AIControlAdapterTerrainFeature southBarrier;
+	southBarrier.id = "death-valley-main-ridge-south";
+	southBarrier.kind = "impassable_barrier";
+	southBarrier.source = "manual_fixture";
+	southBarrier.points.push_back(offset(220.0f, -760.0f));
+	southBarrier.points.push_back(offset(720.0f, -900.0f));
+	southBarrier.points.push_back(offset(1420.0f, -820.0f));
+	facts.features.push_back(southBarrier);
+
+	AIControlAdapterTerrainFeature upperEntry;
+	upperEntry.id = "death-valley-main-base-upper-entry";
+	upperEntry.kind = "base_entrance";
+	upperEntry.source = "manual_fixture";
+	upperEntry.hasPosition = true;
+	upperEntry.position = offset(820.0f, 390.0f);
+	upperEntry.width = 450.0f;
+	upperEntry.connects.push_back("main_base");
+	upperEntry.connects.push_back("upper_approach");
+	facts.features.push_back(upperEntry);
+
+	AIControlAdapterTerrainFeature lowerEntry;
+	lowerEntry.id = "death-valley-main-base-lower-entry";
+	lowerEntry.kind = "base_entrance";
+	lowerEntry.source = "manual_fixture";
+	lowerEntry.hasPosition = true;
+	lowerEntry.position = offset(820.0f, -390.0f);
+	lowerEntry.width = 450.0f;
+	lowerEntry.connects.push_back("main_base");
+	lowerEntry.connects.push_back("lower_approach");
+	facts.features.push_back(lowerEntry);
+
+	AIControlAdapterTerrainFeature lane;
+	lane.id = "death-valley-main-approach-lane";
+	lane.kind = "lane";
+	lane.source = "manual_fixture";
+	lane.points.push_back(point(mainBaseX, mainBaseY));
+	lane.points.push_back(offset(900.0f, 0.0f));
+	lane.points.push_back(offset(1800.0f, 0.0f));
+	facts.features.push_back(lane);
+
+	return facts;
+}
+
+std::string AIControlAdapterNormalizeMapFileCacheKey(const std::string& mapName)
+{
+	std::string leaf = mapName;
+	const std::size_t slash = leaf.find_last_of("\\/");
+	if (slash != std::string::npos)
+	{
+		leaf = leaf.substr(slash + 1);
+	}
+	const std::size_t dot = leaf.find_last_of('.');
+	if (dot != std::string::npos)
+	{
+		leaf = leaf.substr(0, dot);
+	}
+
+	std::string key;
+	bool pendingDash = false;
+	for (std::size_t i = 0; i < leaf.size(); ++i)
+	{
+		const unsigned char ch = static_cast<unsigned char>(leaf[i]);
+		if (std::isalnum(ch))
+		{
+			if (!key.empty()
+				&& std::isupper(ch)
+				&& i > 0
+				&& std::islower(static_cast<unsigned char>(leaf[i - 1])))
+			{
+				pendingDash = true;
+			}
+			if (pendingDash && !key.empty())
+			{
+				key.push_back('-');
+			}
+			key.push_back(static_cast<char>(std::tolower(ch)));
+			pendingDash = false;
+		}
+		else
+		{
+			pendingDash = true;
+		}
+	}
+	return key;
+}
+
+bool AIControlAdapterParseMapFileCacheJson(
+	const nlohmann::json& cacheJson,
+	const std::string& mapName,
+	const std::string& sourcePath,
+	AIControlAdapterTerrainFacts& outFacts,
+	std::string& outReason)
+{
+	outFacts = AIControlAdapterTerrainFacts();
+	outFacts.mapName = mapName;
+	outFacts.source = "unavailable";
+	outFacts.extraction.mapName = mapName;
+	outFacts.extraction.selectedSource = "unavailable";
+	outFacts.extraction.fallbackSource = "none";
+	outFacts.extraction.reason = "not_loaded";
+	outFacts.mapFileCacheTelemetry = nlohmann::json::object({
+		{"loaded", false},
+		{"source", sourcePath},
+		{"reason", "not_loaded"}
+	});
+
+	if (!cacheJson.is_object())
+	{
+		outReason = "parse_error";
+		outFacts.mapFileCacheTelemetry["reason"] = outReason;
+		return false;
+	}
+	if (cacheJson.value("schema_version", 0) != 1)
+	{
+		outReason = "unsupported_schema";
+		outFacts.mapFileCacheTelemetry["reason"] = outReason;
+		return false;
+	}
+
+	const nlohmann::json mapInfo = cacheJson.value("map", nlohmann::json::object());
+	const nlohmann::json metadata = cacheJson.value("metadata", nlohmann::json::object());
+	const std::string mapHash = mapInfo.value("hash", "");
+	int ignoredSemanticFeatures = 0;
+	int annotationFeatures = 0;
+	int trustedEntrances = 0;
+	int semanticFeaturesLoaded = 0;
+	int waypointCount = 0;
+	int laneCount = 0;
+
+	const nlohmann::json features = cacheJson.value("features", nlohmann::json::array());
+	if (features.is_array())
+	{
+		for (nlohmann::json::const_iterator it = features.begin(); it != features.end(); ++it)
+		{
+			if (!it->is_object())
+			{
+				continue;
+			}
+			const std::string kind = it->value("kind", "");
+			const std::string originalSource = it->value("source", "");
+			const bool annotationFeature = originalSource == "manual_annotation" || originalSource == "map_file_annotation";
+			if (annotationFeature)
+			{
+				++annotationFeatures;
+			}
+			if (!AIControlAdapterIsTrustedMapFileCacheFeature(*it))
+			{
+				if (kind == "base_entrance" || kind == "chokepoint")
+				{
+					++ignoredSemanticFeatures;
+				}
+				continue;
+			}
+
+			AIControlAdapterTerrainFeature feature;
+			feature.id = it->value("id", "");
+			if (feature.id.empty())
+			{
+				feature.id = std::string("map-file-cache-feature-") + std::to_string(outFacts.features.size());
+			}
+			feature.kind = kind;
+			feature.source = "map_file_cache";
+			AIControlAdapterTerrainPoint position;
+			if (AIControlAdapterReadTerrainPoint(it->value("position", nlohmann::json::object()), position))
+			{
+				feature.hasPosition = true;
+				feature.position = position;
+			}
+			const nlohmann::json points = it->value("points", nlohmann::json::array());
+			if (points.is_array())
+			{
+				for (nlohmann::json::const_iterator pointIt = points.begin(); pointIt != points.end(); ++pointIt)
+				{
+					AIControlAdapterTerrainPoint point;
+					if (AIControlAdapterReadTerrainPoint(*pointIt, point))
+					{
+						feature.points.push_back(point);
+					}
+				}
+			}
+			const nlohmann::json labels = it->contains("connects")
+				? it->value("connects", nlohmann::json::array())
+				: it->value("labels", nlohmann::json::array());
+			if (labels.is_array())
+			{
+				for (nlohmann::json::const_iterator labelIt = labels.begin(); labelIt != labels.end(); ++labelIt)
+				{
+					if (labelIt->is_string())
+					{
+						feature.connects.push_back(labelIt->get<std::string>());
+					}
+				}
+			}
+			feature.width = it->value("width", 0.0f);
+			feature.trusted = it->value("trusted", false);
+			if (kind == "waypoint")
+			{
+				++waypointCount;
+			}
+			else if (kind == "lane")
+			{
+				++laneCount;
+			}
+			else if (kind == "base_entrance" || kind == "chokepoint")
+			{
+				++semanticFeaturesLoaded;
+				if (feature.trusted && kind == "base_entrance")
+				{
+					++trustedEntrances;
+				}
+			}
+			outFacts.features.push_back(feature);
+		}
+	}
+
+	const nlohmann::json objects = cacheJson.value("objects", nlohmann::json::array());
+	if (objects.is_array())
+	{
+		for (nlohmann::json::const_iterator it = objects.begin(); it != objects.end(); ++it)
+		{
+			if (!it->is_object())
+			{
+				continue;
+			}
+			nlohmann::json object = *it;
+			object["source"] = "map_file_cache";
+			outFacts.strategicObjects.push_back(object);
+		}
+	}
+
+	outFacts.source = outFacts.features.empty() ? "unavailable" : "map_file_cache";
+	outFacts.extraction.selectedSource = outFacts.source;
+	outFacts.extraction.reason = outFacts.features.empty() ? "cache_empty" : "matched_normalized_map_name";
+	outFacts.extraction.waypointCount = waypointCount;
+	outFacts.mapFileCacheTelemetry = nlohmann::json::object({
+		{"loaded", !outFacts.features.empty()},
+		{"source", sourcePath},
+		{"map_hash", mapHash},
+		{"features_loaded", static_cast<int>(outFacts.features.size())},
+		{"waypoints", waypointCount},
+		{"lanes", laneCount},
+		{"objects", static_cast<int>(outFacts.strategicObjects.size())},
+		{"warnings", cacheJson.value("warnings", nlohmann::json::array()).is_array() ? static_cast<int>(cacheJson.value("warnings", nlohmann::json::array()).size()) : 0},
+		{"ignored_semantic_features", ignoredSemanticFeatures},
+		{"annotation_features", annotationFeatures},
+		{"trusted_entrances", trustedEntrances},
+		{"semantic_features_loaded", semanticFeaturesLoaded},
+		{"reason", outFacts.features.empty() ? "cache_empty" : "matched_normalized_map_name"}
+	});
+	if (metadata.is_object())
+	{
+		outFacts.mapFileCacheTelemetry["decoded_waypoints"] = metadata.value("decoded_waypoint_count", waypointCount);
+		outFacts.mapFileCacheTelemetry["decoded_lanes"] = metadata.value("decoded_waypoint_link_count", laneCount);
+		outFacts.mapFileCacheTelemetry["decoded_cliff_cells"] = metadata.value("decoded_cliff_cell_count", 0);
+		outFacts.mapFileCacheTelemetry["derived_barriers"] = metadata.value("derived_barrier_feature_count", 0);
+	}
+
+	if (outFacts.features.empty())
+	{
+		outReason = "cache_empty";
+		return false;
+	}
+	outReason = "matched_normalized_map_name";
+	return true;
+}
+
+AIControlAdapterTerrainFacts AIControlAdapterMergeMapFileCacheFacts(
+	const AIControlAdapterTerrainFacts& extractedFacts,
+	const AIControlAdapterTerrainFacts& fixtureFacts,
+	const AIControlAdapterTerrainFacts& mapFileCacheFacts)
+{
+	AIControlAdapterTerrainFacts selected = AIControlAdapterSelectTerrainFacts(extractedFacts, fixtureFacts);
+	selected.mapFileCacheTelemetry = mapFileCacheFacts.mapFileCacheTelemetry.is_object()
+		? mapFileCacheFacts.mapFileCacheTelemetry
+		: nlohmann::json::object({ {"loaded", false}, {"reason", "not_evaluated"} });
+
+	if (mapFileCacheFacts.source == "map_file_cache" && !mapFileCacheFacts.features.empty())
+	{
+		if (selected.source == "unavailable" || selected.features.empty())
+		{
+			selected = mapFileCacheFacts;
+			selected.mapFileCacheTelemetry = mapFileCacheFacts.mapFileCacheTelemetry;
+		}
+		else
+		{
+			bool hasTrustedCacheEntrance = false;
+			for (std::size_t i = 0; i < mapFileCacheFacts.features.size(); ++i)
+			{
+				const AIControlAdapterTerrainFeature& feature = mapFileCacheFacts.features[i];
+				if (feature.trusted && (feature.kind == "base_entrance" || feature.kind == "chokepoint"))
+				{
+					hasTrustedCacheEntrance = true;
+					break;
+				}
+			}
+			if (hasTrustedCacheEntrance)
+			{
+				std::vector<AIControlAdapterTerrainFeature> retained;
+				for (std::size_t i = 0; i < selected.features.size(); ++i)
+				{
+					const AIControlAdapterTerrainFeature& feature = selected.features[i];
+					if (feature.source == "manual_fixture"
+						&& (feature.kind == "base_entrance" || feature.kind == "chokepoint"))
+					{
+						continue;
+					}
+					retained.push_back(feature);
+				}
+				selected.features.swap(retained);
+				selected.mapFileCacheTelemetry["fixture_skipped"] = true;
+				selected.mapFileCacheTelemetry["fixture_skip_reason"] = "trusted_cache_annotation";
+			}
+			std::set<std::string> existingIds;
+			for (std::size_t i = 0; i < selected.features.size(); ++i)
+			{
+				existingIds.insert(selected.features[i].id);
+			}
+			for (std::size_t i = 0; i < mapFileCacheFacts.features.size(); ++i)
+			{
+				const AIControlAdapterTerrainFeature& feature = mapFileCacheFacts.features[i];
+				if (existingIds.insert(feature.id).second)
+				{
+					selected.features.push_back(feature);
+				}
+			}
+			selected.strategicObjects = mapFileCacheFacts.strategicObjects;
+		}
+
+		if (!fixtureFacts.features.empty())
+		{
+			bool hasEntrance = false;
+			bool hasBarrier = false;
+			std::set<std::string> existingIds;
+			for (std::size_t i = 0; i < selected.features.size(); ++i)
+			{
+				existingIds.insert(selected.features[i].id);
+				if (selected.features[i].kind == "base_entrance" || selected.features[i].kind == "chokepoint")
+				{
+					hasEntrance = true;
+				}
+				if (selected.features[i].kind == "impassable_barrier")
+				{
+					hasBarrier = true;
+				}
+			}
+			for (std::size_t i = 0; i < fixtureFacts.features.size(); ++i)
+			{
+				const AIControlAdapterTerrainFeature& fixture = fixtureFacts.features[i];
+				const bool needed =
+					((fixture.kind == "base_entrance" && !hasEntrance)
+						|| (fixture.kind == "impassable_barrier" && !hasBarrier));
+				if (needed && existingIds.insert(fixture.id).second)
+				{
+					selected.features.push_back(fixture);
+				}
+			}
+		}
+	}
+	else if (mapFileCacheFacts.mapFileCacheTelemetry.is_object())
+	{
+		selected.mapFileCacheTelemetry = mapFileCacheFacts.mapFileCacheTelemetry;
+	}
+
+	return selected;
+}
+
+AIControlAdapterTerrainFacts AIControlAdapterSelectTerrainFacts(
+	const AIControlAdapterTerrainFacts& extractedFacts,
+	const AIControlAdapterTerrainFacts& fixtureFacts)
+{
+	if ((extractedFacts.source == "engine_query" || extractedFacts.source == "engine_sample" || extractedFacts.source == "map_file")
+		&& !extractedFacts.features.empty())
+	{
+		AIControlAdapterTerrainFacts selected = extractedFacts;
+		if (!fixtureFacts.features.empty())
+		{
+			bool hasEntrance = false;
+			for (std::size_t i = 0; i < selected.features.size(); ++i)
+			{
+				if (selected.features[i].kind == "base_entrance" || selected.features[i].kind == "chokepoint")
+				{
+					hasEntrance = true;
+					break;
+				}
+			}
+			if (!hasEntrance)
+			{
+				for (std::size_t i = 0; i < fixtureFacts.features.size(); ++i)
+				{
+					if (fixtureFacts.features[i].kind == "base_entrance" || fixtureFacts.features[i].kind == "impassable_barrier")
+					{
+						selected.features.push_back(fixtureFacts.features[i]);
+					}
+				}
+			}
+		}
+		selected.extraction.selectedSource = extractedFacts.source;
+		selected.extraction.fallbackSource = fixtureFacts.features.empty() ? "none" : fixtureFacts.source;
+		selected.extraction.fallbackUsed = false;
+		if (selected.extraction.reason.empty())
+		{
+			selected.extraction.reason = "extraction_available";
+		}
+		return selected;
+	}
+
+	if (!fixtureFacts.features.empty())
+	{
+		AIControlAdapterTerrainFacts selected = fixtureFacts;
+		selected.extraction = extractedFacts.extraction;
+		selected.extraction.mapName = !fixtureFacts.mapName.empty() ? fixtureFacts.mapName : extractedFacts.mapName;
+		selected.extraction.selectedSource = fixtureFacts.source;
+		selected.extraction.fallbackSource = extractedFacts.source.empty() ? "unavailable" : extractedFacts.source;
+		selected.extraction.fallbackUsed = true;
+		selected.extraction.reason = extractedFacts.features.empty() ? "fixture_after_extraction_unavailable" : "fixture_after_extraction_insufficient";
+		return selected;
+	}
+
+	AIControlAdapterTerrainFacts selected = extractedFacts;
+	selected.source = "unavailable";
+	selected.extraction.selectedSource = "unavailable";
+	selected.extraction.fallbackSource = "none";
+	selected.extraction.fallbackUsed = false;
+	selected.extraction.reason = "no_extraction_or_fixture";
+	return selected;
+}
+
+nlohmann::json AIControlAdapterSerializeTerrainFacts(const AIControlAdapterTerrainFacts& facts)
+{
+	nlohmann::json features = nlohmann::json::array();
+	for (std::size_t i = 0; i < facts.features.size(); ++i)
+	{
+		const AIControlAdapterTerrainFeature& feature = facts.features[i];
+		nlohmann::json item = nlohmann::json::object({
+			{"id", feature.id},
+			{"kind", feature.kind},
+			{"source", feature.source}
+		});
+		if (feature.hasPosition)
+		{
+			item["position"] = nlohmann::json::object({
+				{"x", feature.position.x},
+				{"y", feature.position.y}
+			});
+			if (feature.width > 0.0f)
+			{
+				item["width"] = feature.width;
+			}
+		}
+		if (feature.trusted)
+		{
+			item["trusted"] = true;
+		}
+		if (!feature.points.empty())
+		{
+			nlohmann::json points = nlohmann::json::array();
+			for (std::size_t pointIdx = 0; pointIdx < feature.points.size(); ++pointIdx)
+			{
+				points.push_back(nlohmann::json::object({
+					{"x", feature.points[pointIdx].x},
+					{"y", feature.points[pointIdx].y}
+				}));
+			}
+			item["points"] = points;
+		}
+		if (!feature.connects.empty())
+		{
+			item["connects"] = feature.connects;
+		}
+		features.push_back(item);
+	}
+
+	return nlohmann::json::object({
+		{"source", facts.source},
+		{"terrain_source", facts.source},
+		{"map", facts.mapName},
+		{"map_file_cache", facts.mapFileCacheTelemetry.is_object()
+			? facts.mapFileCacheTelemetry
+			: nlohmann::json::object({ {"loaded", false}, {"reason", "not_evaluated"} })},
+		{"terrain_extraction", nlohmann::json::object({
+			{"map", facts.extraction.mapName.empty() ? facts.mapName : facts.extraction.mapName},
+			{"extent", nlohmann::json::object({
+				{"min_x", facts.extraction.extent.minX},
+				{"min_y", facts.extraction.extent.minY},
+				{"max_x", facts.extraction.extent.maxX},
+				{"max_y", facts.extraction.extent.maxY}
+			})},
+			{"sample_step", facts.extraction.sampleStep},
+			{"blocked_samples", facts.extraction.blockedSamples},
+			{"passable_samples", facts.extraction.passableSamples},
+			{"cliff_samples", facts.extraction.cliffSamples},
+			{"unknown_samples", facts.extraction.unknownSamples},
+			{"bridge_count", facts.extraction.bridgeCount},
+			{"waypoint_count", facts.extraction.waypointCount},
+			{"fallback_used", facts.extraction.fallbackUsed},
+			{"selected_source", facts.extraction.selectedSource.empty() ? facts.source : facts.extraction.selectedSource},
+			{"fallback_source", facts.extraction.fallbackSource.empty() ? "none" : facts.extraction.fallbackSource},
+			{"reason", facts.extraction.reason.empty() ? "not_evaluated" : facts.extraction.reason}
+		})},
+		{"strategic_objects", facts.strategicObjects},
+		{"terrain_features", features}
+	});
+}
+
+AIControlAdapterZoneTerrainResult AIControlAdapterApplyZoneTerrainFacts(
+	const AIControlAdapterTerrainFacts& facts,
+	const AIControlAdapterZoneTerrainInputs& inputs)
+{
+	AIControlAdapterZoneTerrainResult result;
+	result.effectiveRadius = inputs.radius;
+	result.terrainLimited = false;
+	result.hasEntrance = false;
+	result.reason = facts.features.empty() ? "unavailable" : "none";
+
+	float nearestBarrierSq = std::numeric_limits<float>::max();
+	const AIControlAdapterTerrainFeature* nearestEntrance = nullptr;
+	float nearestEntranceSq = std::numeric_limits<float>::max();
+
+	for (std::size_t i = 0; i < facts.features.size(); ++i)
+	{
+		const AIControlAdapterTerrainFeature& feature = facts.features[i];
+		const float distSq = AIControlAdapterDistancePointToFeatureSq(inputs.centerX, inputs.centerY, feature);
+		if (feature.kind == "impassable_barrier" || feature.kind == "blocked_area")
+		{
+			nearestBarrierSq = std::min(nearestBarrierSq, distSq);
+		}
+		else if ((feature.kind == "base_entrance" || feature.kind == "chokepoint") && feature.hasPosition && distSq < nearestEntranceSq)
+		{
+			nearestEntranceSq = distSq;
+			nearestEntrance = &feature;
+		}
+	}
+
+	if (nearestBarrierSq < std::numeric_limits<float>::max())
+	{
+		const float nearestBarrier = std::sqrt(nearestBarrierSq);
+		const float limitedRadius = std::max(160.0f, nearestBarrier * 0.85f);
+		if (limitedRadius + 1.0f < result.effectiveRadius)
+		{
+			result.effectiveRadius = limitedRadius;
+			result.terrainLimited = true;
+			result.reason = "barrier";
+		}
+	}
+
+	if (inputs.isMainBase && nearestEntrance != nullptr)
+	{
+		result.hasEntrance = true;
+		result.entrancePosition = nearestEntrance->position;
+		result.entranceId = nearestEntrance->id;
+		if (!result.terrainLimited)
+		{
+			result.reason = "entrance";
+		}
 	}
 
 	return result;
