@@ -779,6 +779,40 @@
 			// Collect idle ground combat units (reuse raid collection logic)
 			std::vector<Object*> combatUnits;
 			collectCombatUnitsForRaid(player, combatUnits);
+			std::set<ObjectID> allowedUnitIds;
+			const auto allowedIdsIt = argsIt->find("allowed_unit_ids");
+			if (allowedIdsIt != argsIt->end() && allowedIdsIt->is_array())
+			{
+				for (std::size_t idx = 0; idx < allowedIdsIt->size(); ++idx)
+				{
+					if ((*allowedIdsIt)[idx].is_number_unsigned())
+					{
+						allowedUnitIds.insert(static_cast<ObjectID>((*allowedIdsIt)[idx].get<unsigned int>()));
+					}
+					else if ((*allowedIdsIt)[idx].is_number_integer())
+					{
+						const int id = (*allowedIdsIt)[idx].get<int>();
+						if (id > 0)
+						{
+							allowedUnitIds.insert(static_cast<ObjectID>(id));
+						}
+					}
+				}
+			}
+			if (!allowedUnitIds.empty())
+			{
+				std::vector<Object*> filteredCombatUnits;
+				filteredCombatUnits.reserve(combatUnits.size());
+				for (std::size_t idx = 0; idx < combatUnits.size(); ++idx)
+				{
+					Object* unit = combatUnits[idx];
+					if (unit != nullptr && allowedUnitIds.find(unit->getID()) != allowedUnitIds.end())
+					{
+						filteredCombatUnits.push_back(unit);
+					}
+				}
+				combatUnits.swap(filteredCombatUnits);
+			}
 
 			if (combatUnits.empty())
 			{

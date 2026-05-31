@@ -1504,6 +1504,44 @@
 				return true;
 			}
 
+			if (path == "game.match_outcome")
+			{
+				result = buildMatchOutcome(localPlayer, ::GetTickCount());
+				return true;
+			}
+
+			if (path == "game.final_snapshot")
+			{
+				buildMatchOutcome(localPlayer, ::GetTickCount());
+				result = m_autonomy.state.finalDiagnosticSnapshot.is_object()
+					? m_autonomy.state.finalDiagnosticSnapshot
+					: m_autonomy.state.lastActiveMatchSnapshot;
+				if (!result.is_object())
+				{
+					result = nlohmann::json::object({
+						{"available", false},
+						{"reason", "no_final_snapshot"}
+					});
+				}
+				return true;
+			}
+
+			if (path == "game.run_summary")
+			{
+				nlohmann::json outcome = buildMatchOutcome(localPlayer, ::GetTickCount());
+				result = m_autonomy.state.finalRunSummary.is_object()
+					? m_autonomy.state.finalRunSummary
+					: outcome.value("run_summary", nlohmann::json::object());
+				if (!result.is_object() || result.empty())
+				{
+					result = nlohmann::json::object({
+						{"available", false},
+						{"reason", "no_run_summary"}
+					});
+				}
+				return true;
+			}
+
 			if (path == "game.resources")
 			{
 				result = buildResourcesSummary(selectedPlayer);
@@ -1791,6 +1829,11 @@
 			{
 				result = buildPlayerDetails(selectedPlayer);
 				result["is_local_player"] = (selectedPlayer == localPlayer);
+				result["match_outcome"] = buildMatchOutcome(localPlayer, ::GetTickCount());
+				result["final_snapshot_available"] = m_autonomy.state.finalDiagnosticSnapshot.is_object();
+				result["final_snapshot_tick"] = m_autonomy.state.finalDiagnosticSnapshot.is_object()
+					? m_autonomy.state.finalDiagnosticSnapshot.value("tick", 0u)
+					: 0u;
 				return true;
 			}
 
@@ -1803,4 +1846,3 @@
 			reason = "unsupported_query_path";
 			return false;
 		}
-
