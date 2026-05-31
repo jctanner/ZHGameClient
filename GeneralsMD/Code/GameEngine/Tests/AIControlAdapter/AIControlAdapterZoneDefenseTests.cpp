@@ -16,6 +16,7 @@
 #include "GameClient/AIControlAdapter/AIControlAdapterDefenseManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterPolicy.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -979,6 +980,7 @@ namespace Phase78
 			true,
 			false,
 			false,
+			false,
 			false
 		});
 		const AIControlAdapterZoneDefenseBudgetResult mediumBudget = AIControlAdapterChooseZoneDefenseBudget({
@@ -988,6 +990,7 @@ namespace Phase78
 			0,
 			false,
 			true,
+			false,
 			false,
 			false,
 			false
@@ -1060,7 +1063,8 @@ namespace Phase78
 			false,
 			true,
 			true,
-			true
+			true,
+			false
 		});
 
 		expect(budget.criticalOverride, "Critical threat should enable explicit override");
@@ -1082,6 +1086,7 @@ namespace Phase78
 			false,
 			false,
 			false,
+			false,
 			false
 		});
 		const AIControlAdapterZoneDefenseBudgetResult frontierLowBudget = AIControlAdapterChooseZoneDefenseBudget({
@@ -1093,6 +1098,7 @@ namespace Phase78
 			false,
 			true,
 			true,
+			false,
 			false
 		});
 
@@ -1451,6 +1457,19 @@ namespace Phase79
 		expect(std::string(result.type) == "wmd_strike", "Severe recent-WMD damage with no local enemies should classify as wmd_strike");
 		expect(std::string(result.response) == "hold_rebuild_recover", "WMD-only strike should choose hold/rebuild/recover response");
 		expect(std::string(result.reason) == "recent_wmd_no_local_enemy", "WMD-only strike should expose concrete reason");
+
+		const AIControlAdapterMainBaseCriticalOverrideResult overrideResult =
+			AIControlAdapterEvaluateMainBaseCriticalOverride({
+				true,
+				"critical",
+				0,
+				true,
+				2,
+				1,
+				0
+			});
+		expect(!overrideResult.active, "WMD-only main-base damage should not enable mobile-defense override");
+		expect(std::string(overrideResult.reason) == "no_local_enemies", "WMD-only override block should expose no-local-enemies reason");
 		std::cout << "PASS: Phase79::testWmdStrikeWithoutLocalEnemySuppressesDefense\n";
 	}
 
@@ -1470,6 +1489,122 @@ namespace Phase79
 		expect(std::string(result.response) == "defend", "Visible local enemies should allow defense response");
 		expect(std::string(result.reason) == "local_enemy_units_recent_wmd", "Recent WMD plus real units should explain local units are present");
 		std::cout << "PASS: Phase79::testWmdDamageWithLocalEnemyAllowsDefense\n";
+	}
+
+	void testMainBaseWmdLocalEnemiesOverrideAllowsBudget()
+	{
+		const AIControlAdapterMainBaseCriticalOverrideResult overrideResult =
+			AIControlAdapterEvaluateMainBaseCriticalOverride({
+				true,
+				"critical",
+				9,
+				true,
+				12,
+				0,
+				1
+			});
+		expect(overrideResult.active, "Main-base critical WMD plus local enemies should enable override");
+		expect(std::string(overrideResult.reason) == "wmd_plus_local_enemies", "Override should explain mixed WMD/local pressure");
+
+		const AIControlAdapterZoneDefenseBudgetResult budget = AIControlAdapterChooseZoneDefenseBudget({
+			"critical",
+			12,
+			1,
+			4,
+			true,
+			false,
+			false,
+			false,
+			true,
+			overrideResult.active
+		});
+		expect(budget.maxNewAssignments > 0, "Main-base critical override should not be capped to zero by another allocation");
+		expect(std::string(budget.reason) == "main_base_critical_override", "Budget reason should expose main-base override");
+		std::cout << "PASS: Phase79::testMainBaseWmdLocalEnemiesOverrideAllowsBudget\n";
+	}
+
+	void testMainBaseCoreDamageOverrideWithoutWmd()
+	{
+		const AIControlAdapterMainBaseCriticalOverrideResult overrideResult =
+			AIControlAdapterEvaluateMainBaseCriticalOverride({
+				true,
+				"critical",
+				4,
+				false,
+				3,
+				0,
+				0
+			});
+		expect(overrideResult.active, "Main-base critical local enemies plus core damage should enable override");
+		expect(std::string(overrideResult.reason) == "core_structure_under_attack", "Core-damage override should explain structure pressure");
+		std::cout << "PASS: Phase79::testMainBaseCoreDamageOverrideWithoutWmd\n";
+	}
+
+	void testNonMainCriticalPreservesExistingFrontPolicy()
+	{
+		const AIControlAdapterMainBaseCriticalOverrideResult overrideResult =
+			AIControlAdapterEvaluateMainBaseCriticalOverride({
+				false,
+				"critical",
+				8,
+				true,
+				5,
+				0,
+				1
+			});
+		expect(!overrideResult.active, "Non-main critical pressure should not enable main-base override");
+		expect(std::string(overrideResult.reason) == "not_main_base", "Non-main override block should expose not-main-base reason");
+
+		const AIControlAdapterZoneDefenseBudgetResult budget = AIControlAdapterChooseZoneDefenseBudget({
+			"critical",
+			18,
+			2,
+			0,
+			false,
+			false,
+			true,
+			true,
+			true,
+			overrideResult.active
+		});
+		expect(std::string(budget.reason) == "critical_preserve_other_fronts", "Non-main critical budget should keep existing preservation reason");
+		std::cout << "PASS: Phase79::testNonMainCriticalPreservesExistingFrontPolicy\n";
+	}
+
+	void testMainBaseOverridePreservesReservedUnitsBudget()
+	{
+		const AIControlAdapterZoneDefenseBudgetResult budget = AIControlAdapterChooseZoneDefenseBudget({
+			"critical",
+			6,
+			1,
+			0,
+			true,
+			false,
+			false,
+			false,
+			true,
+			true
+		});
+		expect(budget.maxNewAssignments <= 4, "Override should only budget from available idle combat after emergency reserve");
+		expect(std::string(budget.reason) == "main_base_critical_override", "Reserved-unit budget test should use override reason");
+		std::cout << "PASS: Phase79::testMainBaseOverridePreservesReservedUnitsBudget\n";
+	}
+
+	void testMainBaseOverrideClearsWithoutLocalEnemies()
+	{
+		const AIControlAdapterMainBaseCriticalOverrideResult overrideResult =
+			AIControlAdapterEvaluateMainBaseCriticalOverride({
+				true,
+				"critical",
+				0,
+				true,
+				4,
+				0,
+				1
+			});
+		expect(!overrideResult.active, "Override should clear when local enemies are gone");
+		expect(std::string(overrideResult.reason) == "no_local_enemies", "Clear reason should expose missing local enemies");
+		std::cout << "PASS: Phase79::testMainBaseOverrideClearsWithoutLocalEnemies\n";
 	}
 
 	void testUnitAttackStillMobilizesDefense()
@@ -1553,6 +1688,11 @@ namespace Phase79
 		std::cout << "\nRunning Phase 7.9 Increment 2 threat-source tests...\n";
 		testWmdStrikeWithoutLocalEnemySuppressesDefense();
 		testWmdDamageWithLocalEnemyAllowsDefense();
+		testMainBaseWmdLocalEnemiesOverrideAllowsBudget();
+		testMainBaseCoreDamageOverrideWithoutWmd();
+		testNonMainCriticalPreservesExistingFrontPolicy();
+		testMainBaseOverridePreservesReservedUnitsBudget();
+		testMainBaseOverrideClearsWithoutLocalEnemies();
 		testUnitAttackStillMobilizesDefense();
 		testUnknownDamageUsesHoldRecover();
 		testArtilleryThreatUsesCounterbattery();
@@ -1998,6 +2138,224 @@ namespace Phase795
 	}
 }
 
+namespace Phase7879Reserves
+{
+	void testContestedFrontPromotionRaisesFloor()
+	{
+		const AIControlAdapterZoneDefenseReserveResult result = AIControlAdapterChooseZoneDefenseReserve({
+			false,
+			false,
+			true,
+			true,
+			false,
+			4,
+			3,
+			5,
+			0,
+			2,
+			0,
+			10000u
+		});
+		expectEq(std::string(result.posture), std::string("contested_front"), "Repeated outer/front attacks should promote to contested_front");
+		expect(result.floor >= 8, "Contested front should have a larger resident floor");
+		expect(result.productionNeeded, "Contested front reserve should emit production need when pressured");
+		std::cout << "PASS: Phase7879Reserves::testContestedFrontPromotionRaisesFloor\n";
+	}
+
+	void testQuietDecayDoesNotDropImmediately()
+	{
+		const AIControlAdapterZoneDefenseReserveResult stillContested = AIControlAdapterChooseZoneDefenseReserve({
+			false,
+			false,
+			true,
+			false,
+			true,
+			0,
+			3,
+			0,
+			0,
+			0,
+			0,
+			30000u
+		});
+		const AIControlAdapterZoneDefenseReserveResult decayed = AIControlAdapterChooseZoneDefenseReserve({
+			false,
+			false,
+			true,
+			false,
+			false,
+			0,
+			0,
+			0,
+			0,
+			0,
+			0,
+			130000u
+		});
+		expectEq(std::string(stillContested.posture), std::string("contested_front"), "Contested posture should not decay on one quiet tick");
+		expect(decayed.floor < stillContested.floor, "Quiet window should decay toward the normal outer/frontline floor");
+		std::cout << "PASS: Phase7879Reserves::testQuietDecayDoesNotDropImmediately\n";
+	}
+
+	void testDonorFloorBlocksStrippingAtFloor()
+	{
+		const AIControlAdapterZoneDefenseDonorFloorResult donor = AIControlAdapterApplyZoneDefenseDonorFloor({
+			10,
+			10,
+			4,
+			false,
+			false,
+			false,
+			true,
+			false
+		});
+		expectEq(donor.allowed, 0, "Donor at floor should contribute zero");
+		expectEq(donor.blocked, 4, "Blocked count should preserve the requested units");
+		expectEq(std::string(donor.reason), std::string("contested_front"), "Donor block should explain contested front floor");
+		std::cout << "PASS: Phase7879Reserves::testDonorFloorBlocksStrippingAtFloor\n";
+	}
+
+	void testSurplusDonationOnlyUsesSurplus()
+	{
+		const AIControlAdapterZoneDefenseDonorFloorResult donor = AIControlAdapterApplyZoneDefenseDonorFloor({
+			14,
+			10,
+			8,
+			false,
+			false,
+			false,
+			true,
+			false
+		});
+		expectEq(donor.allowed, 4, "Donor should contribute only surplus above floor");
+		expectEq(donor.blocked, 4, "Donor should block the non-surplus portion");
+		expectEq(std::string(donor.reason), std::string("surplus"), "Surplus donation should expose surplus reason");
+		std::cout << "PASS: Phase7879Reserves::testSurplusDonationOnlyUsesSurplus\n";
+	}
+
+	void testTwoContestedFrontsRetainResidents()
+	{
+		const AIControlAdapterZoneDefenseDonorFloorResult donorA = AIControlAdapterApplyZoneDefenseDonorFloor({
+			10,
+			10,
+			6,
+			true,
+			true,
+			false,
+			true,
+			false
+		});
+		const AIControlAdapterZoneDefenseDonorFloorResult donorB = AIControlAdapterApplyZoneDefenseDonorFloor({
+			12,
+			10,
+			6,
+			true,
+			true,
+			false,
+			true,
+			false
+		});
+		expectEq(donorA.allowed, 0, "First contested front at floor should not drain");
+		expectEq(donorB.allowed, 2, "Second contested front may donate only surplus");
+		std::cout << "PASS: Phase7879Reserves::testTwoContestedFrontsRetainResidents\n";
+	}
+
+	void testMainBaseCriticalOverrideCanBreakFloors()
+	{
+		const AIControlAdapterZoneDefenseDonorFloorResult donor = AIControlAdapterApplyZoneDefenseDonorFloor({
+			6,
+			10,
+			4,
+			true,
+			true,
+			false,
+			true,
+			true
+		});
+		const AIControlAdapterMainBaseCriticalOverrideResult overrideResult = AIControlAdapterEvaluateMainBaseCriticalOverride({
+			true,
+			"critical",
+			3,
+			true,
+			2,
+			0,
+			0
+		});
+		const AIControlAdapterZoneThreatSourceResult wmdOnly = AIControlAdapterClassifyZoneThreatSource({
+			0,
+			0,
+			true,
+			0.45f,
+			900.0f,
+			2,
+			0
+		});
+		expectEq(donor.allowed, 4, "Main-base critical override may temporarily break donor floors");
+		expectEq(std::string(donor.reason), std::string("main_base_critical_override"), "Override floor break should be explicit");
+		expect(overrideResult.active, "Mixed main-base WMD/local pressure should still activate override");
+		expectEq(std::string(wmdOnly.response), std::string("hold_rebuild_recover"), "WMD-only no-local-enemy behavior must remain recovery-only");
+		std::cout << "PASS: Phase7879Reserves::testMainBaseCriticalOverrideCanBreakFloors\n";
+	}
+
+	void testTaskOwnedUnitsExcludedFromSurplus()
+	{
+		const int totalLocalUnits = 14;
+		const int taskOwnedUnits = 5;
+		const int availableResidents = totalLocalUnits - taskOwnedUnits;
+		const AIControlAdapterZoneDefenseDonorFloorResult donor = AIControlAdapterApplyZoneDefenseDonorFloor({
+			availableResidents,
+			10,
+			4,
+			false,
+			true,
+			false,
+			true,
+			false
+		});
+		expectEq(donor.allowed, 0, "Task-owned units should not count as generic surplus donors");
+		expectEq(std::string(donor.reason), std::string("contested_front"), "Task-owned exclusion should preserve contested floor");
+		std::cout << "PASS: Phase7879Reserves::testTaskOwnedUnitsExcludedFromSurplus\n";
+	}
+
+	void testProductionSignalForContestedDeficit()
+	{
+		const AIControlAdapterZoneDefenseReserveResult reserve = AIControlAdapterChooseZoneDefenseReserve({
+			false,
+			false,
+			true,
+			true,
+			false,
+			4,
+			2,
+			6,
+			1,
+			2,
+			0,
+			1000u
+		});
+		const int resident = 6;
+		const int deficit = std::max(0, reserve.floor - resident);
+		expectEq(std::string(reserve.posture), std::string("contested_front"), "Repeated pressured frontier should be contested");
+		expect(reserve.productionNeeded, "Contested pressured reserve should mark production needed");
+		expect(deficit > 0, "Resident deficit should be visible for production telemetry");
+		std::cout << "PASS: Phase7879Reserves::testProductionSignalForContestedDeficit\n";
+	}
+
+	void runAllPhase7879ReserveTests()
+	{
+		std::cout << "\nRunning Phase 7.8/7.9 per-zone standing reserve tests...\n";
+		testContestedFrontPromotionRaisesFloor();
+		testQuietDecayDoesNotDropImmediately();
+		testDonorFloorBlocksStrippingAtFloor();
+		testSurplusDonationOnlyUsesSurplus();
+		testTwoContestedFrontsRetainResidents();
+		testMainBaseCriticalOverrideCanBreakFloors();
+		testTaskOwnedUnitsExcludedFromSurplus();
+		testProductionSignalForContestedDeficit();
+		std::cout << "All Phase 7.8/7.9 per-zone standing reserve tests passed!\n";
+	}
+}
+
 int main()
 {
 	std::cout << "Running ZoneManager and DefenseManager tests...\n";
@@ -2031,6 +2389,9 @@ int main()
 
 	// Phase 7.9 Increment 5: Brutal-pressure integration policy tests
 	Phase795::runAllPhase795Tests();
+
+	// Phase 7.8/7.9 follow-up: per-zone standing defense reserves
+	Phase7879Reserves::runAllPhase7879ReserveTests();
 
 	// Phase 5.8: Zone anchor type tests
 	std::cout << "\nRunning Phase 5.8 Zone Anchor Type tests...\n";

@@ -1,6 +1,7 @@
 #include "GameClient/AIControlAdapter/AIControlAdapterPolicy.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterEnemyMemory.h"
 
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
@@ -1809,6 +1810,126 @@ int main()
 	}
 
 	{
+		AIControlAdapterStrategicSpendInput inputs;
+		inputs.money = 12000u;
+		inputs.reserveCash = 10000u;
+		inputs.requestCost = 5000u;
+		inputs.completedMarkets = 0;
+		inputs.incomeCritical = true;
+		inputs.reserveDepleted = false;
+		const auto result = AIControlAdapterEvaluateStrategicSpend(StrategicSpendCategory::LuxuryBaseline, inputs);
+		expect(!result.allowed, "strategic spend should block luxury spending while recovery cash is protected");
+		expect(std::strcmp(result.reason, "recovery_cash_protected") == 0,
+			"strategic spend should report recovery cash protection for luxury blocks");
+	}
+
+	{
+		AIControlAdapterStrategicSpendInput inputs;
+		inputs.money = 2600u;
+		inputs.reserveCash = 10000u;
+		inputs.requestCost = 2500u;
+		inputs.completedMarkets = 0;
+		inputs.staleMarketFoundations = 1;
+		inputs.incomeCritical = true;
+		const auto result = AIControlAdapterEvaluateStrategicSpend(StrategicSpendCategory::EconomyRecovery, inputs);
+		expect(result.allowed, "strategic spend should allow replacing stale Black Market foundations");
+		expect(std::strcmp(result.reason, "replace_stale_income_foundation") == 0,
+			"strategic spend should report stale income replacement");
+	}
+
+	{
+		AIControlAdapterStrategicSpendInput inputs;
+		inputs.money = 50000u;
+		inputs.reserveCash = 10000u;
+		inputs.requestCost = 2500u;
+		inputs.completedMarkets = 1;
+		inputs.healthyMarketsInProgress = 1;
+		const auto result = AIControlAdapterEvaluateStrategicSpend(StrategicSpendCategory::EconomyRecovery, inputs);
+		expect(!result.allowed, "strategic spend should block duplicate recovery while a healthy Black Market is in progress");
+		expect(std::strcmp(result.reason, "healthy_income_build_in_progress") == 0,
+			"strategic spend should distinguish healthy income builds from stale foundations");
+	}
+
+	{
+		AIControlAdapterStrategicSpendInput inputs;
+		inputs.money = 1700u;
+		inputs.reserveCash = 10000u;
+		inputs.requestCost = 700u;
+		inputs.completedMarkets = 0;
+		inputs.activeLocalEnemies = 3;
+		inputs.emergencySurvivalActive = true;
+		inputs.incomeCritical = true;
+		inputs.reserveDepleted = true;
+		const auto result = AIControlAdapterEvaluateStrategicSpend(StrategicSpendCategory::EmergencyDefenseUnits, inputs);
+		expect(result.allowed, "strategic spend should allow bounded emergency defense pulses under reserve pressure");
+		expect(result.batchLimit == 1, "reserve-pressure emergency defense should be capped to one pulse");
+		expect(std::strcmp(result.reason, "bounded_emergency_pulse") == 0,
+			"bounded emergency defense should report bounded_emergency_pulse");
+	}
+
+	{
+		AIControlAdapterStrategicSpendInput inputs;
+		inputs.money = 700u;
+		inputs.reserveCash = 10000u;
+		inputs.requestCost = 700u;
+		inputs.activeLocalEnemies = 5;
+		inputs.mainBaseCritical = true;
+		inputs.emergencySurvivalActive = true;
+		inputs.quads = 30;
+		inputs.scorpions = 1;
+		inputs.buggies = 1;
+		const auto result = AIControlAdapterEvaluateStrategicSpend(StrategicSpendCategory::EmergencyDefenseUnits, inputs);
+		expect(result.allowed, "main-base critical emergency should override normal quad saturation");
+		expect(result.batchLimit == 3, "main-base critical emergency should allow a larger explicit batch");
+		expect(std::strcmp(result.reason, "main_base_critical_override") == 0,
+			"main-base critical emergency should report override reason");
+	}
+
+	{
+		AIControlAdapterStrategicSpendInput inputs;
+		inputs.money = 50000u;
+		inputs.reserveCash = 10000u;
+		inputs.requestCost = 700u;
+		inputs.activeLocalEnemies = 2;
+		inputs.emergencySurvivalActive = true;
+		inputs.quads = 30;
+		inputs.scorpions = 2;
+		inputs.buggies = 1;
+		const auto result = AIControlAdapterEvaluateStrategicSpend(StrategicSpendCategory::EmergencyDefenseUnits, inputs);
+		expect(!result.allowed, "quad-heavy armies should not keep spending emergency reserve on more quads without collapse pressure");
+		expect(result.batchLimit == 0, "quad saturation should suppress the emergency batch");
+		expect(std::strcmp(result.reason, "quad_saturation_recovery_protected") == 0,
+			"quad saturation should report specialist/recovery protection");
+	}
+
+	{
+		AIControlAdapterStrategicSpendInput inputs;
+		inputs.money = 17000u;
+		inputs.reserveCash = 10000u;
+		inputs.requestCost = 5000u;
+		inputs.completedMarkets = 1;
+		inputs.expansionUrgent = true;
+		inputs.incomeCritical = false;
+		const auto result = AIControlAdapterEvaluateStrategicSpend(StrategicSpendCategory::LuxuryBaseline, inputs);
+		expect(!result.allowed, "urgent expansion should block luxury baseline strategic spending");
+		expect(std::strcmp(result.reason, "urgent_expansion_priority") == 0,
+			"urgent expansion should be visible as the block reason");
+	}
+
+	{
+		AIControlAdapterStrategicSpendInput inputs;
+		inputs.money = 22000u;
+		inputs.reserveCash = 10000u;
+		inputs.requestCost = 5000u;
+		inputs.completedMarkets = 1;
+		inputs.activeWmdThreats = 1;
+		const auto result = AIControlAdapterEvaluateStrategicSpend(StrategicSpendCategory::DefensiveWmd, inputs);
+		expect(result.allowed, "defensive WMD spending should be allowed when reserve is protected");
+		expect(std::strcmp(result.reason, "defensive_wmd") == 0,
+			"defensive WMD spending should report defensive_wmd");
+	}
+
+	{
 		AIControlAdapterScudStormStrategicTargetInputs inputs;
 		inputs.hasReadyScudStorm = true;
 		inputs.hasActiveWmdTarget = true;
@@ -1911,6 +2032,218 @@ int main()
 		const auto result = AIControlAdapterSelectScudStormStrategicTarget(inputs);
 		expect(result.hasTarget, "Strategic SCUD Storm fallback should select one valid target");
 		expect(result.maxFireCount == 1, "Strategic SCUD Storm fallback should conservatively fire one SCUD Storm per interval");
+	}
+
+	{
+		const auto result = AIControlAdapterClassifyMatchOutcome({
+			true,
+			false,
+			false,
+			false,
+			0u
+		});
+		expect(result.state == "running", "Match outcome should report running when no terminal flags are set");
+		expect(std::strcmp(result.reason, "in_progress") == 0, "Running match outcome should report in_progress");
+	}
+
+	{
+		const auto result = AIControlAdapterClassifyMatchOutcome({
+			true,
+			true,
+			false,
+			false,
+			123u
+		});
+		expect(result.state == "victory", "Allied victory should classify as victory");
+		expect(std::strcmp(result.reason, "allied_victory") == 0, "Allied victory should report allied_victory");
+	}
+
+	{
+		const auto result = AIControlAdapterClassifyMatchOutcome({
+			true,
+			false,
+			true,
+			false,
+			123u
+		});
+		expect(result.state == "defeat", "Allied defeat should classify as defeat");
+		expect(std::strcmp(result.reason, "allied_defeat") == 0, "Allied defeat should report allied_defeat");
+	}
+
+	{
+		const auto result = AIControlAdapterClassifyMatchOutcome({
+			true,
+			false,
+			false,
+			true,
+			123u
+		});
+		expect(result.state == "defeat", "Local defeat should classify as defeat");
+		expect(std::strcmp(result.reason, "local_defeat") == 0, "Local defeat should report local_defeat when allied defeat is absent");
+	}
+
+	{
+		const auto result = AIControlAdapterClassifyMatchOutcome({
+			false,
+			false,
+			false,
+			false,
+			0u
+		});
+		expect(result.state == "unknown", "Unavailable victory conditions should classify as unknown");
+		expect(std::strcmp(result.reason, "victory_conditions_unavailable") == 0,
+			"Unavailable victory conditions should report victory_conditions_unavailable");
+	}
+
+	{
+		const auto result = AIControlAdapterClassifyMatchOutcome({
+			true,
+			false,
+			false,
+			false,
+			999u
+		});
+		expect(result.state == "draw_or_unknown", "End frame without local result should classify as draw_or_unknown");
+		expect(std::strcmp(result.reason, "end_frame_without_local_result") == 0,
+			"Draw/unknown terminal state should explain missing local result");
+	}
+
+	{
+		expect(AIControlAdapterShouldLogTerminalMatchOutcome("", "victory"),
+			"First terminal match outcome should be logged");
+		expect(!AIControlAdapterShouldLogTerminalMatchOutcome("victory", "victory"),
+			"Repeated terminal match outcome should not be logged again");
+		expect(!AIControlAdapterShouldLogTerminalMatchOutcome("", "running"),
+			"Running match outcome should not emit terminal log");
+	}
+
+	{
+		const auto result = AIControlAdapterChooseDurableMatchOutcomeAction({
+			false,
+			true,
+			false,
+			false,
+			false,
+			"running"
+		});
+		expect(std::strcmp(result.action, "cache_current_active") == 0,
+			"Durable match outcome should cache meaningful running context");
+	}
+
+	{
+		const auto result = AIControlAdapterChooseDurableMatchOutcomeAction({
+			false,
+			true,
+			false,
+			false,
+			false,
+			"unknown"
+		});
+		expect(std::strcmp(result.action, "cache_current_active") == 0,
+			"Durable match outcome should cache meaningful active context even before victory conditions are available");
+	}
+
+	{
+		const auto result = AIControlAdapterChooseDurableMatchOutcomeAction({
+			false,
+			false,
+			true,
+			false,
+			true,
+			"running"
+		});
+		expect(std::strcmp(result.action, "return_cached_terminal") == 0,
+			"Durable match outcome should return cached terminal after context loss");
+	}
+
+	{
+		const auto result = AIControlAdapterChooseDurableMatchOutcomeAction({
+			false,
+			true,
+			true,
+			false,
+			true,
+			"running"
+		});
+		expect(std::strcmp(result.action, "return_cached_terminal") == 0,
+			"Durable match outcome should prefer cached terminal over rebuilding a meaningful running state");
+	}
+
+	{
+		const auto result = AIControlAdapterChooseDurableMatchOutcomeAction({
+			false,
+			false,
+			false,
+			false,
+			true,
+			"running"
+		});
+		expect(std::strcmp(result.action, "create_lost_context_unknown") == 0,
+			"Durable match outcome should create explicit unknown after context loss before terminal");
+	}
+
+	{
+		const auto result = AIControlAdapterChooseDurableMatchOutcomeAction({
+			false,
+			true,
+			false,
+			true,
+			true,
+			"running"
+		});
+		expect(std::strcmp(result.action, "return_cached_unknown") == 0,
+			"Durable match outcome should prefer durable unknown over rebuilding a meaningful running state");
+	}
+
+	{
+		const auto result = AIControlAdapterChooseDurableMatchOutcomeAction({
+			true,
+			true,
+			true,
+			false,
+			true,
+			"running"
+		});
+		expect(std::strcmp(result.action, "reset_for_new_match") == 0,
+			"Durable match outcome should clear cached terminal only for a new meaningful match");
+	}
+
+	{
+		const auto result = AIControlAdapterClassifyMatchParticipant({
+			true,
+			true,
+			true,
+			true,
+			true,
+			false
+		});
+		expect(result.includedInOutcome, "Local player with occupied slot should remain included in match outcome");
+	}
+
+	{
+		const auto result = AIControlAdapterClassifyMatchParticipant({
+			false,
+			true,
+			false,
+			false,
+			false,
+			false
+		});
+		expect(!result.includedInOutcome, "Closed/default slots should not be counted as active participants");
+		expect(std::strcmp(result.nonParticipantReason, "closed_slot_or_no_assets") == 0,
+			"Closed/default slots should expose a concrete non-participant reason");
+	}
+
+	{
+		const auto result = AIControlAdapterClassifyMatchParticipant({
+			false,
+			true,
+			true,
+			true,
+			true,
+			false
+		});
+		expect(result.includedInOutcome, "Occupied AI opponent with valid setup should count as an active participant");
 	}
 
 	{
@@ -2180,6 +2513,11 @@ int main()
 		const AIControlAdapterTerrainFacts facts = AIControlAdapterBuildTerrainFacts("Maps/Death Valley/Death Valley.map", true, 1200.0f, 1200.0f);
 		expect(facts.source == "manual_fixture", "Death Valley terrain facts should use a manual fixture when map identity is known");
 		expect(facts.features.size() >= 4u, "Death Valley terrain facts should include barriers and base entrances");
+		for (std::size_t i = 0; i < facts.features.size(); ++i)
+		{
+			expect(facts.features[i].id != "death-valley-main-base-lower-entry",
+				"Death Valley fixture should not emit the unverified lower entry marker");
+		}
 		const nlohmann::json telemetry = AIControlAdapterSerializeTerrainFacts(facts);
 		expect(telemetry["terrain_features"].is_array(), "Terrain telemetry should serialize features as an array");
 		expect(telemetry["terrain_features"].size() == facts.features.size(), "Terrain telemetry should preserve feature count");
@@ -2194,6 +2532,8 @@ int main()
 			1200.0f,
 			1200.0f,
 			700.0f,
+			1.0f,
+			0.0f,
 			true
 		});
 		expect(facts.source == "unavailable", "Unknown maps should explicitly report unavailable terrain facts");
@@ -2209,12 +2549,57 @@ int main()
 			1200.0f,
 			1200.0f,
 			1200.0f,
+			1.0f,
+			0.35f,
 			true
 		});
 		expect(result.terrainLimited, "Known barriers should reduce an oversized zone radius");
 		expect(result.effectiveRadius < 1200.0f, "Known barriers should produce a smaller effective radius");
 		expect(result.hasEntrance, "Main-base terrain facts should select a base entrance");
 		expect(!result.entranceId.empty(), "Selected terrain entrance should expose an id");
+		expect(result.frontPoint.x == result.entrancePosition.x && result.frontPoint.y == result.entrancePosition.y,
+			"Terrain entrance should become the zone front point");
+		expect(result.rearPoint.x < 1200.0f,
+			"Terrain-aware rear point should move to the safer side opposite the selected entrance");
+	}
+
+	{
+		AIControlAdapterTerrainFacts facts;
+		facts.mapName = "BarrierTest";
+		facts.source = "unit_test";
+		AIControlAdapterTerrainFeature barrier;
+		barrier.id = "test-barrier";
+		barrier.kind = "impassable_barrier";
+		barrier.points.push_back({ 150.0f, -100.0f });
+		barrier.points.push_back({ 150.0f, 100.0f });
+		facts.features.push_back(barrier);
+		AIControlAdapterTerrainFeature crossedEntrance;
+		crossedEntrance.id = "crossed-entry";
+		crossedEntrance.kind = "base_entrance";
+		crossedEntrance.hasPosition = true;
+		crossedEntrance.position = { 260.0f, 0.0f };
+		crossedEntrance.trusted = true;
+		facts.features.push_back(crossedEntrance);
+		AIControlAdapterTerrainFeature sameSideEntrance;
+		sameSideEntrance.id = "same-side-entry";
+		sameSideEntrance.kind = "base_entrance";
+		sameSideEntrance.hasPosition = true;
+		sameSideEntrance.position = { 100.0f, 60.0f };
+		sameSideEntrance.trusted = true;
+		facts.features.push_back(sameSideEntrance);
+
+		const AIControlAdapterZoneTerrainResult result = AIControlAdapterApplyZoneTerrainFacts(facts, {
+			0.0f,
+			0.0f,
+			500.0f,
+			1.0f,
+			0.0f,
+			true
+		});
+		expect(result.hasEntrance, "Terrain point selection should still choose an entrance when one is available");
+		expect(result.entranceId == "same-side-entry",
+			"Terrain point selection should avoid an entrance whose anchor path crosses a barrier");
+		expect(result.terrainLimited, "Nearby barrier should still limit the effective radius");
 	}
 
 	{
@@ -2485,10 +2870,53 @@ int main()
 				foundTrustedEntry = true;
 			}
 		}
-		expect(foundTrustedEntry, "Trusted cache entrance should replace the Death Valley fixture entrance");
-		expect(fixtureEntrances == 0, "Trusted cache entrance should demote hardcoded fixture entrances");
-		expect(merged.mapFileCacheTelemetry["fixture_skipped"] == true,
-			"Trusted cache entrance should report fixture skip telemetry");
+		expect(!foundTrustedEntry, "Unverified lower Death Valley cache entrance should be ignored even if marked trusted");
+		expect(fixtureEntrances > 0, "Ignored lower cache entrance should not demote safer fixture entrances");
+		expect(merged.mapFileCacheTelemetry["ignored_lower_entry"] == true,
+			"Ignored lower cache entrance should report telemetry");
+	}
+
+	{
+		const std::vector<std::string> hints = AIControlAdapterChooseRunDiagnosisHints({
+			"depleted",
+			0,
+			0,
+			0,
+			2,
+			1,
+			1,
+			0
+		});
+		expect(std::find(hints.begin(), hints.end(), "economy_reserve_depleted") != hints.end(),
+			"Final run hints should include reserve depletion only when supported");
+		expect(std::find(hints.begin(), hints.end(), "no_command_center") != hints.end(),
+			"Final run hints should include missing command center");
+		expect(std::find(hints.begin(), hints.end(), "no_workers") != hints.end(),
+			"Final run hints should include no workers");
+		expect(std::find(hints.begin(), hints.end(), "no_producers") != hints.end(),
+			"Final run hints should include no producers");
+		expect(std::find(hints.begin(), hints.end(), "zone_reserve_deficits") != hints.end(),
+			"Final run hints should include reserve deficits");
+		expect(std::find(hints.begin(), hints.end(), "stalled_construction_tasks") != hints.end(),
+			"Final run hints should include stalled construction");
+		expect(std::find(hints.begin(), hints.end(), "enemy_wmd_still_known") != hints.end(),
+			"Final run hints should include known enemy WMD");
+		expect(std::find(hints.begin(), hints.end(), "attack_waves_inactive") != hints.end(),
+			"Final run hints should include inactive attack waves");
+	}
+
+	{
+		const std::vector<std::string> hints = AIControlAdapterChooseRunDiagnosisHints({
+			"protected",
+			1,
+			8,
+			3,
+			0,
+			0,
+			0,
+			1
+		});
+		expect(hints.empty(), "Final run hints should not emit unsupported diagnoses");
 	}
 
 	std::cout << "AIControlAdapterPolicyTests passed\n";

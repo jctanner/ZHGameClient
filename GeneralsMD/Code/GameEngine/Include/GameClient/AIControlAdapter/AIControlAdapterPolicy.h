@@ -878,6 +878,61 @@ struct AIControlAdapterScudStormConstructionPolicyResult
 AIControlAdapterScudStormConstructionPolicyResult AIControlAdapterEvaluateScudStormConstruction(
 	const AIControlAdapterScudStormConstructionPolicyInputs& inputs);
 
+enum class StrategicSpendCategory
+{
+	EconomyRecovery,
+	EconomyGrowth,
+	Expansion,
+	LocalWorkerRecovery,
+	TechPrerequisite,
+	StaticDefense,
+	DefensiveWmd,
+	EmergencyDefenseUnits,
+	CounterbatteryUnits,
+	LuxuryBaseline
+};
+
+const char* AIControlAdapterStrategicSpendCategoryName(StrategicSpendCategory category);
+
+struct AIControlAdapterStrategicSpendInput
+{
+	unsigned int money = 0u;
+	unsigned int reserveCash = 0u;
+	unsigned int requestCost = 0u;
+	int currentZones = 0;
+	int developedZones = 0;
+	int desiredZones = 0;
+	int completedMarkets = 0;
+	int healthyMarketsInProgress = 0;
+	int staleMarketFoundations = 0;
+	int staleStrategicFoundations = 0;
+	int activeLocalEnemies = 0;
+	int activeWmdThreats = 0;
+	int armySize = 0;
+	int armyCap = 0;
+	int quads = 0;
+	int buggies = 0;
+	int scorpions = 0;
+	bool mainBaseCritical = false;
+	bool emergencySurvivalActive = false;
+	bool expansionUrgent = false;
+	bool incomeCritical = false;
+	bool reserveDepleted = false;
+};
+
+struct AIControlAdapterStrategicSpendDecision
+{
+	bool allowed = false;
+	unsigned int protectedCash = 0u;
+	unsigned int spendBudget = 0u;
+	int batchLimit = 0;
+	const char* reason = "not_evaluated";
+};
+
+AIControlAdapterStrategicSpendDecision AIControlAdapterEvaluateStrategicSpend(
+	StrategicSpendCategory category,
+	const AIControlAdapterStrategicSpendInput& inputs);
+
 struct AIControlAdapterScudStormStrategicTargetCandidate
 {
 	unsigned int objectId = 0u;
@@ -927,6 +982,85 @@ AIControlAdapterScudStormStrategicTargetResult AIControlAdapterSelectScudStormSt
 	const AIControlAdapterScudStormStrategicTargetInputs& inputs);
 
 // =============================================================================
+// MATCH OUTCOME POLICY
+// =============================================================================
+
+struct AIControlAdapterMatchOutcomePolicyInputs
+{
+	bool victoryConditionsAvailable = false;
+	bool alliedVictory = false;
+	bool alliedDefeat = false;
+	bool localDefeat = false;
+	unsigned int endFrame = 0u;
+};
+
+struct AIControlAdapterMatchOutcomePolicyResult
+{
+	std::string state = "unknown";
+	const char* reason = "victory_conditions_unavailable";
+};
+
+AIControlAdapterMatchOutcomePolicyResult AIControlAdapterClassifyMatchOutcome(
+	const AIControlAdapterMatchOutcomePolicyInputs& inputs);
+
+bool AIControlAdapterShouldLogTerminalMatchOutcome(
+	const std::string& previousLoggedState,
+	const std::string& currentState);
+
+struct AIControlAdapterDurableMatchOutcomeInputs
+{
+	bool newMatchDetected = false;
+	bool meaningfulContext = false;
+	bool hasCachedTerminal = false;
+	bool hasDurableUnknown = false;
+	bool hasLastActiveSnapshot = false;
+	std::string currentState;
+};
+
+struct AIControlAdapterDurableMatchOutcomeDecision
+{
+	const char* action = "return_current";
+};
+
+AIControlAdapterDurableMatchOutcomeDecision AIControlAdapterChooseDurableMatchOutcomeAction(
+	const AIControlAdapterDurableMatchOutcomeInputs& inputs);
+
+struct AIControlAdapterRunDiagnosisInputs
+{
+	std::string reserveState;
+	int commandCenters = 0;
+	int workers = 0;
+	int producers = 0;
+	int defenseReserveDeficits = 0;
+	int stalledConstructionTasks = 0;
+	int knownEnemyWmd = 0;
+	int activeAttackWaves = 0;
+};
+
+std::vector<std::string> AIControlAdapterChooseRunDiagnosisHints(
+	const AIControlAdapterRunDiagnosisInputs& inputs);
+
+struct AIControlAdapterMatchParticipantInputs
+{
+	bool local = false;
+	bool slotPresent = false;
+	bool slotOccupied = false;
+	bool validStartPosition = false;
+	bool validTemplate = false;
+	bool hasAssets = false;
+};
+
+struct AIControlAdapterMatchParticipantResult
+{
+	bool activeParticipant = false;
+	bool includedInOutcome = false;
+	const char* nonParticipantReason = "";
+};
+
+AIControlAdapterMatchParticipantResult AIControlAdapterClassifyMatchParticipant(
+	const AIControlAdapterMatchParticipantInputs& inputs);
+
+// =============================================================================
 // ZONE DEFENSE ALLOCATION POLICY
 // =============================================================================
 
@@ -941,6 +1075,7 @@ struct AIControlAdapterZoneDefenseBudgetInputs
 	bool isFrontier;
 	bool isActiveZone;
 	bool hasActiveCriticalAllocation;
+	bool mainBaseCriticalOverride;
 };
 
 struct AIControlAdapterZoneDefenseBudgetResult
@@ -987,6 +1122,75 @@ struct AIControlAdapterZoneDefenseAllocationResult
 
 AIControlAdapterZoneDefenseAllocationResult AIControlAdapterEvaluateZoneDefenseAllocation(
 	const AIControlAdapterZoneDefenseAllocationInputs& inputs);
+
+struct AIControlAdapterMainBaseCriticalOverrideInputs
+{
+	bool isMainBase;
+	std::string threatLevel;
+	int localEnemyCount;
+	bool recentWmd;
+	int damagedStructures;
+	int destroyedStructures;
+	int repeatedCriticalDamageCount;
+};
+
+struct AIControlAdapterMainBaseCriticalOverrideResult
+{
+	bool active;
+	const char* reason;
+};
+
+AIControlAdapterMainBaseCriticalOverrideResult AIControlAdapterEvaluateMainBaseCriticalOverride(
+	const AIControlAdapterMainBaseCriticalOverrideInputs& inputs);
+
+struct AIControlAdapterZoneDefenseReserveInputs
+{
+	bool isMainBase;
+	bool isActiveZone;
+	bool isFrontier;
+	bool hasActiveThreat;
+	bool hasActiveAllocation;
+	int threatSeverity;
+	int recentAttackCount;
+	int localEnemyCount;
+	int enemyArtilleryCount;
+	int damagedStructures;
+	int destroyedStructures;
+	unsigned int quietMs;
+};
+
+struct AIControlAdapterZoneDefenseReserveResult
+{
+	const char* posture;
+	int floor;
+	bool productionNeeded;
+	const char* reason;
+};
+
+AIControlAdapterZoneDefenseReserveResult AIControlAdapterChooseZoneDefenseReserve(
+	const AIControlAdapterZoneDefenseReserveInputs& inputs);
+
+struct AIControlAdapterZoneDefenseDonorFloorInputs
+{
+	int residentCount;
+	int floor;
+	int requested;
+	bool sourceHasThreat;
+	bool sourceHasAllocation;
+	bool sourceIsActiveFront;
+	bool sourceIsContestedFront;
+	bool mainBaseCriticalOverride;
+};
+
+struct AIControlAdapterZoneDefenseDonorFloorResult
+{
+	int allowed;
+	int blocked;
+	const char* reason;
+};
+
+AIControlAdapterZoneDefenseDonorFloorResult AIControlAdapterApplyZoneDefenseDonorFloor(
+	const AIControlAdapterZoneDefenseDonorFloorInputs& inputs);
 
 struct AIControlAdapterZoneThreatSourceInputs
 {
@@ -1285,6 +1489,8 @@ struct AIControlAdapterZoneTerrainInputs
 	float centerX;
 	float centerY;
 	float radius;
+	float frontDirX = 0.0f;
+	float frontDirY = 0.0f;
 	bool isMainBase;
 };
 
@@ -1295,6 +1501,9 @@ struct AIControlAdapterZoneTerrainResult
 	bool hasEntrance;
 	AIControlAdapterTerrainPoint entrancePosition;
 	std::string entranceId;
+	AIControlAdapterTerrainPoint frontPoint;
+	AIControlAdapterTerrainPoint rearPoint;
+	std::string frontSource;
 	const char* reason;
 };
 

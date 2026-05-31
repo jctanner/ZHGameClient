@@ -49,6 +49,11 @@ namespace
 	bool AIControlAdapterIsTrustedMapFileCacheFeature(const nlohmann::json& featureJson)
 	{
 		const std::string kind = featureJson.value("kind", "");
+		const std::string id = featureJson.value("id", "");
+		if (id == "death-valley-main-base-lower-entry")
+		{
+			return false;
+		}
 		if (kind == "waypoint"
 			|| kind == "lane"
 			|| kind == "impassable_barrier"
@@ -116,6 +121,55 @@ namespace
 			best = std::min(best, AIControlAdapterDistancePointToSegmentSq(px, py, feature.points[i - 1], feature.points[i]));
 		}
 		return best;
+	}
+
+	float AIControlAdapterCross2D(
+		const AIControlAdapterTerrainPoint& a,
+		const AIControlAdapterTerrainPoint& b,
+		const AIControlAdapterTerrainPoint& c)
+	{
+		return ((b.x - a.x) * (c.y - a.y)) - ((b.y - a.y) * (c.x - a.x));
+	}
+
+	bool AIControlAdapterSegmentsIntersect(
+		const AIControlAdapterTerrainPoint& a,
+		const AIControlAdapterTerrainPoint& b,
+		const AIControlAdapterTerrainPoint& c,
+		const AIControlAdapterTerrainPoint& d)
+	{
+		const float c1 = AIControlAdapterCross2D(a, b, c);
+		const float c2 = AIControlAdapterCross2D(a, b, d);
+		const float c3 = AIControlAdapterCross2D(c, d, a);
+		const float c4 = AIControlAdapterCross2D(c, d, b);
+		return ((c1 > 0.0f && c2 < 0.0f) || (c1 < 0.0f && c2 > 0.0f))
+			&& ((c3 > 0.0f && c4 < 0.0f) || (c3 < 0.0f && c4 > 0.0f));
+	}
+
+	bool AIControlAdapterSegmentCrossesBarrier(
+		const AIControlAdapterTerrainFacts& facts,
+		const AIControlAdapterTerrainPoint& from,
+		const AIControlAdapterTerrainPoint& to)
+	{
+		for (std::size_t featureIdx = 0; featureIdx < facts.features.size(); ++featureIdx)
+		{
+			const AIControlAdapterTerrainFeature& feature = facts.features[featureIdx];
+			if (feature.kind != "impassable_barrier" && feature.kind != "blocked_area")
+			{
+				continue;
+			}
+			if (feature.points.size() < 2u)
+			{
+				continue;
+			}
+			for (std::size_t pointIdx = 1; pointIdx < feature.points.size(); ++pointIdx)
+			{
+				if (AIControlAdapterSegmentsIntersect(from, to, feature.points[pointIdx - 1], feature.points[pointIdx]))
+				{
+					return true;
+				}
+			}
+		}
+		return false;
 	}
 }
 
@@ -731,6 +785,185 @@ AIControlAdapterScudStormConstructionPolicyResult AIControlAdapterEvaluateScudSt
 	return result;
 }
 
+const char* AIControlAdapterStrategicSpendCategoryName(StrategicSpendCategory category)
+{
+	switch (category)
+	{
+	case StrategicSpendCategory::EconomyRecovery: return "economy_recovery";
+	case StrategicSpendCategory::EconomyGrowth: return "economy_growth";
+	case StrategicSpendCategory::Expansion: return "expansion";
+	case StrategicSpendCategory::LocalWorkerRecovery: return "local_worker_recovery";
+	case StrategicSpendCategory::TechPrerequisite: return "tech_prerequisite";
+	case StrategicSpendCategory::StaticDefense: return "static_defense";
+	case StrategicSpendCategory::DefensiveWmd: return "defensive_wmd";
+	case StrategicSpendCategory::EmergencyDefenseUnits: return "emergency_defense_units";
+	case StrategicSpendCategory::CounterbatteryUnits: return "counterbattery_units";
+	case StrategicSpendCategory::LuxuryBaseline: return "luxury_baseline";
+	default: return "unknown";
+	}
+}
+
+AIControlAdapterStrategicSpendDecision AIControlAdapterEvaluateStrategicSpend(
+	StrategicSpendCategory category,
+	const AIControlAdapterStrategicSpendInput& inputs)
+{
+	AIControlAdapterStrategicSpendDecision result;
+	const unsigned int recoveryStepCost = inputs.expansionUrgent ? 1800u : 2500u;
+	const bool recoveryPathNeeded =
+		inputs.incomeCritical
+		|| inputs.reserveDepleted
+		|| inputs.completedMarkets <= 0
+		|| inputs.staleMarketFoundations > 0
+		|| inputs.expansionUrgent;
+	result.protectedCash = inputs.reserveCash;
+	if (recoveryPathNeeded)
+	{
+		result.protectedCash = std::max(result.protectedCash, recoveryStepCost);
+	}
+	if (inputs.mainBaseCritical)
+	{
+		result.protectedCash = std::min(result.protectedCash, inputs.reserveCash / 2u);
+	}
+	result.spendBudget = inputs.money > result.protectedCash ? (inputs.money - result.protectedCash) : 0u;
+	result.batchLimit = 1;
+	result.reason = "reserve_protected";
+
+	const bool affordable = inputs.money >= inputs.requestCost;
+	const bool protectedAffordable = result.spendBudget >= inputs.requestCost;
+	const bool immediateCollapse = inputs.mainBaseCritical && inputs.activeLocalEnemies > 0;
+	const bool healthyRecoveryInProgress = inputs.healthyMarketsInProgress > 0 && inputs.staleMarketFoundations <= 0;
+
+	switch (category)
+	{
+	case StrategicSpendCategory::EconomyRecovery:
+		if (!affordable)
+		{
+			result.reason = "cash_below_recovery_cost";
+			return result;
+		}
+		if (healthyRecoveryInProgress)
+		{
+			result.reason = "healthy_income_build_in_progress";
+			return result;
+		}
+		result.allowed = true;
+		result.reason = inputs.staleMarketFoundations > 0 ? "replace_stale_income_foundation" : "economy_recovery_priority";
+		return result;
+	case StrategicSpendCategory::Expansion:
+		if (!affordable)
+		{
+			result.reason = "cash_below_expansion_cost";
+			return result;
+		}
+		if (inputs.expansionUrgent || !recoveryPathNeeded || protectedAffordable)
+		{
+			result.allowed = true;
+			result.reason = inputs.expansionUrgent ? "urgent_expansion_priority" : "expansion_allowed";
+			return result;
+		}
+		result.reason = "recovery_cash_protected";
+		return result;
+	case StrategicSpendCategory::LocalWorkerRecovery:
+		if (affordable && (protectedAffordable || inputs.staleStrategicFoundations > 0))
+		{
+			result.allowed = true;
+			result.reason = "worker_recovery";
+		}
+		else
+		{
+			result.reason = affordable ? "recovery_cash_protected" : "cash_below_worker_cost";
+		}
+		return result;
+	case StrategicSpendCategory::EmergencyDefenseUnits:
+		if (!inputs.emergencySurvivalActive && inputs.activeLocalEnemies <= 0 && !inputs.mainBaseCritical)
+		{
+			result.reason = "no_emergency";
+			result.batchLimit = 0;
+			return result;
+		}
+		if (inputs.quads >= std::max(12, inputs.scorpions + inputs.buggies + 8) && !immediateCollapse)
+		{
+			result.reason = "quad_saturation_recovery_protected";
+			result.batchLimit = 0;
+			return result;
+		}
+		if (immediateCollapse)
+		{
+			result.allowed = affordable;
+			result.batchLimit = 3;
+			result.reason = affordable ? "main_base_critical_override" : "cash_below_unit_cost";
+			return result;
+		}
+		if (inputs.reserveDepleted || inputs.incomeCritical || inputs.money < inputs.reserveCash)
+		{
+			result.allowed = affordable && inputs.money >= inputs.requestCost + 300u;
+			result.batchLimit = result.allowed ? 1 : 0;
+			result.reason = result.allowed ? "bounded_emergency_pulse" : "recovery_cash_protected";
+			return result;
+		}
+		result.allowed = affordable;
+		result.batchLimit = 2;
+		result.reason = affordable ? "emergency_defense" : "cash_below_unit_cost";
+		return result;
+	case StrategicSpendCategory::DefensiveWmd:
+		if (inputs.activeWmdThreats > 0 && affordable && (!recoveryPathNeeded || protectedAffordable || inputs.completedMarkets > 0))
+		{
+			result.allowed = true;
+			result.reason = "defensive_wmd";
+			return result;
+		}
+		if (!recoveryPathNeeded && protectedAffordable)
+		{
+			result.allowed = true;
+			result.reason = "defensive_baseline";
+			return result;
+		}
+		result.reason = inputs.expansionUrgent ? "urgent_expansion_priority" : "recovery_cash_protected";
+		return result;
+	case StrategicSpendCategory::TechPrerequisite:
+	case StrategicSpendCategory::StaticDefense:
+	case StrategicSpendCategory::CounterbatteryUnits:
+		if (affordable && (protectedAffordable || immediateCollapse))
+		{
+			result.allowed = true;
+			result.reason = immediateCollapse ? "main_base_critical_override" : "spend_allowed";
+		}
+		else
+		{
+			result.reason = affordable ? "recovery_cash_protected" : "cash_below_cost";
+		}
+		return result;
+	case StrategicSpendCategory::EconomyGrowth:
+		if (affordable && protectedAffordable && !inputs.expansionUrgent)
+		{
+			result.allowed = true;
+			result.reason = "growth_allowed";
+		}
+		else
+		{
+			result.reason = inputs.expansionUrgent ? "urgent_expansion_priority" : (affordable ? "reserve_protected" : "cash_below_cost");
+		}
+		return result;
+	case StrategicSpendCategory::LuxuryBaseline:
+	default:
+		if (recoveryPathNeeded)
+		{
+			result.reason = inputs.expansionUrgent ? "urgent_expansion_priority" : "recovery_cash_protected";
+			return result;
+		}
+		if (affordable && protectedAffordable)
+		{
+			result.allowed = true;
+			result.reason = "luxury_allowed";
+		}
+		else
+		{
+			result.reason = affordable ? "reserve_protected" : "cash_below_cost";
+		}
+		return result;
+	}
+}
+
 namespace
 {
 	int AIControlAdapterScudStormStrategicKindPriority(
@@ -913,6 +1146,164 @@ AIControlAdapterScudStormStrategicTargetResult AIControlAdapterSelectScudStormSt
 	return result;
 }
 
+AIControlAdapterMatchOutcomePolicyResult AIControlAdapterClassifyMatchOutcome(
+	const AIControlAdapterMatchOutcomePolicyInputs& inputs)
+{
+	AIControlAdapterMatchOutcomePolicyResult result;
+	if (!inputs.victoryConditionsAvailable)
+	{
+		result.state = "unknown";
+		result.reason = "victory_conditions_unavailable";
+		return result;
+	}
+	if (inputs.alliedVictory)
+	{
+		result.state = "victory";
+		result.reason = "allied_victory";
+		return result;
+	}
+	if (inputs.alliedDefeat)
+	{
+		result.state = "defeat";
+		result.reason = "allied_defeat";
+		return result;
+	}
+	if (inputs.localDefeat)
+	{
+		result.state = "defeat";
+		result.reason = "local_defeat";
+		return result;
+	}
+	if (inputs.endFrame > 0u)
+	{
+		result.state = "draw_or_unknown";
+		result.reason = "end_frame_without_local_result";
+		return result;
+	}
+	result.state = "running";
+	result.reason = "in_progress";
+	return result;
+}
+
+bool AIControlAdapterShouldLogTerminalMatchOutcome(
+	const std::string& previousLoggedState,
+	const std::string& currentState)
+{
+	const bool terminal =
+		currentState == "victory" ||
+		currentState == "defeat" ||
+		currentState == "draw_or_unknown";
+	return terminal && previousLoggedState != currentState;
+}
+
+AIControlAdapterDurableMatchOutcomeDecision AIControlAdapterChooseDurableMatchOutcomeAction(
+	const AIControlAdapterDurableMatchOutcomeInputs& inputs)
+{
+	AIControlAdapterDurableMatchOutcomeDecision result;
+	if (inputs.newMatchDetected)
+	{
+		result.action = "reset_for_new_match";
+		return result;
+	}
+	if (inputs.currentState == "victory" || inputs.currentState == "defeat" || inputs.currentState == "draw_or_unknown")
+	{
+		result.action = "persist_current_terminal";
+		return result;
+	}
+	if (inputs.hasCachedTerminal)
+	{
+		result.action = "return_cached_terminal";
+		return result;
+	}
+	if (inputs.hasDurableUnknown)
+	{
+		result.action = "return_cached_unknown";
+		return result;
+	}
+	if (!inputs.meaningfulContext)
+	{
+		if (inputs.hasLastActiveSnapshot)
+		{
+			result.action = "create_lost_context_unknown";
+			return result;
+		}
+	}
+	if (inputs.meaningfulContext && (inputs.currentState == "running" || inputs.currentState == "unknown"))
+	{
+		result.action = "cache_current_active";
+		return result;
+	}
+	result.action = "return_current";
+	return result;
+}
+
+std::vector<std::string> AIControlAdapterChooseRunDiagnosisHints(
+	const AIControlAdapterRunDiagnosisInputs& inputs)
+{
+	std::vector<std::string> hints;
+	if (inputs.reserveState == "depleted" || inputs.reserveState == "reserve_depleted")
+	{
+		hints.push_back("economy_reserve_depleted");
+	}
+	if (inputs.commandCenters <= 0)
+	{
+		hints.push_back("no_command_center");
+	}
+	if (inputs.workers <= 0)
+	{
+		hints.push_back("no_workers");
+	}
+	if (inputs.producers <= 0)
+	{
+		hints.push_back("no_producers");
+	}
+	if (inputs.defenseReserveDeficits > 0)
+	{
+		hints.push_back("zone_reserve_deficits");
+	}
+	if (inputs.stalledConstructionTasks > 0)
+	{
+		hints.push_back("stalled_construction_tasks");
+	}
+	if (inputs.knownEnemyWmd > 0)
+	{
+		hints.push_back("enemy_wmd_still_known");
+	}
+	if (inputs.activeAttackWaves <= 0)
+	{
+		hints.push_back("attack_waves_inactive");
+	}
+	return hints;
+}
+
+AIControlAdapterMatchParticipantResult AIControlAdapterClassifyMatchParticipant(
+	const AIControlAdapterMatchParticipantInputs& inputs)
+{
+	AIControlAdapterMatchParticipantResult result;
+	result.activeParticipant =
+		inputs.hasAssets ||
+		(inputs.local && inputs.slotOccupied && inputs.validStartPosition) ||
+		(inputs.slotOccupied && inputs.validStartPosition && inputs.validTemplate);
+	result.includedInOutcome = result.activeParticipant;
+	if (result.includedInOutcome)
+	{
+		result.nonParticipantReason = "";
+	}
+	else if (!inputs.slotPresent)
+	{
+		result.nonParticipantReason = "slot_missing";
+	}
+	else if (!inputs.slotOccupied)
+	{
+		result.nonParticipantReason = "closed_slot_or_no_assets";
+	}
+	else
+	{
+		result.nonParticipantReason = "no_assets_or_start_position";
+	}
+	return result;
+}
+
 AIControlAdapterZoneDefenseBudgetResult AIControlAdapterChooseZoneDefenseBudget(
 	const AIControlAdapterZoneDefenseBudgetInputs& inputs)
 {
@@ -936,7 +1327,16 @@ AIControlAdapterZoneDefenseBudgetResult AIControlAdapterChooseZoneDefenseBudget(
 		result.timeoutMs = 120000u;
 		result.allowFrontDonors = true;
 		result.criticalOverride = true;
-		result.reason = inputs.hasActiveCriticalAllocation ? "critical_preserve_other_fronts" : "critical_override";
+		result.reason = inputs.mainBaseCriticalOverride
+			? "main_base_critical_override"
+			: (inputs.hasActiveCriticalAllocation ? "critical_preserve_other_fronts" : "critical_override");
+		if (inputs.mainBaseCriticalOverride)
+		{
+			result.desiredDefenders = 20;
+			result.maxNewAssignments = 14;
+			result.minHoldMs = 60000u;
+			result.timeoutMs = 135000u;
+		}
 	}
 	else if (inputs.threatLevel == "high")
 	{
@@ -1004,7 +1404,8 @@ AIControlAdapterZoneDefenseBudgetResult AIControlAdapterChooseZoneDefenseBudget(
 	int allowedByReserve = std::max(0, availableAfterReserve);
 	if (result.criticalOverride)
 	{
-		allowedByReserve = std::max(0, inputs.availableIdleCombat - (inputs.hasActiveCriticalAllocation ? 4 : 2));
+		const int criticalReserve = inputs.mainBaseCriticalOverride ? 2 : (inputs.hasActiveCriticalAllocation ? 4 : 2);
+		allowedByReserve = std::max(0, inputs.availableIdleCombat - criticalReserve);
 	}
 	result.maxNewAssignments = std::max(0, std::min(result.maxNewAssignments, allowedByReserve));
 
@@ -1014,6 +1415,179 @@ AIControlAdapterZoneDefenseBudgetResult AIControlAdapterChooseZoneDefenseBudget(
 		result.reason = "allocation_pressure";
 	}
 
+	return result;
+}
+
+AIControlAdapterMainBaseCriticalOverrideResult AIControlAdapterEvaluateMainBaseCriticalOverride(
+	const AIControlAdapterMainBaseCriticalOverrideInputs& inputs)
+{
+	AIControlAdapterMainBaseCriticalOverrideResult result;
+	result.active = false;
+	result.reason = "no_core_pressure";
+
+	if (!inputs.isMainBase)
+	{
+		result.reason = "not_main_base";
+		return result;
+	}
+	if (inputs.localEnemyCount <= 0)
+	{
+		result.reason = "no_local_enemies";
+		return result;
+	}
+	if (inputs.threatLevel != "critical")
+	{
+		result.reason = "severity_below_threshold";
+		return result;
+	}
+	if (inputs.recentWmd)
+	{
+		result.active = true;
+		result.reason = "wmd_plus_local_enemies";
+		return result;
+	}
+	if (inputs.damagedStructures > 0 || inputs.destroyedStructures > 0)
+	{
+		result.active = true;
+		result.reason = "core_structure_under_attack";
+		return result;
+	}
+	if (inputs.repeatedCriticalDamageCount > 0)
+	{
+		result.active = true;
+		result.reason = "repeated_critical_damage";
+		return result;
+	}
+
+	return result;
+}
+
+AIControlAdapterZoneDefenseReserveResult AIControlAdapterChooseZoneDefenseReserve(
+	const AIControlAdapterZoneDefenseReserveInputs& inputs)
+{
+	AIControlAdapterZoneDefenseReserveResult result;
+	result.posture = "interior";
+	result.floor = 1;
+	result.productionNeeded = false;
+	result.reason = "interior";
+
+	if (inputs.isMainBase)
+	{
+		result.posture = "main_base";
+		result.floor = inputs.hasActiveThreat ? 10 : 8;
+		result.reason = inputs.hasActiveThreat ? "main_base_under_pressure" : "main_base";
+		result.productionNeeded = inputs.hasActiveThreat;
+		return result;
+	}
+
+	const bool activePressure =
+		inputs.hasActiveThreat &&
+		(inputs.threatSeverity >= 3 ||
+		 inputs.localEnemyCount > 0 ||
+		 inputs.enemyArtilleryCount > 0 ||
+		 inputs.damagedStructures > 0 ||
+		 inputs.destroyedStructures > 0);
+	const bool repeatedPressure =
+		inputs.recentAttackCount >= 2 ||
+		inputs.damagedStructures >= 2 ||
+		inputs.destroyedStructures > 0;
+	const bool quietDecayed = inputs.quietMs >= 120000u;
+
+	if ((inputs.isActiveZone || inputs.isFrontier || inputs.hasActiveAllocation) &&
+		!quietDecayed &&
+		(activePressure || repeatedPressure))
+	{
+		result.posture = "contested_front";
+		result.floor = 10;
+		result.reason = repeatedPressure ? "repeated_attack" : "sustained_pressure";
+		result.productionNeeded = true;
+		return result;
+	}
+
+	if (inputs.isActiveZone)
+	{
+		result.posture = "frontline";
+		result.floor = 6;
+		result.reason = quietDecayed ? "quiet_decay" : "active_front";
+		result.productionNeeded = inputs.hasActiveThreat;
+		return result;
+	}
+
+	if (inputs.isFrontier)
+	{
+		result.posture = "outer";
+		result.floor = 4;
+		result.reason = quietDecayed ? "quiet_decay" : "frontier";
+		result.productionNeeded = inputs.hasActiveThreat;
+		return result;
+	}
+
+	if (inputs.hasActiveThreat)
+	{
+		result.posture = "outer";
+		result.floor = 3;
+		result.reason = "threatened_interior_edge";
+		result.productionNeeded = true;
+		return result;
+	}
+
+	result.floor = 1;
+	return result;
+}
+
+AIControlAdapterZoneDefenseDonorFloorResult AIControlAdapterApplyZoneDefenseDonorFloor(
+	const AIControlAdapterZoneDefenseDonorFloorInputs& inputs)
+{
+	AIControlAdapterZoneDefenseDonorFloorResult result;
+	result.allowed = 0;
+	result.blocked = std::max(0, inputs.requested);
+	result.reason = "reserve_floor";
+
+	if (inputs.requested <= 0)
+	{
+		result.blocked = 0;
+		result.reason = "no_request";
+		return result;
+	}
+
+	if (inputs.mainBaseCriticalOverride)
+	{
+		result.allowed = std::min(inputs.requested, std::max(0, inputs.residentCount));
+		result.blocked = std::max(0, inputs.requested - result.allowed);
+		result.reason = "main_base_critical_override";
+		return result;
+	}
+
+	const int surplus = std::max(0, inputs.residentCount - inputs.floor);
+	result.allowed = std::min(inputs.requested, surplus);
+	result.blocked = std::max(0, inputs.requested - result.allowed);
+	if (result.allowed <= 0)
+	{
+		if (inputs.sourceHasThreat)
+		{
+			result.reason = "source_threatened";
+		}
+		else if (inputs.sourceIsContestedFront)
+		{
+			result.reason = "contested_front";
+		}
+		else if (inputs.sourceIsActiveFront)
+		{
+			result.reason = "active_front";
+		}
+		else if (inputs.sourceHasAllocation)
+		{
+			result.reason = "active_allocation";
+		}
+		else
+		{
+			result.reason = "reserve_floor";
+		}
+	}
+	else
+	{
+		result.reason = "surplus";
+	}
 	return result;
 }
 
@@ -1661,17 +2235,6 @@ AIControlAdapterTerrainFacts AIControlAdapterBuildTerrainFacts(
 	upperEntry.connects.push_back("upper_approach");
 	facts.features.push_back(upperEntry);
 
-	AIControlAdapterTerrainFeature lowerEntry;
-	lowerEntry.id = "death-valley-main-base-lower-entry";
-	lowerEntry.kind = "base_entrance";
-	lowerEntry.source = "manual_fixture";
-	lowerEntry.hasPosition = true;
-	lowerEntry.position = offset(820.0f, -390.0f);
-	lowerEntry.width = 450.0f;
-	lowerEntry.connects.push_back("main_base");
-	lowerEntry.connects.push_back("lower_approach");
-	facts.features.push_back(lowerEntry);
-
 	AIControlAdapterTerrainFeature lane;
 	lane.id = "death-valley-main-approach-lane";
 	lane.kind = "lane";
@@ -1930,7 +2493,9 @@ AIControlAdapterTerrainFacts AIControlAdapterMergeMapFileCacheFacts(
 			for (std::size_t i = 0; i < mapFileCacheFacts.features.size(); ++i)
 			{
 				const AIControlAdapterTerrainFeature& feature = mapFileCacheFacts.features[i];
-				if (feature.trusted && (feature.kind == "base_entrance" || feature.kind == "chokepoint"))
+				if (feature.id != "death-valley-main-base-lower-entry"
+					&& feature.trusted
+					&& (feature.kind == "base_entrance" || feature.kind == "chokepoint"))
 				{
 					hasTrustedCacheEntrance = true;
 					break;
@@ -1961,6 +2526,11 @@ AIControlAdapterTerrainFacts AIControlAdapterMergeMapFileCacheFacts(
 			for (std::size_t i = 0; i < mapFileCacheFacts.features.size(); ++i)
 			{
 				const AIControlAdapterTerrainFeature& feature = mapFileCacheFacts.features[i];
+				if (feature.id == "death-valley-main-base-lower-entry")
+				{
+					selected.mapFileCacheTelemetry["ignored_lower_entry"] = true;
+					continue;
+				}
 				if (existingIds.insert(feature.id).second)
 				{
 					selected.features.push_back(feature);
@@ -2153,7 +2723,24 @@ AIControlAdapterZoneTerrainResult AIControlAdapterApplyZoneTerrainFacts(
 	result.effectiveRadius = inputs.radius;
 	result.terrainLimited = false;
 	result.hasEntrance = false;
+	result.frontSource = "fallback";
 	result.reason = facts.features.empty() ? "unavailable" : "none";
+
+	float dirX = inputs.frontDirX;
+	float dirY = inputs.frontDirY;
+	const float dirLen = std::sqrt((dirX * dirX) + (dirY * dirY));
+	if (dirLen > 0.001f)
+	{
+		dirX /= dirLen;
+		dirY /= dirLen;
+	}
+	else
+	{
+		dirX = 1.0f;
+		dirY = 0.0f;
+	}
+	result.frontPoint = { inputs.centerX + (dirX * result.effectiveRadius), inputs.centerY + (dirY * result.effectiveRadius) };
+	result.rearPoint = { inputs.centerX - (dirX * result.effectiveRadius), inputs.centerY - (dirY * result.effectiveRadius) };
 
 	float nearestBarrierSq = std::numeric_limits<float>::max();
 	const AIControlAdapterTerrainFeature* nearestEntrance = nullptr;
@@ -2167,10 +2754,18 @@ AIControlAdapterZoneTerrainResult AIControlAdapterApplyZoneTerrainFacts(
 		{
 			nearestBarrierSq = std::min(nearestBarrierSq, distSq);
 		}
-		else if ((feature.kind == "base_entrance" || feature.kind == "chokepoint") && feature.hasPosition && distSq < nearestEntranceSq)
+		else if ((feature.kind == "base_entrance" || feature.kind == "chokepoint") && feature.hasPosition)
 		{
-			nearestEntranceSq = distSq;
-			nearestEntrance = &feature;
+			const AIControlAdapterTerrainPoint center = { inputs.centerX, inputs.centerY };
+			const float approachDx = feature.position.x - inputs.centerX;
+			const float approachDy = feature.position.y - inputs.centerY;
+			const bool towardFront = ((approachDx * dirX) + (approachDy * dirY)) >= -80.0f;
+			const bool crossesBarrier = AIControlAdapterSegmentCrossesBarrier(facts, center, feature.position);
+			if (towardFront && !crossesBarrier && distSq < nearestEntranceSq)
+			{
+				nearestEntranceSq = distSq;
+				nearestEntrance = &feature;
+			}
 		}
 	}
 
@@ -2183,6 +2778,8 @@ AIControlAdapterZoneTerrainResult AIControlAdapterApplyZoneTerrainFacts(
 			result.effectiveRadius = limitedRadius;
 			result.terrainLimited = true;
 			result.reason = "barrier";
+			result.frontPoint = { inputs.centerX + (dirX * result.effectiveRadius), inputs.centerY + (dirY * result.effectiveRadius) };
+			result.rearPoint = { inputs.centerX - (dirX * result.effectiveRadius), inputs.centerY - (dirY * result.effectiveRadius) };
 		}
 	}
 
@@ -2191,10 +2788,27 @@ AIControlAdapterZoneTerrainResult AIControlAdapterApplyZoneTerrainFacts(
 		result.hasEntrance = true;
 		result.entrancePosition = nearestEntrance->position;
 		result.entranceId = nearestEntrance->id;
+		result.frontPoint = nearestEntrance->position;
+		result.frontSource = nearestEntrance->kind == "chokepoint" ? "chokepoint" : "entrance";
+		const float rearDx = inputs.centerX - nearestEntrance->position.x;
+		const float rearDy = inputs.centerY - nearestEntrance->position.y;
+		const float rearLen = std::sqrt((rearDx * rearDx) + (rearDy * rearDy));
+		if (rearLen > 0.001f)
+		{
+			const float rearDistance = std::max(160.0f, result.effectiveRadius * 0.55f);
+			result.rearPoint = {
+				inputs.centerX + ((rearDx / rearLen) * rearDistance),
+				inputs.centerY + ((rearDy / rearLen) * rearDistance)
+			};
+		}
 		if (!result.terrainLimited)
 		{
 			result.reason = "entrance";
 		}
+	}
+	else if (result.terrainLimited)
+	{
+		result.frontSource = "terrain_limited";
 	}
 
 	return result;
