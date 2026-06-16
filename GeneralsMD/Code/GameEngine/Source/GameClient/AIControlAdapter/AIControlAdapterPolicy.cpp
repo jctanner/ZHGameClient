@@ -15,6 +15,11 @@
 
 namespace
 {
+	float AIControlAdapterClampUnitFloat(float value)
+	{
+		return std::max(0.0f, std::min(1.0f, value));
+	}
+
 	std::string AIControlAdapterLowerCopy(std::string value)
 	{
 		std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) -> unsigned char
@@ -173,6 +178,126 @@ namespace
 	}
 }
 
+AIControlAdapterProfilePolicyConfig AIControlAdapterResolveProfilePolicyConfig(
+	const std::string& profile,
+	float economyBias,
+	float aggressionBias,
+	float defenseBias,
+	float /*expansionBias*/,
+	float sprawlMultiplier)
+{
+	const std::string normalizedProfile = AIControlAdapterLowerCopy(profile);
+	const float econ = AIControlAdapterClampUnitFloat(economyBias);
+	const float aggro = AIControlAdapterClampUnitFloat(aggressionBias);
+	const float defense = AIControlAdapterClampUnitFloat(defenseBias);
+	const float multiplier = std::max(0.5f, std::min(10.0f, sprawlMultiplier));
+
+	AIControlAdapterProfilePolicyConfig config;
+	config.profile = normalizedProfile;
+	config.isBalancedSprawl = normalizedProfile == "sprawl_balanced";
+	config.isSprawlStyle = normalizedProfile == "sprawl" || config.isBalancedSprawl;
+	config.reserveCash = config.isBalancedSprawl ? 10000u : (normalizedProfile == "sprawl" ? 5000u : 0u);
+
+	config.workerMinIdle = (econ >= 0.70f || normalizedProfile == "economic" || config.isSprawlStyle) ? 2 : 1;
+	config.workerQueueCount = (econ >= 0.75f || normalizedProfile == "economic" || config.isSprawlStyle) ? 2 : 1;
+	config.workerCooldownMs = (normalizedProfile == "aggressive") ? 1500u : 2500u;
+	if (normalizedProfile == "sprawl")
+	{
+		config.workerMinIdle = 3;
+		config.workerQueueCount = 1;
+		config.workerCooldownMs = 2000u;
+	}
+	else if (config.isBalancedSprawl)
+	{
+		config.workerMinIdle = 2;
+		config.workerQueueCount = 1;
+		config.workerCooldownMs = 2500u;
+	}
+
+	config.stashWorkersPerStash = 8;
+	if (normalizedProfile == "economic" || config.isSprawlStyle || econ >= 0.70f)
+	{
+		config.stashWorkersPerStash = 10;
+	}
+	else if (normalizedProfile == "aggressive")
+	{
+		config.stashWorkersPerStash = 7;
+	}
+	config.stashWorkerCooldownMs = 5000u;
+	if (normalizedProfile == "sprawl")
+	{
+		config.stashWorkersPerStash = 3;
+		config.stashWorkerCooldownMs = 12000u;
+	}
+	else if (config.isBalancedSprawl)
+	{
+		config.stashWorkersPerStash = 6;
+		config.stashWorkerCooldownMs = 8000u;
+	}
+
+	config.attackMinUnits = 38;
+	config.attackGroupSize = 28;
+	config.attackCooldownMs = 18000u;
+	if (normalizedProfile == "aggressive" || aggro >= 0.70f)
+	{
+		config.attackMinUnits = 24;
+		config.attackGroupSize = 20;
+		config.attackCooldownMs = 12000u;
+	}
+	else if (normalizedProfile == "economic")
+	{
+		config.attackMinUnits = 50;
+		config.attackGroupSize = 34;
+		config.attackCooldownMs = 22000u;
+	}
+	else if (normalizedProfile == "defensive" || defense >= 0.70f)
+	{
+		config.attackMinUnits = 60;
+		config.attackGroupSize = 40;
+		config.attackCooldownMs = 26000u;
+	}
+	else if (normalizedProfile == "tech")
+	{
+		config.attackMinUnits = 44;
+		config.attackGroupSize = 30;
+		config.attackCooldownMs = 20000u;
+	}
+	else if (normalizedProfile == "sprawl")
+	{
+		config.attackMinUnits = 70;
+		config.attackGroupSize = 45;
+		config.attackCooldownMs = 26000u;
+	}
+	else if (config.isBalancedSprawl)
+	{
+		config.attackMinUnits = 55;
+		config.attackGroupSize = 28;
+		config.attackCooldownMs = 22000u;
+	}
+
+	config.sprawlSupplyCap = std::max(1, static_cast<int>(std::floor((config.isBalancedSprawl ? 3.0f : 4.0f) * multiplier)));
+	config.sprawlBarracksCap = std::max(1, static_cast<int>(std::floor((config.isBalancedSprawl ? 1.5f : 2.0f) * multiplier)));
+	config.sprawlArmsCap = std::max(1, static_cast<int>(std::floor((config.isBalancedSprawl ? 2.0f : 3.0f) * multiplier)));
+	config.sprawlMarketCap = std::max(1, static_cast<int>(std::floor((config.isBalancedSprawl ? 6.0f : 8.0f) * multiplier)));
+	config.sprawlTunnelCap = std::max(1, static_cast<int>(std::floor((config.isBalancedSprawl ? 5.0f : 8.0f) * multiplier)));
+	config.sprawlStingerCap = std::max(1, static_cast<int>(std::floor((config.isBalancedSprawl ? 4.0f : 6.0f) * multiplier)));
+
+	config.urgentZoneGapThreshold = 5;
+	config.normalMaxConcurrentExpansionStashes = 1;
+	if (config.isSprawlStyle && multiplier >= 5.0f)
+	{
+		config.normalMaxConcurrentExpansionStashes = config.isBalancedSprawl ? 2 : 3;
+	}
+	if (config.isSprawlStyle && multiplier >= 8.0f)
+	{
+		config.normalMaxConcurrentExpansionStashes = config.isBalancedSprawl ? 3 : 4;
+	}
+	config.allowExpansionBeforeFullRemoteFollowup = config.isSprawlStyle && multiplier >= 8.0f;
+	config.expansionHighCashFloatThreshold = 10000u;
+	config.scudStormHighCashFloatThreshold = 25000u;
+	return config;
+}
+
 bool AIControlAdapterShouldPauseCombatProduction(const AIControlAdapterProductionPolicyInputs& inputs)
 {
 	const bool ecoStructuresInProgress = (inputs.blackMarketsInProgress > 0 || inputs.supplyStashesInProgress > 0);
@@ -246,7 +371,24 @@ int AIControlAdapterGetEffectiveArmyCap(const AIControlAdapterEffectiveArmyCapPo
 	const int productionCapacity = std::max(0, inputs.barracks) + std::max(0, inputs.armsDealers);
 	const int productionCapacityCap = 100 + (productionCapacity * 3);
 	const int incomeSupportedCap = 100 + (std::max(0, inputs.incomePerMinute) / 500);
-	const int surplusCap = std::min(productionCapacityCap, incomeSupportedCap);
+	int cashMarketFloor = 0;
+	if (inputs.money >= 100000u && inputs.blackMarkets >= 8)
+	{
+		cashMarketFloor = 150;
+	}
+	if ((inputs.money >= 250000u || inputs.blackMarkets >= 20) && inputs.blackMarkets >= 8)
+	{
+		cashMarketFloor = std::max(cashMarketFloor, 220);
+	}
+	if (inputs.money >= 250000u && inputs.blackMarkets >= 20)
+	{
+		cashMarketFloor = std::max(cashMarketFloor, 260);
+	}
+	if (inputs.money >= 300000u && inputs.blackMarkets >= 20)
+	{
+		cashMarketFloor = std::max(cashMarketFloor, 300);
+	}
+	const int surplusCap = std::min(productionCapacityCap, std::max(incomeSupportedCap, cashMarketFloor));
 	const int cappedSurplusCap = std::min(300, surplusCap);
 	return std::max(baseArmyCap, cappedSurplusCap);
 }
@@ -654,9 +796,10 @@ AIControlAdapterZoneExpansionArbitrationResult AIControlAdapterChooseZoneExpansi
 	}
 
 	// Check build in progress
-	if (inputs.supplyStashesInProgress > 0)
+	const int maxConcurrentSupplyStashes = std::max(1, inputs.maxConcurrentSupplyStashes);
+	if (inputs.supplyStashesInProgress >= maxConcurrentSupplyStashes)
 	{
-		result.reason = "build_in_progress";
+		result.reason = maxConcurrentSupplyStashes > 1 ? "in_progress_cap" : "build_in_progress";
 		return result;
 	}
 
@@ -718,6 +861,64 @@ AIControlAdapterZoneExpansionArbitrationResult AIControlAdapterChooseZoneExpansi
 
 	// Below target but followup needed
 	result.reason = "followup_needed";
+	return result;
+}
+
+AIControlAdapterRemoteZoneFollowupResult AIControlAdapterChooseRemoteZoneFollowup(
+	const AIControlAdapterRemoteZoneFollowupInputs& inputs)
+{
+	AIControlAdapterRemoteZoneFollowupResult result;
+	if (!inputs.remoteZoneHasStash)
+	{
+		result.needsFollowup = false;
+		result.packageStage = "none";
+		result.reason = "no_remote_stash";
+		return result;
+	}
+
+	if (inputs.tunnels < 1)
+	{
+		result.needsFollowup = true;
+		result.packageStage = "tunnel";
+		result.reason = "needs_tunnel";
+		return result;
+	}
+
+	if (inputs.stingers < 1)
+	{
+		result.needsFollowup = true;
+		result.packageStage = "stinger";
+		result.reason = "needs_stinger";
+		return result;
+	}
+
+	if (inputs.allowExpansionBeforeFullRemoteFollowup)
+	{
+		result.needsFollowup = false;
+		result.packageStage = "seeded";
+		result.reason = "seeded_defense_sufficient";
+		return result;
+	}
+
+	if (inputs.barracks < 1)
+	{
+		result.needsFollowup = true;
+		result.packageStage = "barracks";
+		result.reason = "needs_barracks";
+		return result;
+	}
+
+	if (inputs.armsDealers < 1)
+	{
+		result.needsFollowup = true;
+		result.packageStage = "arms_dealer";
+		result.reason = "needs_arms_dealer";
+		return result;
+	}
+
+	result.needsFollowup = false;
+	result.packageStage = "complete";
+	result.reason = "full_followup_complete";
 	return result;
 }
 
@@ -3483,4 +3684,195 @@ AIControlAdapterZoneFrontRearPoints AIControlAdapterBuildZoneFrontRearPoints(
 		{ center.x + (dirDx * radius), center.y + (dirDy * radius) },
 		{ center.x - (dirDx * radius), center.y - (dirDy * radius) }
 	};
+}
+
+AIControlAdapterGarrisonCandidateDecision AIControlAdapterEvaluateGarrisonCandidate(
+	const AIControlAdapterGarrisonCandidateInput& input)
+{
+	AIControlAdapterGarrisonCandidateDecision decision;
+	if (!input.palace && !input.mapGarrison && !input.runtimeGarrisonable && !input.mapCacheGarrison)
+	{
+		decision.reason = "not_garrisonable";
+		return decision;
+	}
+	if (input.enemyOwned)
+	{
+		decision.reason = "enemy_owned";
+		return decision;
+	}
+	if (!input.friendlyOwned && !input.neutralOwned)
+	{
+		decision.reason = "unsafe";
+		return decision;
+	}
+
+	const bool mapStyleGarrison = input.mapGarrison || input.runtimeGarrisonable || input.mapCacheGarrison;
+	decision.capacity = input.palace ? 5 : 10;
+	decision.desiredInfantry = input.palace ? 4 : 8;
+	if (mapStyleGarrison && !input.nearArtilleryPlatform && !input.nearChokepoint && !input.zoneActive && !input.repeatedAttack)
+	{
+		decision.desiredInfantry = 4;
+		decision.capacity = 6;
+	}
+	if (decision.desiredInfantry > decision.capacity)
+	{
+		decision.desiredInfantry = decision.capacity;
+	}
+	if (input.existingAssigned >= decision.desiredInfantry)
+	{
+		decision.selected = true;
+		decision.reason = "full";
+		decision.score = 1;
+		return decision;
+	}
+	if (!input.zoneUseful)
+	{
+		decision.reason = "not_useful";
+		return decision;
+	}
+	if (input.distanceToZone > input.usefulRadius)
+	{
+		decision.reason = "too_far";
+		return decision;
+	}
+
+	decision.score = input.palace ? 120 : 70;
+	if (input.zoneActive)
+	{
+		decision.score += 45;
+	}
+	if (input.zoneDeveloped)
+	{
+		decision.score += 25;
+	}
+	if (input.repeatedAttack)
+	{
+		decision.score += 35;
+	}
+	if (input.nearArtilleryPlatform)
+	{
+		decision.score += 45;
+	}
+	if (input.nearChokepoint)
+	{
+		decision.score += 25;
+	}
+	if (input.neutralOwned)
+	{
+		decision.score -= 10;
+	}
+	decision.score -= static_cast<int>(input.distanceToZone / 120.0f);
+	if (decision.score < 1)
+	{
+		decision.score = 1;
+	}
+	decision.selected = true;
+	decision.reason = "selected";
+	return decision;
+}
+
+AIControlAdapterGarrisonProductionDecision AIControlAdapterChooseGarrisonProduction(
+	const AIControlAdapterGarrisonProductionInput& input)
+{
+	AIControlAdapterGarrisonProductionDecision decision;
+	if (input.desiredInfantry <= input.assignedInfantry)
+	{
+		decision.reason = "filled";
+		return decision;
+	}
+	if (!input.barracksReady)
+	{
+		decision.reason = "producer_missing";
+		return decision;
+	}
+	if (input.money < 300u)
+	{
+		decision.reason = "cash_below_unit_cost";
+		return decision;
+	}
+	if (input.money < input.reserveCash + 300u)
+	{
+		decision.reason = "reserve_protected";
+		return decision;
+	}
+
+	const int gap = input.desiredInfantry - input.assignedInfantry - input.availableInfantry - input.queuedInfantry;
+	if (gap <= 0)
+	{
+		decision.reason = "available_infantry";
+		return decision;
+	}
+	decision.productionNeeded = true;
+	decision.desiredQueued = gap > 2 ? 2 : gap;
+	decision.reason = "garrison_gap";
+	return decision;
+}
+
+AIControlAdapterGarrisonThroughputDecision AIControlAdapterEvaluateGarrisonThroughput(
+	const AIControlAdapterGarrisonThroughputInput& input)
+{
+	AIControlAdapterGarrisonThroughputDecision decision;
+	const int selected = std::max(0, input.selectedStructures);
+	const int filled = std::max(0, input.filledStructures);
+	const int structureGap = std::max(0, selected - filled);
+	const int infantryGap = std::max(0, input.desiredInfantry - std::max(input.assignedInfantry, input.enteredInfantry));
+	const unsigned int cashFloat = input.money > input.reserveCash ? input.money - input.reserveCash : 0u;
+	const int protectedReserve =
+		std::max(2, input.infantryReserve) +
+		std::max(0, input.activeScoutAssignments) +
+		std::max(0, input.activeRaidAssignments / 4) +
+		std::max(0, input.zoneDefenseReserved / 4);
+	decision.infantryReserveHeld = protectedReserve;
+
+	if (input.criticalEmergency)
+	{
+		decision.maxAssignmentsThisCycle = 0;
+		decision.mode = "hold";
+		decision.reason = "critical_emergency_reserve";
+		return decision;
+	}
+	if (selected <= 0 || infantryGap <= 0 || structureGap <= 0)
+	{
+		decision.maxAssignmentsThisCycle = 0;
+		decision.mode = "hold";
+		decision.reason = selected <= 0 ? "no_selected_garrisons" : "garrisons_filled";
+		return decision;
+	}
+
+	const int assignableInfantry = std::max(0, input.availableRpgInfantry - protectedReserve);
+	if (assignableInfantry <= 0)
+	{
+		decision.maxAssignmentsThisCycle = 0;
+		decision.mode = "hold";
+		decision.reason = "infantry_reserve_held";
+		if (input.barracksReady >= 4 && infantryGap >= 12 && cashFloat >= 15000u)
+		{
+			decision.productionFanout = std::min(4, std::max(1, input.barracksReady / 4));
+		}
+		return decision;
+	}
+
+	const bool accelerated =
+		cashFloat >= 25000u &&
+		input.barracksReady >= 6 &&
+		infantryGap >= 24 &&
+		assignableInfantry >= 8 &&
+		selected >= 4;
+	if (!accelerated)
+	{
+		decision.maxAssignmentsThisCycle = 1;
+		decision.mode = "normal";
+		decision.reason = "normal_pacing";
+		if (input.barracksReady >= 4 && infantryGap >= 12 && cashFloat >= 15000u)
+		{
+			decision.productionFanout = 1;
+		}
+		return decision;
+	}
+
+	decision.mode = "accelerated";
+	decision.reason = "late_game_high_gap";
+	decision.maxAssignmentsThisCycle = std::min(6, std::max(2, std::min(structureGap, assignableInfantry / 4)));
+	decision.productionFanout = std::min(4, std::max(2, std::min(input.barracksReady / 4, infantryGap / 8)));
+	return decision;
 }

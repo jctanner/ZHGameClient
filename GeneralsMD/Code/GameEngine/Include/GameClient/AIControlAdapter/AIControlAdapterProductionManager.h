@@ -110,6 +110,7 @@ struct ProductionManagerInputs
 	// Producer counts
 	int barracks;
 	int armsDealers;
+	int blackMarkets;
 	int palaces;
 	bool hasCompletedPalace;
 
@@ -165,6 +166,7 @@ struct ProductionManagerInputs
 		, radarVans(0)
 		, barracks(0)
 		, armsDealers(0)
+		, blackMarkets(0)
 		, palaces(0)
 		, hasCompletedPalace(false)
 		, queuedProductionEntries(0)

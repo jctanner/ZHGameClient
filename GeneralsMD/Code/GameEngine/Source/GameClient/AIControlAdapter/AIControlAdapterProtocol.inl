@@ -1125,6 +1125,18 @@
 				return;
 			}
 
+			if (cmd == "Game.Move")
+			{
+				std::string reason;
+				if (!executeGameMove(message, reason))
+				{
+					sendActionAck(requestId, false, "invalid_state", reason.c_str());
+					return;
+				}
+				sendActionAck(requestId, true);
+				return;
+			}
+
 			if (cmd == "Game.CaptureBuilding")
 			{
 				std::string reason;

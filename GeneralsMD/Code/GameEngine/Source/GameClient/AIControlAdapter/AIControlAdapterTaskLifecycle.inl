@@ -183,6 +183,26 @@ void adoptOrphanFoundations(Player* player)
 				continue;
 			}
 
+			DWORD tombstoneAgeMs = 0u;
+			std::string tombstoneReason;
+			if (m_autonomy.taskReservationManager.isFoundationTombstoned(
+				static_cast<unsigned int>(foundationId),
+				now,
+				&tombstoneAgeMs,
+				&tombstoneReason))
+			{
+				if (m_autonomy.taskReservationManager.shouldLogFoundationTombstoneSkip(static_cast<unsigned int>(foundationId), now))
+				{
+					adapterLog(
+						"orphan_foundation_skip foundation=%u template=%s reason=tombstoned_%s age_ms=%u",
+						static_cast<unsigned int>(foundationId),
+						templateName.c_str(),
+						tombstoneReason.c_str(),
+						tombstoneAgeMs);
+				}
+				continue;
+			}
+
 			// Check if anyone is actively building it
 			bool hasActiveBuilder = false;
 			unsigned int activeBuilderWorkerId = 0;
@@ -404,6 +424,7 @@ void updateConstructionTaskLifecycle(Player* player)
 					m_autonomy.taskReservationManager.completeTask(task->taskId, "structure_finished");
 					if (isPhase79StrategicFoundationTemplate(task->expectedTemplate))
 					{
+						m_autonomy.taskReservationManager.clearFoundationTombstone(static_cast<unsigned int>(foundFoundation->getID()));
 						m_autonomy.state.strategicFoundationHealth.erase(static_cast<UnsignedInt>(foundFoundation->getID()));
 						adapterLog(
 							"strategic_foundation_released template=%s foundation=%u reason=completed",
@@ -543,6 +564,7 @@ void updateConstructionTaskLifecycle(Player* player)
 				m_autonomy.taskReservationManager.failTask(task->taskId, "foundation_disappeared");
 				if (isPhase79StrategicFoundationTemplate(task->expectedTemplate))
 				{
+					m_autonomy.taskReservationManager.clearFoundationTombstone(task->targetObjectId);
 					AutonomyStrategicFoundationState& foundationState =
 						m_autonomy.state.strategicFoundationHealth[static_cast<UnsignedInt>(task->targetObjectId)];
 					foundationState.templateName = task->expectedTemplate;
@@ -680,6 +702,12 @@ void attemptAbandonedFoundationRecovery(Player* player)
 					stopIssued ? stopReason : stopCommandReason.c_str());
 				if (stopIssued)
 				{
+					m_autonomy.taskReservationManager.tombstoneStoppedFoundation(
+						static_cast<unsigned int>(foundation->getID()),
+						task->expectedTemplate,
+						*foundationPos,
+						strategicState->reason,
+						now);
 					m_autonomy.taskReservationManager.failTask(task->taskId, strategicState->reason);
 					adapterLog(
 						"strategic_foundation_released template=%s foundation=%u reason=%s",

@@ -154,7 +154,7 @@ static Int getNextSelectablePlayer(Int start)
 	{
 		LANGameSlot *slot = game->getLANSlot(j);
 		if (slot && slot->getStartPos() == -1 &&
-			( (j==game->getLocalSlotNum() && game->getConstSlot(j)->getPlayerTemplate()!=PLAYERTEMPLATE_OBSERVER)
+			( (slot->isOccupied() && game->getConstSlot(j)->getPlayerTemplate()!=PLAYERTEMPLATE_OBSERVER)
 			|| slot->isAI()))
 		{
 			return j;
@@ -1299,7 +1299,7 @@ WindowMsgHandledType LanGameOptionsMenuSystem( GameWindow *window, UnsignedInt m
 							if (playerIdxInPos >= 0)
 							{
 								LANGameSlot *slot = game->getLANSlot(playerIdxInPos);
-								if (playerIdxInPos == game->getLocalSlotNum() || (game->amIHost() && slot && slot->isAI()))
+								if (playerIdxInPos == game->getLocalSlotNum() || (game->amIHost() && slot && (slot->isAI() || slot->isHuman())))
 								{
 									// it's one of my type.  Try to change it.
 									Int nextPlayer = getNextSelectablePlayer(playerIdxInPos+1);
@@ -1350,7 +1350,7 @@ WindowMsgHandledType LanGameOptionsMenuSystem( GameWindow *window, UnsignedInt m
 					if (playerIdxInPos >= 0)
 					{
 						LANGameSlot *slot = game->getLANSlot(playerIdxInPos);
-						if (playerIdxInPos == game->getLocalSlotNum() || (game->amIHost() && slot && slot->isAI()))
+						if (playerIdxInPos == game->getLocalSlotNum() || (game->amIHost() && slot && (slot->isAI() || slot->isHuman())))
 						{
 							// it's one of my type.  Remove it.
 							handleStartPositionSelection(playerIdxInPos, -1);

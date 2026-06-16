@@ -33,6 +33,7 @@ int AIControlAdapterProductionManager::CalculateEffectiveArmyCap(const Productio
 		inputs.incomePerMinute,
 		inputs.barracks,
 		inputs.armsDealers,
+		inputs.blackMarkets,
 		baseMaxCap
 	});
 }

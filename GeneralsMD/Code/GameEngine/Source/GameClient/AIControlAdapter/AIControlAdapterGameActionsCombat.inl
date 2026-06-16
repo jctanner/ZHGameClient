@@ -4,6 +4,8 @@
 			bool success = false;
 			std::vector<unsigned int> assignedUnitIds;
 			Coord3D targetPosition = {0.0f, 0.0f, 0.0f};
+			Coord3D originPosition = {0.0f, 0.0f, 0.0f};
+			std::string raidMode;
 			std::string failureReason;
 		};
 
@@ -225,6 +227,117 @@
 			return ok;
 		}
 
+		bool executeGameMove(const nlohmann::json& message, std::string& reason)
+		{
+			if (TheGameLogic == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+
+			const auto argsIt = message.find("args");
+			if (argsIt == message.end() || !argsIt->is_object())
+			{
+				reason = "missing_args";
+				return false;
+			}
+
+			const auto xIt = argsIt->find("x");
+			const auto yIt = argsIt->find("y");
+			if (xIt == argsIt->end() || yIt == argsIt->end() || !xIt->is_number() || !yIt->is_number())
+			{
+				reason = "missing_target_position";
+				return false;
+			}
+
+			Coord3D target;
+			target.x = xIt->get<Real>();
+			target.y = yIt->get<Real>();
+			target.z = 0.0f;
+
+			std::vector<Int> objectIds;
+			const auto objectIdsIt = argsIt->find("object_ids");
+			if (objectIdsIt != argsIt->end() && objectIdsIt->is_array())
+			{
+				for (const auto& idNode : *objectIdsIt)
+				{
+					if (idNode.is_number_integer())
+					{
+						const Int id = idNode.get<Int>();
+						if (id > 0)
+						{
+							objectIds.push_back(id);
+						}
+					}
+				}
+			}
+			if (objectIds.empty())
+			{
+				const auto objectIdIt = argsIt->find("object_id");
+				if (objectIdIt != argsIt->end() && objectIdIt->is_number_integer())
+				{
+					const Int id = objectIdIt->get<Int>();
+					if (id > 0)
+					{
+						objectIds.push_back(id);
+					}
+				}
+			}
+			if (objectIds.empty())
+			{
+				reason = "missing_object_ids";
+				return false;
+			}
+
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr)
+			{
+				return false;
+			}
+
+			std::vector<ObjectID> selectedIds;
+			for (Int id : objectIds)
+			{
+				Object* obj = TheGameLogic->findObjectByID(static_cast<ObjectID>(id));
+				if (obj == nullptr || obj->isEffectivelyDead())
+				{
+					continue;
+				}
+				if (obj->getControllingPlayer() != player)
+				{
+					continue;
+				}
+				if (obj->getAI() == nullptr)
+				{
+					continue;
+				}
+
+				selectedIds.push_back(obj->getID());
+			}
+
+			if (selectedIds.empty())
+			{
+				reason = "no_valid_objects";
+				return false;
+			}
+			const bool ok = executeScopedSelectionCommand(player, selectedIds, reason, [&]() -> bool
+			{
+				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_MOVETO);
+				if (msg == nullptr)
+				{
+					reason = "message_stream_not_ready";
+					return false;
+				}
+				msg->appendLocationArgument(target);
+				return true;
+			});
+			if (ok)
+			{
+				recordAutonomyTelemetryEvent("scout", "Game.Move", "ok", &target);
+			}
+			return ok;
+		}
+
 		bool executeGameCaptureBuilding(const nlohmann::json& message, std::string& reason)
 		{
 			if (TheGameLogic == nullptr || TheActionManager == nullptr)
@@ -400,6 +513,8 @@
 			Int minUnits = 20;
 			Int groupSize = 20;
 			Real distance = 3000.0f;
+			bool deferCommand = false;
+			std::string raidMode = "vehicle";
 			if (argsIt != message.end() && argsIt->is_object())
 			{
 				const auto minUnitsIt = argsIt->find("min_units");
@@ -417,10 +532,24 @@
 				{
 					distance = std::max<Real>(256.0f, distanceIt->get<Real>());
 				}
+				const auto deferIt = argsIt->find("defer_command");
+				if (deferIt != argsIt->end() && deferIt->is_boolean())
+				{
+					deferCommand = deferIt->get<bool>();
+				}
+				const auto raidModeIt = argsIt->find("raid_mode");
+				if (raidModeIt != argsIt->end() && raidModeIt->is_string())
+				{
+					const std::string requestedMode = raidModeIt->get<std::string>();
+					if (requestedMode == "vehicle" || requestedMode == "infantry" || requestedMode == "mixed_local")
+					{
+						raidMode = requestedMode;
+					}
+				}
 			}
 
 			std::vector<Object*> combatUnits;
-			collectCombatUnitsForRaid(player, combatUnits);
+			collectCombatUnitsForRaid(player, combatUnits, false, raidMode);
 
 			if (static_cast<Int>(combatUnits.size()) < minUnits)
 			{
@@ -534,6 +663,8 @@
 			}
 
 			std::vector<ObjectID> selectedIds;
+			int selectedVehicles = 0;
+			int selectedInfantry = 0;
 			const std::size_t maxToCommand = std::min<std::size_t>(combatUnits.size(), static_cast<std::size_t>(groupSize));
 			for (std::size_t i = 0; i < maxToCommand; ++i)
 			{
@@ -543,6 +674,14 @@
 					continue;
 				}
 				selectedIds.push_back(obj->getID());
+				if (obj->isKindOf(KINDOF_INFANTRY))
+				{
+					++selectedInfantry;
+				}
+				if (obj->isKindOf(KINDOF_VEHICLE) || obj->isKindOf(KINDOF_AIRCRAFT))
+				{
+					++selectedVehicles;
+				}
 			}
 
 			if (selectedIds.empty())
@@ -550,24 +689,96 @@
 				reason = "no_valid_objects";
 				return false;
 			}
-
-			const bool commandSuccess = executeScopedSelectionCommand(player, selectedIds, reason, [&]() -> bool
+			const Real targetDx = target.x - anchor.x;
+			const Real targetDy = target.y - anchor.y;
+			const Real targetDistance = std::sqrt((targetDx * targetDx) + (targetDy * targetDy));
+			const CombatTaskRaidMixDecision mixDecision = evaluateCombatTaskRaidMixPolicy(selectedVehicles, selectedInfantry, targetDistance);
+			if (!mixDecision.shouldLaunch)
 			{
-				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_ATTACKMOVETO);
-				if (msg == nullptr)
+				reason = mixDecision.reason;
+				adapterLog(
+					"raid_mix_policy mode=%s selected_vehicles=%d selected_infantry=%d reason=%s",
+					mixDecision.mode,
+					selectedVehicles,
+					selectedInfantry,
+					mixDecision.reason);
+				return false;
+			}
+			if (!mixDecision.allowInfantry || !mixDecision.allowVehicles)
+			{
+				std::vector<ObjectID> filteredIds;
+				int filteredVehicles = 0;
+				int filteredInfantry = 0;
+				for (ObjectID selectedId : selectedIds)
 				{
-					reason = "message_stream_not_ready";
+					Object* selected = TheGameLogic->findObjectByID(selectedId);
+					if (selected == nullptr || selected->isEffectivelyDead())
+					{
+						continue;
+					}
+					const bool infantry = selected->isKindOf(KINDOF_INFANTRY);
+					const bool vehicle = selected->isKindOf(KINDOF_VEHICLE) || selected->isKindOf(KINDOF_AIRCRAFT);
+					if (infantry && !mixDecision.allowInfantry)
+					{
+						continue;
+					}
+					if (vehicle && !mixDecision.allowVehicles)
+					{
+						continue;
+					}
+					filteredIds.push_back(selectedId);
+					if (infantry)
+					{
+						++filteredInfantry;
+					}
+					if (vehicle)
+					{
+						++filteredVehicles;
+					}
+				}
+				selectedIds = filteredIds;
+				selectedVehicles = filteredVehicles;
+				selectedInfantry = filteredInfantry;
+				if (selectedIds.empty())
+				{
+					reason = "no_valid_objects_after_mix_filter";
 					return false;
 				}
-				msg->appendLocationArgument(target);
-				return true;
-			});
+			}
+			adapterLog(
+				"raid_mix_policy mode=%s selected_vehicles=%d selected_infantry=%d reason=%s",
+				mixDecision.mode,
+				selectedVehicles,
+				selectedInfantry,
+				mixDecision.reason);
+
+			bool commandSuccess = true;
+			if (!deferCommand)
+			{
+				commandSuccess = executeScopedSelectionCommand(player, selectedIds, reason, [&]() -> bool
+				{
+					GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_ATTACKMOVETO);
+					if (msg == nullptr)
+					{
+						reason = "message_stream_not_ready";
+						return false;
+					}
+					msg->appendLocationArgument(target);
+					return true;
+				});
+			}
+			else
+			{
+				reason.clear();
+			}
 
 			// Phase 9.0: Populate result structure for combat task creation
 			if (outResult != nullptr)
 			{
 				outResult->success = commandSuccess;
 				outResult->targetPosition = target;
+				outResult->originPosition = anchor;
+				outResult->raidMode = mixDecision.mode;
 				if (commandSuccess)
 				{
 					outResult->assignedUnitIds.reserve(selectedIds.size());
@@ -707,9 +918,17 @@
 			}
 			for (ObjectID skippedId : collectCtx.skippedGarrisonReservedUnits)
 			{
-				adapterLog(
-					"guard_skip_reserved_garrison unit=%u reason=garrison_assignment",
-					static_cast<unsigned int>(skippedId));
+				const DWORD now = ::GetTickCount();
+				const std::string logKey =
+					std::string("garrison:guard:") +
+					std::to_string(static_cast<unsigned int>(skippedId)) +
+					":garrison_assignment";
+				if (shouldLogScoutReservationSkip(logKey, now))
+				{
+					adapterLog(
+						"guard_skip_reserved_garrison unit=%u reason=garrison_assignment",
+						static_cast<unsigned int>(skippedId));
+				}
 			}
 
 			if (collectCtx.commands.empty())
