@@ -151,6 +151,14 @@
 			techManager.Reset();
 			state.sprawlMultiplier = 1.0f;
 			state.zoneRadius = 300.0f;
+			state.hasUrgentZoneGapThresholdOverride = false;
+			state.urgentZoneGapThresholdOverride = 0;
+			state.hasMaxConcurrentExpansionStashesOverride = false;
+			state.maxConcurrentExpansionStashesOverride = 0;
+			state.hasAllowExpansionBeforeFullRemoteFollowupOverride = false;
+			state.allowExpansionBeforeFullRemoteFollowupOverride = false;
+			state.hasExpansionHighCashFloatThresholdOverride = false;
+			state.expansionHighCashFloatThresholdOverride = 0u;
 			state.lastAppliedTick = 0u;
 			state.nextMacroTick = 0u;
 			state.nextProductionTick = 0u;

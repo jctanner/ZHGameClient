@@ -243,11 +243,108 @@ void AIControlAdapterTaskReservationManager::pruneExpiredTasks(DWORD currentTick
 	{
 		reservations.erase(taskId);
 	}
+
+	std::vector<unsigned int> tombstonesToRemove;
+	for (const auto& pair : stoppedFoundationTombstones)
+	{
+		const StoppedFoundationTombstone& tombstone = pair.second;
+		if (currentTick >= tombstone.expiresTick)
+		{
+			tombstonesToRemove.push_back(pair.first);
+		}
+	}
+	for (unsigned int foundationObjectId : tombstonesToRemove)
+	{
+		stoppedFoundationTombstones.erase(foundationObjectId);
+	}
 }
 
 void AIControlAdapterTaskReservationManager::removeTask(unsigned int taskId)
 {
 	reservations.erase(taskId);
+}
+
+void AIControlAdapterTaskReservationManager::tombstoneStoppedFoundation(
+	unsigned int foundationObjectId,
+	const std::string& expectedTemplate,
+	const Coord3D& position,
+	const std::string& reason,
+	DWORD currentTick,
+	unsigned int ttlMs)
+{
+	if (foundationObjectId == 0u)
+	{
+		return;
+	}
+
+	StoppedFoundationTombstone tombstone;
+	tombstone.foundationObjectId = foundationObjectId;
+	tombstone.expectedTemplate = expectedTemplate;
+	tombstone.position = position;
+	tombstone.reason = reason;
+	tombstone.createdTick = currentTick;
+	tombstone.expiresTick = currentTick + ttlMs;
+	tombstone.lastSkipLogTick = 0u;
+	stoppedFoundationTombstones[foundationObjectId] = tombstone;
+}
+
+bool AIControlAdapterTaskReservationManager::isFoundationTombstoned(
+	unsigned int foundationObjectId,
+	DWORD currentTick,
+	DWORD* ageMs,
+	std::string* reason) const
+{
+	auto it = stoppedFoundationTombstones.find(foundationObjectId);
+	if (it == stoppedFoundationTombstones.end())
+	{
+		return false;
+	}
+
+	const StoppedFoundationTombstone& tombstone = it->second;
+	if (currentTick >= tombstone.expiresTick)
+	{
+		return false;
+	}
+
+	if (ageMs != nullptr)
+	{
+		*ageMs = currentTick - tombstone.createdTick;
+	}
+	if (reason != nullptr)
+	{
+		*reason = tombstone.reason;
+	}
+	return true;
+}
+
+bool AIControlAdapterTaskReservationManager::shouldLogFoundationTombstoneSkip(
+	unsigned int foundationObjectId,
+	DWORD currentTick,
+	unsigned int throttleMs)
+{
+	auto it = stoppedFoundationTombstones.find(foundationObjectId);
+	if (it == stoppedFoundationTombstones.end())
+	{
+		return false;
+	}
+
+	StoppedFoundationTombstone& tombstone = it->second;
+	if (currentTick >= tombstone.expiresTick)
+	{
+		return false;
+	}
+	if (tombstone.lastSkipLogTick != 0u && currentTick < tombstone.lastSkipLogTick + throttleMs)
+	{
+		return false;
+	}
+
+	tombstone.lastSkipLogTick = currentTick;
+	return true;
+}
+
+void AIControlAdapterTaskReservationManager::clearFoundationTombstone(unsigned int foundationObjectId)
+{
+	stoppedFoundationTombstones.erase(foundationObjectId);
 }
 
 std::vector<SpecialTaskReservation*> AIControlAdapterTaskReservationManager::findBuildTasks(const std::string& templateFilter)

@@ -290,6 +290,63 @@ TEST_F(AIControlAdapterTaskReservationTests, FindBuildTasks_ExcludesTerminalBuil
 	EXPECT_EQ(scudTasks[0]->taskId, activeTask);
 }
 
+TEST_F(AIControlAdapterTaskReservationTests, StoppedFoundationTombstone_BlocksOrphanReadoptionDuringCooldown)
+{
+	manager.tombstoneStoppedFoundation(
+		2815,
+		"GLAScudStorm",
+		Coord3D{1398.5f, 4673.1f, 0.0f},
+		"stopped_stale_no_progress",
+		1000,
+		120000);
+
+	DWORD ageMs = 0;
+	std::string reason;
+	EXPECT_TRUE(manager.isFoundationTombstoned(2815, 17000, &ageMs, &reason));
+	EXPECT_EQ(ageMs, 16000u);
+	EXPECT_EQ(reason, "stopped_stale_no_progress");
+}
+
+TEST_F(AIControlAdapterTaskReservationTests, StoppedFoundationTombstone_SkipLogIsThrottled)
+{
+	manager.tombstoneStoppedFoundation(
+		2815,
+		"GLAScudStorm",
+		Coord3D{1398.5f, 4673.1f, 0.0f},
+		"stopped_stale_no_progress",
+		1000,
+		120000);
+
+	EXPECT_TRUE(manager.shouldLogFoundationTombstoneSkip(2815, 17000, 5000));
+	EXPECT_FALSE(manager.shouldLogFoundationTombstoneSkip(2815, 18000, 5000));
+	EXPECT_TRUE(manager.shouldLogFoundationTombstoneSkip(2815, 22000, 5000));
+}
+
+TEST_F(AIControlAdapterTaskReservationTests, StoppedFoundationTombstone_ExpiresAndCanBeCleared)
+{
+	manager.tombstoneStoppedFoundation(
+		2815,
+		"GLAScudStorm",
+		Coord3D{1398.5f, 4673.1f, 0.0f},
+		"stopped_stale_no_progress",
+		1000,
+		120000);
+
+	EXPECT_FALSE(manager.isFoundationTombstoned(2815, 121000));
+
+	manager.tombstoneStoppedFoundation(
+		2815,
+		"GLAScudStorm",
+		Coord3D{1398.5f, 4673.1f, 0.0f},
+		"stopped_stale_no_progress",
+		200000,
+		120000);
+	EXPECT_TRUE(manager.isFoundationTombstoned(2815, 201000));
+
+	manager.clearFoundationTombstone(2815);
+	EXPECT_FALSE(manager.isFoundationTombstoned(2815, 202000));
+}
+
 TEST_F(AIControlAdapterTaskReservationTests, FindActiveTasks_ExcludesTerminalStates)
 {
 	const unsigned int task1 = manager.createReservation(

@@ -3556,6 +3556,46 @@
 			return std::string();
 		}
 
+		std::string inferTechnicalTemplateForProducer(Object* producer) const
+		{
+			if (producer == nullptr || TheThingFactory == nullptr || TheBuildAssistant == nullptr)
+			{
+				return std::string();
+			}
+			auto isPotentiallyQueueable = [&](const ThingTemplate* tt) -> bool
+			{
+				if (tt == nullptr)
+				{
+					return false;
+				}
+				const CanMakeType canMake = TheBuildAssistant->canMakeUnit(producer, tt);
+				return canMake == CANMAKE_OK ||
+					canMake == CANMAKE_NO_MONEY ||
+					canMake == CANMAKE_QUEUE_FULL ||
+					canMake == CANMAKE_PARKING_PLACES_FULL;
+			};
+			const char* candidates[] = {
+				"GLAVehicleTechnical"
+			};
+			for (const char* name : candidates)
+			{
+				const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(name), false);
+				if (tt != nullptr && isPotentiallyQueueable(tt))
+				{
+					return name;
+				}
+			}
+			for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
+			{
+				const std::string templateName = tt->getName().str();
+				if (containsIgnoreCase(templateName, "technical") && isPotentiallyQueueable(tt))
+				{
+					return templateName;
+				}
+			}
+			return std::string();
+		}
+
 		std::string inferRadarVanTemplateForProducer(Object* producer) const
 		{
 			if (producer == nullptr || TheThingFactory == nullptr || TheBuildAssistant == nullptr)

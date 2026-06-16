@@ -38,6 +38,23 @@
 #include "Common/UserPreferences.h"
 #include "GameNetwork/LANAPI.h"
 #include "GameNetwork/LANAPICallbacks.h"
+#include <cstdarg>
+#include <cstdio>
+
+static void LanApiTrace(const char* format, ...)
+{
+	FILE* file = fopen("Z:\\tmp\\lanapi.log", "a");
+	if (!file)
+		return;
+
+	fprintf(file, "lanapi ");
+	va_list args;
+	va_start(args, format);
+	vfprintf(file, format, args);
+	va_end(args);
+	fprintf(file, "\n");
+	fclose(file);
+}
 #include "GameClient/MapUtil.h"
 
 void LANAPI::handleRequestLocations( LANMessage *msg, UnsignedInt senderIP )
@@ -98,12 +115,15 @@ void LANAPI::handleRequestLocations( LANMessage *msg, UnsignedInt senderIP )
 
 void LANAPI::handleGameAnnounce( LANMessage *msg, UnsignedInt senderIP )
 {
+	LanApiTrace("recv_game_announce sender=%d.%d.%d.%d local=%d.%d.%d.%d direct_remote=%d.%d.%d.%d in_progress_game=%d current_game=%d", PRINTF_IP_AS_4_INTS(senderIP), PRINTF_IP_AS_4_INTS(m_localIP), PRINTF_IP_AS_4_INTS(m_directConnectRemoteIP), (m_currentGame && m_currentGame->isGameInProgress()) ? 1 : 0, m_currentGame ? 1 : 0);
 	if (senderIP == m_localIP)
 	{
+		LanApiTrace("ignore_game_announce reason=self sender=%d.%d.%d.%d", PRINTF_IP_AS_4_INTS(senderIP));
 		return; // Don't try to update own info
 	}
 	else if (m_currentGame && m_currentGame->isGameInProgress())
 	{
+		LanApiTrace("ignore_game_announce reason=in_progress sender=%d.%d.%d.%d", PRINTF_IP_AS_4_INTS(senderIP));
 		return; // Don't care about games if we're playing
 	}
 	else if (senderIP == m_directConnectRemoteIP)
@@ -124,11 +144,13 @@ void LANAPI::handleGameAnnounce( LANMessage *msg, UnsignedInt senderIP )
 			game->setLastHeard(timeGetTime());
 			if (!success)
 			{
+				LanApiTrace("direct_game_options_parse_failed sender=%d.%d.%d.%d", PRINTF_IP_AS_4_INTS(senderIP));
 				// remove from list
 				removeGame(game);
 				delete game;
 				return;
 			}
+			LanApiTrace("direct_game_options_ok sender=%d.%d.%d.%d host_slot_ip=%d.%d.%d.%d direct=%d", PRINTF_IP_AS_4_INTS(senderIP), PRINTF_IP_AS_4_INTS(game->getSlot(0)->getIP()), msg->GameInfo.isDirectConnect ? 1 : 0);
 			RequestGameJoin(game, m_directConnectRemoteIP);
 		}
 	}
@@ -183,6 +205,7 @@ void LANAPI::handleLobbyAnnounce( LANMessage *msg, UnsignedInt senderIP )
 
 void LANAPI::handleRequestGameInfo( LANMessage *msg, UnsignedInt senderIP )
 {
+	LanApiTrace("recv_request_game_info sender=%d.%d.%d.%d local=%d.%d.%d.%d current_game=%d host=%d in_lobby=%d", PRINTF_IP_AS_4_INTS(senderIP), PRINTF_IP_AS_4_INTS(m_localIP), m_currentGame ? 1 : 0, (m_currentGame && m_currentGame->getIP(0) == m_localIP) ? 1 : 0, m_inLobby ? 1 : 0);
 	// In game - are we a game host?
 	if (m_currentGame)
 	{
@@ -197,9 +220,18 @@ void LANAPI::handleRequestGameInfo( LANMessage *msg, UnsignedInt senderIP )
 			wcslcpy(reply.GameInfo.gameName, m_currentGame->getName().str(), ARRAY_SIZE(reply.GameInfo.gameName));
 			reply.GameInfo.inProgress = m_currentGame->isGameInProgress();
 			reply.GameInfo.isDirectConnect = m_currentGame->getIsDirectConnect();
+			LanApiTrace("send_game_announce target=%d.%d.%d.%d host_slot_ip=%d.%d.%d.%d options_len=%d direct=%d in_progress=%d", PRINTF_IP_AS_4_INTS(senderIP), PRINTF_IP_AS_4_INTS(m_currentGame->getSlot(0)->getIP()), gameOpts.getLength(), reply.GameInfo.isDirectConnect ? 1 : 0, reply.GameInfo.inProgress ? 1 : 0);
 
 			sendMessage(&reply, senderIP);
 		}
+		else
+		{
+			LanApiTrace("ignore_request_game_info reason=not_host sender=%d.%d.%d.%d current_host_ip=%d.%d.%d.%d local=%d.%d.%d.%d", PRINTF_IP_AS_4_INTS(senderIP), PRINTF_IP_AS_4_INTS(m_currentGame->getIP(0)), PRINTF_IP_AS_4_INTS(m_localIP));
+		}
+	}
+	else
+	{
+		LanApiTrace("ignore_request_game_info reason=no_current_game sender=%d.%d.%d.%d", PRINTF_IP_AS_4_INTS(senderIP));
 	}
 }
 
@@ -255,8 +287,10 @@ void LANAPI::handleRequestJoin( LANMessage *msg, UnsignedInt senderIP )
 
 	if (msg->GameToJoin.gameIP != m_localIP)
 	{
+		LanApiTrace("ignore_request_join reason=game_ip_mismatch sender=%d.%d.%d.%d game_ip=%d.%d.%d.%d local=%d.%d.%d.%d", PRINTF_IP_AS_4_INTS(senderIP), PRINTF_IP_AS_4_INTS(msg->GameToJoin.gameIP), PRINTF_IP_AS_4_INTS(m_localIP));
 		return; // Not us.  Ignore it.
 	}
+	LanApiTrace("recv_request_join sender=%d.%d.%d.%d local=%d.%d.%d.%d current_game=%d in_lobby=%d", PRINTF_IP_AS_4_INTS(senderIP), PRINTF_IP_AS_4_INTS(m_localIP), m_currentGame ? 1 : 0, m_inLobby ? 1 : 0);
 	LANMessage reply;
 	fillInLANMessage( &reply );
 	if (!m_inLobby && m_currentGame && m_currentGame->getIP(0) == m_localIP)
@@ -392,9 +426,10 @@ void LANAPI::handleRequestJoin( LANMessage *msg, UnsignedInt senderIP )
 					newSlot.setSerial(msg->GameToJoin.serial);
 					m_currentGame->setSlot(player,newSlot);
 					DEBUG_LOG(("LANAPI::handleRequestJoin - added player %ls at ip 0x%08x to the game", msg->name, senderIP));
+					LanApiTrace("join_accept sender=%d.%d.%d.%d slot=%d", PRINTF_IP_AS_4_INTS(senderIP), player);
 
 					OnPlayerJoin(player, UnicodeString(msg->name));
-					responseIP = 0;
+					responseIP = senderIP;
 
 					break;
 				}
@@ -419,11 +454,13 @@ void LANAPI::handleRequestJoin( LANMessage *msg, UnsignedInt senderIP )
 		reply.GameNotJoined.playerIP = senderIP;
 	}
 	sendMessage(&reply, responseIP);
+	LanApiTrace("send_join_reply sender=%d.%d.%d.%d response_ip=%d.%d.%d.%d type=%u", PRINTF_IP_AS_4_INTS(senderIP), PRINTF_IP_AS_4_INTS(responseIP), reply.messageType);
 	RequestGameOptions(GenerateGameOptionsString(), true);
 }
 
 void LANAPI::handleJoinAccept( LANMessage *msg, UnsignedInt senderIP )
 {
+	LanApiTrace("recv_join_accept sender=%d.%d.%d.%d player_ip=%d.%d.%d.%d local=%d.%d.%d.%d pending=%d", PRINTF_IP_AS_4_INTS(senderIP), PRINTF_IP_AS_4_INTS(msg->GameJoined.playerIP), PRINTF_IP_AS_4_INTS(m_localIP), m_pendingAction);
 	if (msg->GameJoined.playerIP == m_localIP) // Is it for us?
 	{
 		if (m_pendingAction == ACT_JOIN) // Are we trying to join?

@@ -56,6 +56,111 @@ namespace
 int main()
 {
 	{
+		const AIControlAdapterProfilePolicyConfig config = AIControlAdapterResolveProfilePolicyConfig(
+			"sprawl_balanced",
+			0.65f,
+			0.35f,
+			0.45f,
+			0.55f,
+			10.0f);
+		expect(config.isBalancedSprawl, "profile config should identify balanced sprawl");
+		expect(config.isSprawlStyle, "balanced sprawl should be sprawl style");
+		expect(config.reserveCash == 10000u, "balanced sprawl should resolve 10000 reserve");
+		expect(config.workerMinIdle == 2, "balanced sprawl should keep two idle workers");
+		expect(config.workerQueueCount == 1, "balanced sprawl should queue one worker per pulse");
+		expect(config.stashWorkersPerStash == 6, "balanced sprawl should keep tuned stash worker target");
+		expect(config.attackMinUnits == 55, "balanced sprawl should keep current attack threshold");
+		expect(config.attackGroupSize == 28, "balanced sprawl should keep current attack group size");
+		expect(config.sprawlSupplyCap == 30, "balanced sprawl multiplier 10 should resolve 30 supply zones");
+		expect(config.sprawlBarracksCap == 15, "balanced sprawl multiplier 10 should resolve 15 barracks");
+		expect(config.sprawlArmsCap == 20, "balanced sprawl multiplier 10 should resolve 20 arms dealers");
+		expect(config.sprawlMarketCap == 60, "balanced sprawl multiplier 10 should resolve 60 markets");
+		expect(config.sprawlTunnelCap == 50, "balanced sprawl multiplier 10 should resolve 50 tunnels");
+		expect(config.sprawlStingerCap == 40, "balanced sprawl multiplier 10 should resolve 40 stingers");
+		expect(config.urgentZoneGapThreshold == 5, "profile config should expose urgent expansion gap threshold");
+		expect(config.normalMaxConcurrentExpansionStashes == 3, "maxed balanced sprawl should allow three concurrent expansion stashes");
+		expect(config.allowExpansionBeforeFullRemoteFollowup, "maxed balanced sprawl should allow seeded zones before full follow-up");
+	}
+
+	{
+		const AIControlAdapterProfilePolicyConfig config = AIControlAdapterResolveProfilePolicyConfig(
+			"sprawl",
+			0.65f,
+			0.35f,
+			0.45f,
+			0.55f,
+			10.0f);
+		expect(!config.isBalancedSprawl, "plain sprawl should not be balanced sprawl");
+		expect(config.isSprawlStyle, "plain sprawl should be sprawl style");
+		expect(config.reserveCash == 5000u, "plain sprawl should resolve 5000 reserve");
+		expect(config.workerMinIdle == 3, "plain sprawl should keep current worker idle target");
+		expect(config.stashWorkersPerStash == 3, "plain sprawl should keep current stash worker target");
+		expect(config.attackMinUnits == 70, "plain sprawl should keep current attack threshold");
+		expect(config.sprawlSupplyCap == 40, "plain sprawl multiplier 10 should resolve 40 supply zones");
+		expect(config.sprawlTunnelCap == 80, "plain sprawl multiplier 10 should resolve 80 tunnels");
+		expect(config.normalMaxConcurrentExpansionStashes == 4, "maxed plain sprawl should allow four concurrent expansion stashes");
+		expect(config.allowExpansionBeforeFullRemoteFollowup, "maxed plain sprawl should allow seeded zones before full follow-up");
+	}
+
+	{
+		const AIControlAdapterProfilePolicyConfig config = AIControlAdapterResolveProfilePolicyConfig(
+			"aggressive",
+			0.5f,
+			0.5f,
+			0.5f,
+			0.5f,
+			20.0f);
+		expect(!config.isSprawlStyle, "aggressive should not be sprawl style");
+		expect(config.reserveCash == 0u, "non-sprawl profiles should resolve no sprawl reserve");
+		expect(config.workerCooldownMs == 1500u, "aggressive should keep fast worker cooldown");
+		expect(config.attackMinUnits == 24, "aggressive profile should keep current attack threshold");
+		expect(config.sprawlSupplyCap == 40, "sprawl multiplier should be clamped to 10");
+		expect(config.normalMaxConcurrentExpansionStashes == 1, "non-sprawl profiles should keep one concurrent expansion stash");
+		expect(!config.allowExpansionBeforeFullRemoteFollowup, "non-sprawl profiles should require normal follow-up semantics");
+	}
+
+	{
+		const AIControlAdapterRemoteZoneFollowupResult result = AIControlAdapterChooseRemoteZoneFollowup({
+			true,  // remoteZoneHasStash
+			1,     // tunnels
+			0,     // barracks
+			0,     // armsDealers
+			1,     // stingers
+			true   // allowExpansionBeforeFullRemoteFollowup
+		});
+		expect(!result.needsFollowup, "max-sprawl seed policy should allow expansion after tunnel and stinger are present");
+		expect(std::string(result.packageStage) == "seeded", "seeded zone should expose seeded stage");
+		expect(std::string(result.reason) == "seeded_defense_sufficient", "seeded zone should expose concrete reason");
+	}
+
+	{
+		const AIControlAdapterRemoteZoneFollowupResult result = AIControlAdapterChooseRemoteZoneFollowup({
+			true,  // remoteZoneHasStash
+			1,     // tunnels
+			0,     // barracks
+			0,     // armsDealers
+			1,     // stingers
+			false  // allowExpansionBeforeFullRemoteFollowup
+		});
+		expect(result.needsFollowup, "normal policy should still require production follow-up after defenses");
+		expect(std::string(result.packageStage) == "barracks", "normal follow-up should request barracks next");
+		expect(std::string(result.reason) == "needs_barracks", "normal follow-up should expose barracks reason");
+	}
+
+	{
+		const AIControlAdapterRemoteZoneFollowupResult result = AIControlAdapterChooseRemoteZoneFollowup({
+			true,  // remoteZoneHasStash
+			0,     // tunnels
+			0,     // barracks
+			0,     // armsDealers
+			0,     // stingers
+			true   // allowExpansionBeforeFullRemoteFollowup
+		});
+		expect(result.needsFollowup, "seed policy should still require first defensive seed");
+		expect(std::string(result.packageStage) == "tunnel", "first seed package stage should be tunnel");
+	}
+
+	{
 		const AIControlAdapterProductionPolicyInputs inputs = {
 			false,
 			false,
@@ -236,6 +341,7 @@ int main()
 		100000,
 		20,
 		42,
+		0,
 		100
 	}) == 100, "balanced sprawl should keep the normal army cap below surplus-cash pressure");
 	expect(AIControlAdapterGetEffectiveArmyCap({
@@ -244,6 +350,7 @@ int main()
 		93000,
 		20,
 		42,
+		0,
 		100
 	}) == 286, "balanced sprawl should scale army cap with production capacity under surplus-cash pressure");
 	expect(AIControlAdapterGetEffectiveArmyCap({
@@ -252,6 +359,7 @@ int main()
 		10000,
 		20,
 		42,
+		0,
 		100
 	}) == 120, "balanced sprawl should limit surplus army cap when net income is modest");
 	expect(AIControlAdapterGetEffectiveArmyCap({
@@ -260,6 +368,7 @@ int main()
 		-1000,
 		20,
 		42,
+		0,
 		100
 	}) == 100, "balanced sprawl should not raise army cap while net cash flow is negative");
 	expect(AIControlAdapterGetEffectiveArmyCap({
@@ -268,6 +377,7 @@ int main()
 		200000,
 		100,
 		100,
+		0,
 		100
 	}) == 300, "balanced sprawl surplus army cap should stay bounded");
 	expect(AIControlAdapterGetEffectiveArmyCap({
@@ -276,8 +386,45 @@ int main()
 		0,
 		20,
 		42,
+		0,
 		9999
 	}) == 9999, "non-balanced profiles should keep their configured army cap");
+	expect(AIControlAdapterGetEffectiveArmyCap({
+		true,
+		300000u,
+		-1000,
+		17,
+		22,
+		27,
+		100
+	}) == 217, "mature balanced sprawl economy should not collapse to base cap on a negative income sample");
+	expect(AIControlAdapterGetEffectiveArmyCap({
+		true,
+		300000u,
+		-1000,
+		2,
+		8,
+		27,
+		100
+	}) == 130, "late-game cash floor should still be bounded by producer capacity");
+	expect(AIControlAdapterGetEffectiveArmyCap({
+		true,
+		500000u,
+		-1000,
+		100,
+		100,
+		27,
+		100
+	}) == 300, "late-game cash floor should still be bounded by hard cap");
+	expect(AIControlAdapterGetEffectiveArmyCap({
+		true,
+		300000u,
+		-1000,
+		20,
+		42,
+		0,
+		100
+	}) == 100, "large cash without completed markets should keep conservative negative-income cap");
 
 	{
 		const AIControlAdapterBlackMarketPolicyInputs inputs = {
@@ -1267,6 +1414,50 @@ int main()
 		const auto result = AIControlAdapterChooseZoneExpansionAction(inputs);
 		expect(!result.shouldAttemptExpansion, "Phase 5.7: expansion should be blocked when build in progress");
 		expect(std::strcmp(result.reason, "build_in_progress") == 0, "Phase 5.7: reason should be build_in_progress");
+	}
+
+	{
+		// Phase 12: profile-driven concurrent expansion can keep seeding zones
+		// when urgent expansion is active and the in-progress count is below cap.
+		const AIControlAdapterZoneExpansionArbitrationInputs inputs = {
+			true,   // zoneExpansionIsUrgent
+			true,   // allowUrgentExpansionDespiteReserve
+			true,   // remoteZoneNeedsFollowup (urgent overrides)
+			7,      // stashZoneCount
+			30,     // desiredZoneCount
+			1,      // supplyStashesInProgress
+			false,  // shouldThrottleExtraStashGrowth
+			120000, // money
+			10000,  // reserveCash
+			true,   // isBalancedSprawl
+			true,   // isBuildAttemptReady
+			3       // maxConcurrentSupplyStashes
+		};
+		const auto result = AIControlAdapterChooseZoneExpansionAction(inputs);
+		expect(result.shouldAttemptExpansion, "Phase 12: urgent expansion should allow another stash below concurrent cap");
+		expect(result.isUrgent, "Phase 12: concurrent expansion should preserve urgent classification");
+		expect(std::strcmp(result.reason, "urgent_high_cash") == 0, "Phase 12: concurrent expansion should keep urgent_high_cash reason");
+	}
+
+	{
+		// Phase 12: once the configured concurrent cap is reached, block explicitly.
+		const AIControlAdapterZoneExpansionArbitrationInputs inputs = {
+			true,   // zoneExpansionIsUrgent
+			true,   // allowUrgentExpansionDespiteReserve
+			false,  // remoteZoneNeedsFollowup
+			7,      // stashZoneCount
+			30,     // desiredZoneCount
+			3,      // supplyStashesInProgress
+			false,  // shouldThrottleExtraStashGrowth
+			120000, // money
+			10000,  // reserveCash
+			true,   // isBalancedSprawl
+			true,   // isBuildAttemptReady
+			3       // maxConcurrentSupplyStashes
+		};
+		const auto result = AIControlAdapterChooseZoneExpansionAction(inputs);
+		expect(!result.shouldAttemptExpansion, "Phase 12: expansion should block when concurrent stash cap is reached");
+		expect(std::strcmp(result.reason, "in_progress_cap") == 0, "Phase 12: cap block should report in_progress_cap");
 	}
 
 	{
@@ -2917,6 +3108,271 @@ int main()
 			1
 		});
 		expect(hints.empty(), "Final run hints should not emit unsupported diagnoses");
+	}
+
+	{
+		const AIControlAdapterGarrisonCandidateDecision palace = AIControlAdapterEvaluateGarrisonCandidate({
+			true,
+			false,
+			true,
+			false,
+			false,
+			true,
+			false,
+			true,
+			false,
+			false,
+			false,
+			120.0f,
+			700.0f,
+			0
+		});
+		expect(palace.selected, "Friendly Palace should be selected as a garrison anchor");
+		expect(palace.desiredInfantry == 4, "Palace desired garrison should be 4 infantry");
+		expect(palace.reason == std::string("selected"), "Palace selected reason should be selected");
+	}
+
+	{
+		const AIControlAdapterGarrisonCandidateDecision nearTower = AIControlAdapterEvaluateGarrisonCandidate({
+			false,
+			true,
+			false,
+			true,
+			false,
+			true,
+			true,
+			false,
+			true,
+			true,
+			true,
+			180.0f,
+			700.0f,
+			0
+		});
+		const AIControlAdapterGarrisonCandidateDecision distantTower = AIControlAdapterEvaluateGarrisonCandidate({
+			false,
+			true,
+			false,
+			true,
+			false,
+			true,
+			true,
+			false,
+			true,
+			true,
+			true,
+			1200.0f,
+			700.0f,
+			0
+		});
+		expect(nearTower.selected, "Useful neutral map garrison near a zone should be selected");
+		expect(nearTower.desiredInfantry == 8, "Useful map garrison desired count should be 8");
+		expect(!distantTower.selected, "Distant map garrison should not be selected");
+		expect(distantTower.reason == std::string("too_far"), "Distant map garrison should report too_far");
+	}
+
+	{
+		const AIControlAdapterGarrisonCandidateDecision enemyTower = AIControlAdapterEvaluateGarrisonCandidate({
+			false,
+			true,
+			false,
+			false,
+			true,
+			true,
+			true,
+			false,
+			false,
+			true,
+			false,
+			100.0f,
+			700.0f,
+			0
+		});
+		expect(!enemyTower.selected, "Enemy-owned garrison structure should be rejected");
+		expect(enemyTower.reason == std::string("enemy_owned"), "Enemy-owned garrison rejection should be explicit");
+	}
+
+	{
+		const AIControlAdapterGarrisonCandidateDecision containOnly = AIControlAdapterEvaluateGarrisonCandidate({
+			false,
+			false,
+			false,
+			true,
+			false,
+			true,
+			true,
+			false,
+			true,
+			false,
+			true,
+			160.0f,
+			700.0f,
+			0,
+			true,
+			false
+		});
+		expect(containOnly.selected, "Runtime garrisonable civilian structure should be selected without legacy kind flags");
+		expect(containOnly.desiredInfantry == 8, "Runtime garrisonable structure should use map-garrison desired count near a front");
+		expect(containOnly.reason == std::string("selected"), "Runtime garrisonable selected reason should be selected");
+	}
+
+	{
+		const AIControlAdapterGarrisonCandidateDecision mapCacheOnly = AIControlAdapterEvaluateGarrisonCandidate({
+			false,
+			false,
+			false,
+			true,
+			false,
+			true,
+			false,
+			true,
+			false,
+			false,
+			false,
+			220.0f,
+			700.0f,
+			0,
+			false,
+			true
+		});
+		expect(mapCacheOnly.selected, "Map-cache-confirmed garrison should be selected even when runtime kind flags are incomplete");
+		expect(mapCacheOnly.desiredInfantry == 4, "Quiet map-cache garrison should use compact desired count");
+		expect(mapCacheOnly.reason == std::string("selected"), "Map-cache garrison selected reason should be selected");
+	}
+
+	{
+		const AIControlAdapterGarrisonCandidateDecision ordinaryCivilian = AIControlAdapterEvaluateGarrisonCandidate({
+			false,
+			false,
+			false,
+			true,
+			false,
+			true,
+			true,
+			false,
+			false,
+			false,
+			false,
+			100.0f,
+			700.0f,
+			0,
+			false,
+			false
+		});
+		expect(!ordinaryCivilian.selected, "Ordinary non-enterable civilian structure should be rejected");
+		expect(ordinaryCivilian.reason == std::string("not_garrisonable"), "Non-enterable civilian rejection should be explicit");
+	}
+
+	{
+		const AIControlAdapterGarrisonProductionDecision blocked = AIControlAdapterChooseGarrisonProduction({
+			8,
+			2,
+			0,
+			0,
+			true,
+			10200u,
+			10000u
+		});
+		const AIControlAdapterGarrisonProductionDecision allowed = AIControlAdapterChooseGarrisonProduction({
+			8,
+			2,
+			0,
+			0,
+			true,
+			12000u,
+			10000u
+		});
+		expect(!blocked.productionNeeded, "Garrison production should protect reserve plus unit cost");
+		expect(blocked.reason == std::string("reserve_protected"), "Reserve-protected garrison production should explain blocker");
+		expect(allowed.productionNeeded, "Garrison production should request RPG infantry when useful and affordable");
+		expect(allowed.desiredQueued == 2, "Garrison production should be bounded to two queued units per decision");
+	}
+
+	{
+		const AIControlAdapterGarrisonThroughputDecision normal = AIControlAdapterEvaluateGarrisonThroughput({
+			8000u,
+			5000u,
+			2,
+			3,
+			0,
+			20,
+			4,
+			2,
+			10,
+			2,
+			0,
+			0,
+			0,
+			false
+		});
+		expect(normal.maxAssignmentsThisCycle == 1, "Normal garrison throughput should remain conservative");
+		expect(normal.mode == std::string("normal"), "Normal throughput mode should be explicit");
+	}
+
+	{
+		const AIControlAdapterGarrisonThroughputDecision accelerated = AIControlAdapterEvaluateGarrisonThroughput({
+			300000u,
+			10000u,
+			22,
+			34,
+			16,
+			172,
+			89,
+			72,
+			42,
+			4,
+			2,
+			12,
+			8,
+			false
+		});
+		expect(accelerated.maxAssignmentsThisCycle > 1, "Late-game high-gap garrison throughput should allow multiple assignments");
+		expect(accelerated.maxAssignmentsThisCycle <= 6, "Late-game garrison throughput should stay bounded");
+		expect(accelerated.productionFanout >= 2, "Late-game high-gap garrisons should allow multi-barracks production fanout");
+		expect(accelerated.mode == std::string("accelerated"), "Late-game throughput mode should be accelerated");
+	}
+
+	{
+		const AIControlAdapterGarrisonThroughputDecision reserveHeld = AIControlAdapterEvaluateGarrisonThroughput({
+			300000u,
+			10000u,
+			12,
+			12,
+			1,
+			90,
+			20,
+			10,
+			5,
+			4,
+			8,
+			20,
+			20,
+			false
+		});
+		expect(reserveHeld.maxAssignmentsThisCycle == 0, "Garrison throughput should preserve scout, raid, and defense reserves");
+		expect(reserveHeld.reason == std::string("infantry_reserve_held"), "Reserve-held throughput should explain blocker");
+		expect(reserveHeld.productionFanout > 0, "High-gap reserve-held state should request bounded production fanout");
+	}
+
+	{
+		const AIControlAdapterGarrisonThroughputDecision emergency = AIControlAdapterEvaluateGarrisonThroughput({
+			300000u,
+			10000u,
+			22,
+			20,
+			2,
+			120,
+			40,
+			20,
+			40,
+			4,
+			0,
+			0,
+			0,
+			true
+		});
+		expect(emergency.maxAssignmentsThisCycle == 0, "Critical emergency should hold garrison throughput");
+		expect(emergency.reason == std::string("critical_emergency_reserve"), "Emergency hold reason should be explicit");
 	}
 
 	std::cout << "AIControlAdapterPolicyTests passed\n";

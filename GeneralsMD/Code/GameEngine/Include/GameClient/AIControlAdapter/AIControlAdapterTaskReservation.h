@@ -63,6 +63,17 @@ struct SpecialTaskReservation
 	std::string reason;                   // State transition or failure reason
 };
 
+struct StoppedFoundationTombstone
+{
+	unsigned int foundationObjectId = 0;
+	std::string expectedTemplate;
+	Coord3D position;
+	std::string reason;
+	DWORD createdTick = 0;
+	DWORD expiresTick = 0;
+	DWORD lastSkipLogTick = 0;
+};
+
 class AIControlAdapterTaskReservationManager
 {
 public:
@@ -115,6 +126,25 @@ public:
 	void pruneExpiredTasks(DWORD currentTick);
 	void removeTask(unsigned int taskId);
 
+	// Stopped stale foundations should not be re-adopted as orphan build tasks.
+	void tombstoneStoppedFoundation(
+		unsigned int foundationObjectId,
+		const std::string& expectedTemplate,
+		const Coord3D& position,
+		const std::string& reason,
+		DWORD currentTick,
+		unsigned int ttlMs = 120000);
+	bool isFoundationTombstoned(
+		unsigned int foundationObjectId,
+		DWORD currentTick,
+		DWORD* ageMs = nullptr,
+		std::string* reason = nullptr) const;
+	bool shouldLogFoundationTombstoneSkip(
+		unsigned int foundationObjectId,
+		DWORD currentTick,
+		unsigned int throttleMs = 5000);
+	void clearFoundationTombstone(unsigned int foundationObjectId);
+
 	// Queries for specific task types
 	std::vector<SpecialTaskReservation*> findBuildTasks(const std::string& templateFilter = "");
 	std::vector<SpecialTaskReservation*> findCaptureTasks();
@@ -128,4 +158,5 @@ public:
 private:
 	unsigned int nextTaskId = 1;
 	std::map<unsigned int, SpecialTaskReservation> reservations;
+	std::map<unsigned int, StoppedFoundationTombstone> stoppedFoundationTombstones;
 };

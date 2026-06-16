@@ -1387,4 +1387,6 @@ if(BUILD_TESTING)
 
     configure_ai_control_adapter_unit_test(z_gameengine_adapter_combattask_tests)
 
+    add_test(NAME z_gameengine_adapter_combattask_tests COMMAND z_gameengine_adapter_combattask_tests)
+
 endif()

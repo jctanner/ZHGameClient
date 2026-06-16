@@ -37,9 +37,26 @@
 #include "GameClient/MapUtil.h"
 #include "Common/UserPreferences.h"
 #include "GameLogic/GameLogic.h"
+#include <cstdarg>
+#include <cstdio>
 
 
 static const UnsignedShort lobbyPort = 8086; ///< This is the UDP port used by all LANAPI communication
+
+static void LanApiTrace(const char* format, ...)
+{
+	FILE* file = fopen("Z:\\tmp\\lanapi.log", "a");
+	if (!file)
+		return;
+
+	fprintf(file, "lanapi ");
+	va_list args;
+	va_start(args, format);
+	vfprintf(file, format, args);
+	va_end(args);
+	fprintf(file, "\n");
+	fclose(file);
+}
 
 AsciiString GetMessageTypeString(UnsignedInt type);
 
@@ -102,6 +119,7 @@ void LANAPI::init()
 	m_transport->reset();
 	m_transport->init(m_localIP, lobbyPort);
 	m_transport->allowBroadcasts(true);
+	LanApiTrace("init local=%d.%d.%d.%d lobby_port=%u", PRINTF_IP_AS_4_INTS(m_localIP), lobbyPort);
 
 	m_pendingAction = ACT_NONE;
 	m_expiration = 0;
@@ -561,6 +579,7 @@ void LANAPI::update()
 		switch (m_pendingAction)
 		{
 		case ACT_JOIN:
+			LanApiTrace("timeout action=join local=%d.%d.%d.%d", PRINTF_IP_AS_4_INTS(m_localIP));
 			OnGameJoin(RET_TIMEOUT, nullptr);
 			m_pendingAction = ACT_NONE;
 			m_currentGame = nullptr;
@@ -573,6 +592,7 @@ void LANAPI::update()
 			m_inLobby = true;
 			break;
 		case ACT_JOINDIRECTCONNECT:
+			LanApiTrace("timeout action=join_direct_connect local=%d.%d.%d.%d remote=%d.%d.%d.%d", PRINTF_IP_AS_4_INTS(m_localIP), PRINTF_IP_AS_4_INTS(m_directConnectRemoteIP));
 			OnGameJoin(RET_TIMEOUT, nullptr);
 			m_pendingAction = ACT_NONE;
 			m_currentGame = nullptr;
@@ -637,6 +657,7 @@ void LANAPI::RequestGameJoin(LANGameInfo* game, UnsignedInt ip /* = 0 */)
 	msg.GameToJoin.gameIP = game->getSlot(0)->getIP();
 	msg.GameToJoin.exeCRC = TheGlobalData->m_exeCRC;
 	msg.GameToJoin.iniCRC = TheGlobalData->m_iniCRC;
+	LanApiTrace("send_request_join target=%d.%d.%d.%d game_ip=%d.%d.%d.%d local=%d.%d.%d.%d", PRINTF_IP_AS_4_INTS(ip), PRINTF_IP_AS_4_INTS(msg.GameToJoin.gameIP), PRINTF_IP_AS_4_INTS(m_localIP));
 
 	AsciiString s;
 	GetStringFromRegistry("\\ergc", "", s);
@@ -669,6 +690,7 @@ void LANAPI::RequestGameJoinDirectConnect(UnsignedInt ipaddress)
 	fillInLANMessage(&msg);
 	msg.PlayerInfo.ip = GetLocalIP();
 	wcslcpy(msg.PlayerInfo.playerName, m_name.str(), ARRAY_SIZE(msg.PlayerInfo.playerName));
+	LanApiTrace("send_request_game_info target=%d.%d.%d.%d local=%d.%d.%d.%d player_ip=%d.%d.%d.%d", PRINTF_IP_AS_4_INTS(ipaddress), PRINTF_IP_AS_4_INTS(m_localIP), PRINTF_IP_AS_4_INTS(msg.PlayerInfo.ip));
 
 	sendMessage(&msg, ipaddress);
 
@@ -1267,6 +1289,7 @@ Bool LANAPI::SetLocalIP(UnsignedInt localIP)
 	m_transport->reset();
 	retval = m_transport->init(m_localIP, lobbyPort);
 	m_transport->allowBroadcasts(true);
+	LanApiTrace("set_local_ip local=%d.%d.%d.%d lobby_port=%u ok=%d", PRINTF_IP_AS_4_INTS(m_localIP), lobbyPort, retval);
 
 	return retval;
 }

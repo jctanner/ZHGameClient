@@ -35,7 +35,7 @@ while [[ $# -gt 0 ]]; do
 		;;
 	--tests)
 		RUN_TESTS="true"
-		MAKE_TARGET="${MAKE_TARGET:-z_gameengine_adapter_tests z_gameengine_adapter_techmanager_tests z_gameengine_adapter_productionmanager_tests z_gameengine_adapter_zonedefense_tests z_gameengine_adapter_scheduler_tests z_gameengine_adapter_economymanager_tests z_gameengine_adapter_distributedplacement_tests z_gameengine_adapter_capturetask_tests}"
+		MAKE_TARGET="${MAKE_TARGET:-z_gameengine_adapter_tests z_gameengine_adapter_techmanager_tests z_gameengine_adapter_productionmanager_tests z_gameengine_adapter_zonedefense_tests z_gameengine_adapter_scheduler_tests z_gameengine_adapter_economymanager_tests z_gameengine_adapter_distributedplacement_tests z_gameengine_adapter_capturetask_tests z_gameengine_adapter_combattask_tests}"
 		shift
 		;;
 	--ctest-filter)

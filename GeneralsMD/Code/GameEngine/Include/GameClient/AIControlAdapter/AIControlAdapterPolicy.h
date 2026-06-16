@@ -89,6 +89,49 @@ inline const char* zoneAnchorTypeToString(ZoneAnchorType type)
 }
 
 // =============================================================================
+// PROFILE POLICY CONFIG
+// =============================================================================
+
+struct AIControlAdapterProfilePolicyConfig
+{
+	std::string profile;
+	bool isBalancedSprawl = false;
+	bool isSprawlStyle = false;
+	unsigned int reserveCash = 0u;
+
+	int workerMinIdle = 1;
+	int workerQueueCount = 1;
+	unsigned int workerCooldownMs = 2500u;
+	int stashWorkersPerStash = 8;
+	unsigned int stashWorkerCooldownMs = 5000u;
+
+	int attackMinUnits = 38;
+	int attackGroupSize = 28;
+	unsigned int attackCooldownMs = 18000u;
+
+	int sprawlSupplyCap = 1;
+	int sprawlBarracksCap = 1;
+	int sprawlArmsCap = 1;
+	int sprawlMarketCap = 1;
+	int sprawlTunnelCap = 1;
+	int sprawlStingerCap = 1;
+
+	int urgentZoneGapThreshold = 5;
+	int normalMaxConcurrentExpansionStashes = 1;
+	bool allowExpansionBeforeFullRemoteFollowup = false;
+	unsigned int expansionHighCashFloatThreshold = 10000u;
+	unsigned int scudStormHighCashFloatThreshold = 25000u;
+};
+
+AIControlAdapterProfilePolicyConfig AIControlAdapterResolveProfilePolicyConfig(
+	const std::string& profile,
+	float economyBias,
+	float aggressionBias,
+	float defenseBias,
+	float expansionBias,
+	float sprawlMultiplier);
+
+// =============================================================================
 // PRODUCTION POLICIES
 // =============================================================================
 
@@ -153,6 +196,7 @@ struct AIControlAdapterEffectiveArmyCapPolicyInputs
 	int incomePerMinute;         // Smoothed net cash change per minute
 	int barracks;                // Count of Barracks
 	int armsDealers;             // Count of Arms Dealers
+	int blackMarkets;            // Count of completed Black Markets
 	int baseArmyCap;             // Baseline desired combat unit cap
 };
 
@@ -811,6 +855,7 @@ struct AIControlAdapterZoneExpansionArbitrationInputs
 	unsigned int reserveCash;             // Reserve threshold
 	bool isBalancedSprawl;                // Using balanced sprawl profile
 	bool isBuildAttemptReady;             // Build cooldown/retry allows attempt
+	int maxConcurrentSupplyStashes = 1;   // Profile-driven in-progress cap
 };
 
 /**
@@ -844,6 +889,26 @@ struct AIControlAdapterZoneExpansionArbitrationResult
  */
 AIControlAdapterZoneExpansionArbitrationResult AIControlAdapterChooseZoneExpansionAction(
 	const AIControlAdapterZoneExpansionArbitrationInputs& inputs);
+
+struct AIControlAdapterRemoteZoneFollowupInputs
+{
+	bool remoteZoneHasStash = false;
+	int tunnels = 0;
+	int barracks = 0;
+	int armsDealers = 0;
+	int stingers = 0;
+	bool allowExpansionBeforeFullRemoteFollowup = false;
+};
+
+struct AIControlAdapterRemoteZoneFollowupResult
+{
+	bool needsFollowup = false;
+	const char* packageStage = "none";
+	const char* reason = "no_remote_stash";
+};
+
+AIControlAdapterRemoteZoneFollowupResult AIControlAdapterChooseRemoteZoneFollowup(
+	const AIControlAdapterRemoteZoneFollowupInputs& inputs);
 
 // =============================================================================
 // SCUD STORM CONSTRUCTION POLICY
@@ -1693,3 +1758,87 @@ AIControlAdapterZoneFrontRearPoints AIControlAdapterBuildZoneFrontRearPoints(
 	float radius,
 	float dirDx,
 	float dirDy);
+
+struct AIControlAdapterGarrisonCandidateInput
+{
+	bool palace = false;
+	bool mapGarrison = false;
+	bool friendlyOwned = false;
+	bool neutralOwned = false;
+	bool enemyOwned = false;
+	bool zoneUseful = false;
+	bool zoneActive = false;
+	bool zoneDeveloped = false;
+	bool repeatedAttack = false;
+	bool nearArtilleryPlatform = false;
+	bool nearChokepoint = false;
+	float distanceToZone = 0.0f;
+	float usefulRadius = 600.0f;
+	int existingAssigned = 0;
+	bool runtimeGarrisonable = false;
+	bool mapCacheGarrison = false;
+};
+
+struct AIControlAdapterGarrisonCandidateDecision
+{
+	bool selected = false;
+	int desiredInfantry = 0;
+	int capacity = 0;
+	int score = 0;
+	const char* reason = "not_useful";
+};
+
+AIControlAdapterGarrisonCandidateDecision AIControlAdapterEvaluateGarrisonCandidate(
+	const AIControlAdapterGarrisonCandidateInput& input);
+
+struct AIControlAdapterGarrisonProductionInput
+{
+	int desiredInfantry = 0;
+	int assignedInfantry = 0;
+	int availableInfantry = 0;
+	int queuedInfantry = 0;
+	bool barracksReady = false;
+	unsigned int money = 0;
+	unsigned int reserveCash = 0;
+};
+
+struct AIControlAdapterGarrisonProductionDecision
+{
+	bool productionNeeded = false;
+	int desiredQueued = 0;
+	const char* unitTemplate = "GLAInfantryTunnelDefender";
+	const char* reason = "filled";
+};
+
+AIControlAdapterGarrisonProductionDecision AIControlAdapterChooseGarrisonProduction(
+	const AIControlAdapterGarrisonProductionInput& input);
+
+struct AIControlAdapterGarrisonThroughputInput
+{
+	unsigned int money = 0;
+	unsigned int reserveCash = 0;
+	int barracksReady = 0;
+	int selectedStructures = 0;
+	int filledStructures = 0;
+	int desiredInfantry = 0;
+	int assignedInfantry = 0;
+	int enteredInfantry = 0;
+	int availableRpgInfantry = 0;
+	int infantryReserve = 2;
+	int activeScoutAssignments = 0;
+	int activeRaidAssignments = 0;
+	int zoneDefenseReserved = 0;
+	bool criticalEmergency = false;
+};
+
+struct AIControlAdapterGarrisonThroughputDecision
+{
+	int maxAssignmentsThisCycle = 1;
+	int infantryReserveHeld = 2;
+	int productionFanout = 0;
+	const char* mode = "normal";
+	const char* reason = "normal_pacing";
+};
+
+AIControlAdapterGarrisonThroughputDecision AIControlAdapterEvaluateGarrisonThroughput(
+	const AIControlAdapterGarrisonThroughputInput& input);
