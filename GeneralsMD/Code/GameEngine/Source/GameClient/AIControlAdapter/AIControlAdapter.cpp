@@ -579,6 +579,22 @@ namespace
 		std::string releaseReason;
 	};
 
+	struct AutonomyWorkerShuttleAssignment
+	{
+		UnsignedInt taskId = 0;
+		UnsignedInt workerId = 0;
+		UnsignedInt technicalId = 0;
+		std::string templateName;
+		Coord3D targetPosition;
+		DWORD createdTick = 0u;
+		DWORD lastCommandTick = 0u;
+		DWORD lastProgressTick = 0u;
+		int commandReissueCount = 0;
+		bool constructReissued = false;
+		std::string state = "assigned";
+		std::string reason = "assigned";
+	};
+
 	struct AutonomyState
 	{
 		std::string mode;
@@ -654,6 +670,7 @@ namespace
 		std::unordered_map<UnsignedInt, AutonomyZoneDefenseReserveState> zoneDefenseReserves;
 		std::unordered_map<UnsignedInt, AutonomyStrategicFoundationState> strategicFoundationHealth;
 		std::unordered_map<UnsignedInt, AutonomyGarrisonAssignment> garrisonAssignments;
+		std::unordered_map<UnsignedInt, AutonomyWorkerShuttleAssignment> workerShuttleAssignments;
 
 		nlohmann::json zoneThreatTelemetry;
 		nlohmann::json staticDefenseTelemetry;
@@ -5266,6 +5283,20 @@ namespace
 							snapshot.isTechnical = containsIgnoreCase(snapshot.name, "technical");
 							snapshot.isStructure = unit->isKindOf(KINDOF_STRUCTURE);
 							snapshot.underConstruction = unit->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION);
+							if (!allowScoutPoolBorrow && isWorkerShuttleTechnicalProtected(player, snapshot))
+							{
+								adapterLog(
+									"zone_defense_retask_blocked unit=%u from_zone=0 to_zone=%u reason=worker_shuttle_reserved",
+									static_cast<unsigned int>(unit->getID()),
+									targetZone);
+								continue;
+							}
+							if (allowScoutPoolBorrow && isWorkerShuttleTechnicalProtected(player, snapshot))
+							{
+								adapterLog(
+									"worker_shuttle_borrow unit=%u reason=main_base_critical_override",
+									static_cast<unsigned int>(unit->getID()));
+							}
 							if (!allowScoutPoolBorrow && isScoutPoolTechnicalProtected(player, snapshot))
 							{
 								adapterLog(
@@ -5903,6 +5934,42 @@ namespace
 						++criticalThreatZones;
 					}
 				}
+				bool enemyUsaPlayerDetected = false;
+				if (ThePlayerList != nullptr)
+				{
+					const Int playerCount = ThePlayerList->getPlayerCount();
+					for (Int i = 0; i < playerCount; ++i)
+					{
+						Player* candidate = ThePlayerList->getNthPlayer(i);
+						if (candidate == nullptr || candidate == player || candidate == ThePlayerList->getNeutralPlayer())
+						{
+							continue;
+						}
+						if (candidate->getDefaultTeam() == nullptr || player->getRelationship(candidate->getDefaultTeam()) != ENEMIES)
+						{
+							continue;
+						}
+						const PlayerTemplate* candidateTemplate = candidate->getPlayerTemplate();
+						if (AIControlAdapterLooksLikeUsaIdentity(candidate->getSide().str())
+							|| AIControlAdapterLooksLikeUsaIdentity(candidate->getBaseSide().str())
+							|| (candidateTemplate != nullptr
+								&& (AIControlAdapterLooksLikeUsaIdentity(candidateTemplate->getName().str())
+									|| AIControlAdapterLooksLikeUsaIdentity(candidateTemplate->getSide().str())
+									|| AIControlAdapterLooksLikeUsaIdentity(candidateTemplate->getBaseSide().str()))))
+						{
+							enemyUsaPlayerDetected = true;
+							break;
+						}
+					}
+				}
+				int enemyUsaMemoryItems = 0;
+				for (const EnemyMemoryItem& item : m_autonomy.enemyMemory.getItems())
+				{
+					if (AIControlAdapterLooksLikeUsaIdentity(item.templateName))
+					{
+						++enemyUsaMemoryItems;
+					}
+				}
 				int enemyUsaWmdTargets = 0;
 				for (const WMDTarget& target : m_autonomy.wmdTargetTracker.getAllTargets())
 				{
@@ -5913,7 +5980,7 @@ namespace
 						++enemyUsaWmdTargets;
 					}
 				}
-				const bool enemyUsaDetected = enemyUsaWmdTargets > 0;
+				const bool enemyUsaDetected = enemyUsaPlayerDetected || enemyUsaMemoryItems > 0 || enemyUsaWmdTargets > 0;
 				const int activeDefenseTaskCount = m_autonomy.combatTaskManager.getDefenseTaskCount();
 				const int activeCombatTaskCount = m_autonomy.combatTaskManager.getActiveTaskCount();
 				const int activeAttackTaskEstimate = std::max(0, activeCombatTaskCount - activeDefenseTaskCount);
@@ -6000,6 +6067,8 @@ namespace
 					{"reserved_strike_group", glaUsaStrategy.reservedStrikeGroup},
 					{"prioritize_producer_recovery", glaUsaStrategy.prioritizeProducerRecovery},
 					{"enemy_usa_wmd_targets", enemyUsaWmdTargets},
+					{"enemy_usa_player_detected", enemyUsaPlayerDetected},
+					{"enemy_usa_memory_items", enemyUsaMemoryItems},
 					{"armor_threats", glaUsaInput.enemyArmorThreats},
 					{"air_threats", glaUsaInput.enemyAirThreats},
 					{"mixed_threats", glaUsaInput.enemyMixedThreats},
@@ -6021,8 +6090,11 @@ namespace
 						{"technicals", counts.technicals},
 						{"queued_technicals", counts.queuedTechnicals},
 						{"desired_shuttle_technicals", glaUsaStrategy.desiredShuttleTechnicals},
+						{"protected_technicals", glaUsaStrategy.protectedShuttleTechnicals},
+						{"production_needed", glaUsaStrategy.shuttleTechnicalProductionNeeded},
 						{"remote_gap", glaUsaInput.remoteBuildGap},
 						{"farthest_distance", farthestRemoteBuildDistance},
+						{"reservation_reason", glaUsaStrategy.shuttleReservationReason},
 						{"reason", glaUsaStrategy.workerMobilityReason}
 					})},
 					{"wmd_construction_diagnostic_needed", glaUsaStrategy.wmdConstructionDiagnosticNeeded},
@@ -6048,13 +6120,17 @@ namespace
 					counts.stingers,
 					enemyUsaDetected ? 1 : 0);
 				adapterLog(
-					"worker_mobility_policy desired=%d mode=%s workers=%d technicals=%d remote_gap=%d reason=%s",
+					"worker_mobility_policy desired=%d mode=%s workers=%d technicals=%d queued=%d remote_gap=%d protected=%d production_needed=%d reason=%s reservation_reason=%s",
 					glaUsaStrategy.workerMobilityDesired ? 1 : 0,
 					glaUsaStrategy.workerMobilityMode,
 					counts.workers,
 					counts.technicals,
+					counts.queuedTechnicals,
 					glaUsaInput.remoteBuildGap,
-					glaUsaStrategy.workerMobilityReason);
+					glaUsaStrategy.protectedShuttleTechnicals,
+					glaUsaStrategy.shuttleTechnicalProductionNeeded ? 1 : 0,
+					glaUsaStrategy.workerMobilityReason,
+					glaUsaStrategy.shuttleReservationReason);
 
 				const Int armyCapForLog = AIControlAdapterGetEffectiveArmyCap({
 					isBalancedSprawl,
@@ -6418,6 +6494,48 @@ namespace
 					prodIntent.producerObjectId = scoutPoolProducerId;
 					prodIntent.unitTemplate = scoutPoolDecision.unitTemplate;
 					prodIntent.reason = scoutPoolDecision.reason;
+				}
+				if (glaUsaStrategy.shuttleTechnicalProductionNeeded
+					&& scoutPoolProducerId > 0
+					&& (!prodIntent.shouldProduce
+						|| prodIntent.commandName == "Game.QueueQuadsAllWarFactories"
+						|| prodIntent.commandName == "Game.QueueScorpionsAllWarFactories"))
+				{
+					std::string shuttleTechnicalTemplate = "GLAVehicleTechnical";
+					for (const ProductionProducerSnapshot& producer : producerSnapshots)
+					{
+						if (producer.objectId == scoutPoolProducerId)
+						{
+							const std::string inferredTemplate = inferTechnicalTemplateForProducerSnapshot(producer.object);
+							if (!inferredTemplate.empty())
+							{
+								shuttleTechnicalTemplate = inferredTemplate;
+							}
+							break;
+						}
+					}
+					prodIntent.shouldProduce = true;
+					prodIntent.commandName = "Game.QueueUnit";
+					prodIntent.producerKind = "arms_dealer";
+					prodIntent.producerObjectId = scoutPoolProducerId;
+					prodIntent.unitTemplate = shuttleTechnicalTemplate;
+					prodIntent.reason = "worker_shuttle_technical";
+					adapterLog(
+						"worker_shuttle_production command=Game.QueueUnit unit=%s selected=1 desired=%d live=%d queued=%d reason=%s",
+						shuttleTechnicalTemplate.c_str(),
+						glaUsaStrategy.desiredShuttleTechnicals,
+						counts.technicals,
+						counts.queuedTechnicals,
+						glaUsaStrategy.shuttleReservationReason);
+				}
+				else if (glaUsaStrategy.workerMobilityDesired)
+				{
+					adapterLog(
+						"worker_shuttle_production command=Game.QueueUnit unit=auto selected=0 desired=%d live=%d queued=%d reason=%s",
+						glaUsaStrategy.desiredShuttleTechnicals,
+						counts.technicals,
+						counts.queuedTechnicals,
+						glaUsaStrategy.shuttleTechnicalProductionNeeded ? "producer_unavailable_or_higher_priority" : glaUsaStrategy.shuttleReservationReason);
 				}
 
 				bool mobileSiegeThreatVisible = false;
@@ -8248,8 +8366,12 @@ namespace
 							{"desired", false},
 							{"mode", "walk"},
 							{"desired_shuttle_technicals", 0},
+							{"protected_technicals", 0},
+							{"production_needed", false},
+							{"reservation_reason", "not_evaluated"},
 							{"reason", "not_evaluated"}
-						})}
+						})},
+						{"worker_shuttle_tasks", nlohmann::json::array()}
 					});
 				result["brutal_pressure"] = m_autonomy.state.brutalPressureTelemetry.is_object()
 				? m_autonomy.state.brutalPressureTelemetry
@@ -11676,6 +11798,484 @@ namespace
 			return effectivePool <= std::max(2, pool.desiredTechnicals);
 		}
 
+		int resolveWorkerShuttleProtectedTechnicalCount() const
+		{
+			if (!m_autonomy.state.glaUsaStrategyTelemetry.is_object()
+				|| !m_autonomy.state.glaUsaStrategyTelemetry.value("active", false))
+			{
+				return 0;
+			}
+			const auto workerIt = m_autonomy.state.glaUsaStrategyTelemetry.find("worker_mobility");
+			if (workerIt == m_autonomy.state.glaUsaStrategyTelemetry.end() || !workerIt->is_object())
+			{
+				return 0;
+			}
+			if (!workerIt->value("desired", false))
+			{
+				return 0;
+			}
+			return std::max(0, workerIt->value("protected_technicals", 0));
+		}
+
+		std::set<UnsignedInt> collectWorkerShuttleProtectedTechnicalIds(Player* player) const
+		{
+			std::set<UnsignedInt> protectedIds;
+			const int desiredProtected = resolveWorkerShuttleProtectedTechnicalCount();
+			if (player == nullptr || desiredProtected <= 0)
+			{
+				return protectedIds;
+			}
+			std::vector<UnsignedInt> technicalIds;
+			std::vector<AutomationOwnedObjectSnapshot> ownedObjects;
+			collectOwnedAutomationObjects(player, ownedObjects);
+			for (const AutomationOwnedObjectSnapshot& owned : ownedObjects)
+			{
+				if (owned.object == nullptr || owned.isStructure || owned.underConstruction || !owned.isTechnical)
+				{
+					continue;
+				}
+				if (owned.object->isEffectivelyDead())
+				{
+					continue;
+				}
+				technicalIds.push_back(static_cast<UnsignedInt>(owned.object->getID()));
+			}
+			std::sort(technicalIds.begin(), technicalIds.end());
+			const int count = std::min(desiredProtected, static_cast<int>(technicalIds.size()));
+			for (int i = 0; i < count; ++i)
+			{
+				protectedIds.insert(technicalIds[static_cast<std::size_t>(i)]);
+			}
+			return protectedIds;
+		}
+
+		bool isWorkerShuttleTechnicalProtected(Player* player, const AutomationOwnedObjectSnapshot& owned) const
+		{
+			if (player == nullptr || owned.object == nullptr || !owned.isTechnical || owned.isStructure || owned.underConstruction)
+			{
+				return false;
+			}
+			const std::set<UnsignedInt> protectedIds = collectWorkerShuttleProtectedTechnicalIds(player);
+			return protectedIds.find(static_cast<UnsignedInt>(owned.object->getID())) != protectedIds.end();
+		}
+
+		bool isWorkerInsideTechnical(Object* worker, Object* technical) const
+		{
+			if (worker == nullptr || technical == nullptr)
+			{
+				return false;
+			}
+			if (worker->getContainedBy() == technical)
+			{
+				return true;
+			}
+			ContainModuleInterface* contain = technical->getContain();
+			const ContainedItemsList* items = contain != nullptr ? contain->getContainedItemsList() : nullptr;
+			if (items == nullptr)
+			{
+				return false;
+			}
+			for (ContainedItemsList::const_iterator it = items->begin(); it != items->end(); ++it)
+			{
+				if (*it == worker)
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+
+		bool issueWorkerEnterTechnical(Player* player, Object* worker, Object* technical, std::string& reason)
+		{
+			if (player == nullptr || worker == nullptr || technical == nullptr)
+			{
+				reason = "object_missing";
+				return false;
+			}
+			if (TheActionManager != nullptr
+				&& !TheActionManager->canEnterObject(worker, technical, CMD_FROM_PLAYER, CHECK_CAPACITY))
+			{
+				reason = "cannot_enter_transport";
+				return false;
+			}
+			const ObjectID workerId = worker->getID();
+			const ObjectID technicalId = technical->getID();
+			return executeScopedSelectionCommand(player, std::vector<ObjectID>(1, workerId), reason, [&]() -> bool
+			{
+				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_ENTER);
+				if (msg == nullptr)
+				{
+					reason = "message_stream_not_ready";
+					return false;
+				}
+				msg->appendObjectIDArgument(INVALID_ID);
+				msg->appendObjectIDArgument(technicalId);
+				return true;
+			});
+		}
+
+		bool issueTechnicalMoveAndEvacuate(Object* technical, const Coord3D& target, std::string& reason)
+		{
+			if (technical == nullptr || technical->isEffectivelyDead())
+			{
+				reason = "technical_dead";
+				return false;
+			}
+			AIUpdateInterface* ai = technical->getAIUpdateInterface();
+			if (ai == nullptr)
+			{
+				reason = "technical_no_ai";
+				return false;
+			}
+			Coord3D moveTarget = target;
+			moveTarget.z = 0.0f;
+			ai->aiMoveToAndEvacuate(&moveTarget, CMD_FROM_PLAYER);
+			reason = "move_and_evacuate_issued";
+			return true;
+		}
+
+		bool issueWorkerConstructNoReservation(Player* player, Object* worker, const std::string& templateName, const Coord3D& location, std::string& reason)
+		{
+			if (player == nullptr || worker == nullptr || templateName.empty() || TheThingFactory == nullptr)
+			{
+				reason = "logic_not_ready";
+				return false;
+			}
+			const ThingTemplate* buildingTemplate = TheThingFactory->findTemplate(AsciiString(templateName.c_str()), false);
+			if (buildingTemplate == nullptr)
+			{
+				reason = "template_not_found";
+				return false;
+			}
+			const ObjectID workerId = worker->getID();
+			const Int templateId = buildingTemplate->getTemplateID();
+			Coord3D target = location;
+			target.z = 0.0f;
+			return executeScopedSelectionCommand(player, std::vector<ObjectID>(1, workerId), reason, [&]() -> bool
+			{
+				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DOZER_CONSTRUCT);
+				if (msg == nullptr)
+				{
+					reason = "message_stream_not_ready";
+					return false;
+				}
+				msg->appendIntegerArgument(templateId);
+				msg->appendLocationArgument(target);
+				msg->appendRealArgument(0.0f);
+				return true;
+			});
+		}
+
+		bool isTechnicalAssignedToWorkerShuttle(UnsignedInt technicalId) const
+		{
+			for (const auto& pair : m_autonomy.state.workerShuttleAssignments)
+			{
+				const AutonomyWorkerShuttleAssignment& assignment = pair.second;
+				if (assignment.technicalId == technicalId
+					&& assignment.state != "released"
+					&& assignment.state != "failed")
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+
+		Object* chooseWorkerShuttleTechnical(Player* player, Object* worker)
+		{
+			if (player == nullptr || worker == nullptr || TheGameLogic == nullptr)
+			{
+				return nullptr;
+			}
+			const std::set<UnsignedInt> protectedIds = collectWorkerShuttleProtectedTechnicalIds(player);
+			if (protectedIds.empty())
+			{
+				return nullptr;
+			}
+			const Coord3D* workerPos = worker->getPosition();
+			Object* best = nullptr;
+			Real bestDistSq = 999999999.0f;
+			for (UnsignedInt id : protectedIds)
+			{
+				if (isTechnicalAssignedToWorkerShuttle(id))
+				{
+					continue;
+				}
+				Object* technical = TheGameLogic->findObjectByID(static_cast<ObjectID>(id));
+				if (technical == nullptr || technical->isEffectivelyDead())
+				{
+					continue;
+				}
+				if (m_autonomy.combatTaskManager.isUnitReserved(id))
+				{
+					continue;
+				}
+				if (TheActionManager != nullptr
+					&& !TheActionManager->canEnterObject(worker, technical, CMD_FROM_PLAYER, CHECK_CAPACITY))
+				{
+					continue;
+				}
+				const Coord3D* techPos = technical->getPosition();
+				if (workerPos == nullptr || techPos == nullptr)
+				{
+					return technical;
+				}
+				const Real dx = techPos->x - workerPos->x;
+				const Real dy = techPos->y - workerPos->y;
+				const Real distSq = (dx * dx) + (dy * dy);
+				if (best == nullptr || distSq < bestDistSq)
+				{
+					best = technical;
+					bestDistSq = distSq;
+				}
+			}
+			return best;
+		}
+
+		void releaseWorkerShuttleAssignment(std::unordered_map<UnsignedInt, AutonomyWorkerShuttleAssignment>::iterator& it, const std::string& reason)
+		{
+			adapterLog(
+				"worker_shuttle_release task=%u worker=%u technical=%u state=%s reason=%s",
+				it->second.taskId,
+				it->second.workerId,
+				it->second.technicalId,
+				it->second.state.c_str(),
+				reason.c_str());
+			it = m_autonomy.state.workerShuttleAssignments.erase(it);
+		}
+
+		void updateWorkerShuttleAssignments(Player* player)
+		{
+			if (player == nullptr || TheGameLogic == nullptr)
+			{
+				return;
+			}
+			const DWORD now = ::GetTickCount();
+			nlohmann::json telemetry = nlohmann::json::array();
+			const int protectedTechnicals = resolveWorkerShuttleProtectedTechnicalCount();
+
+			for (auto it = m_autonomy.state.workerShuttleAssignments.begin(); it != m_autonomy.state.workerShuttleAssignments.end();)
+			{
+				AutonomyWorkerShuttleAssignment& assignment = it->second;
+				SpecialTaskReservation* task = m_autonomy.taskReservationManager.findReservation(assignment.taskId);
+				Object* worker = TheGameLogic->findObjectByID(static_cast<ObjectID>(assignment.workerId));
+				Object* technical = TheGameLogic->findObjectByID(static_cast<ObjectID>(assignment.technicalId));
+				if (protectedTechnicals <= 0)
+				{
+					releaseWorkerShuttleAssignment(it, "policy_disabled");
+					continue;
+				}
+				if (task == nullptr
+					|| task->state == SpecialTaskState::Complete
+					|| task->state == SpecialTaskState::Failed
+					|| task->state == SpecialTaskState::Expired
+					|| task->targetObjectId != 0u)
+				{
+					releaseWorkerShuttleAssignment(it, "build_task_resolved");
+					continue;
+				}
+				if (worker == nullptr || worker->isEffectivelyDead())
+				{
+					releaseWorkerShuttleAssignment(it, "worker_dead");
+					continue;
+				}
+				if (technical == nullptr || technical->isEffectivelyDead())
+				{
+					releaseWorkerShuttleAssignment(it, "technical_dead");
+					continue;
+				}
+				if (now - assignment.createdTick > 90000u)
+				{
+					releaseWorkerShuttleAssignment(it, "timeout");
+					continue;
+				}
+
+				const Coord3D* workerPos = worker->getPosition();
+				const Coord3D* technicalPos = technical->getPosition();
+				const bool workerInside = isWorkerInsideTechnical(worker, technical);
+				Real workerTargetDist = 999999.0f;
+				if (workerPos != nullptr)
+				{
+					const Real dx = workerPos->x - assignment.targetPosition.x;
+					const Real dy = workerPos->y - assignment.targetPosition.y;
+					workerTargetDist = std::sqrt((dx * dx) + (dy * dy));
+				}
+				Real technicalTargetDist = 999999.0f;
+				if (technicalPos != nullptr)
+				{
+					const Real dx = technicalPos->x - assignment.targetPosition.x;
+					const Real dy = technicalPos->y - assignment.targetPosition.y;
+					technicalTargetDist = std::sqrt((dx * dx) + (dy * dy));
+				}
+
+				if (workerInside)
+				{
+					if (assignment.state != "transporting" || now - assignment.lastCommandTick >= 9000u)
+					{
+						std::string reason;
+						const bool issued = issueTechnicalMoveAndEvacuate(technical, assignment.targetPosition, reason);
+						assignment.state = issued ? "transporting" : "failed";
+						assignment.reason = reason;
+						assignment.lastCommandTick = now;
+						adapterLog(
+							"worker_shuttle_transport task=%u worker=%u technical=%u issued=%d target=(%.1f,%.1f) distance=%.1f reason=%s",
+							assignment.taskId,
+							assignment.workerId,
+							assignment.technicalId,
+							issued ? 1 : 0,
+							assignment.targetPosition.x,
+							assignment.targetPosition.y,
+							technicalTargetDist,
+							reason.c_str());
+					}
+				}
+				else if (workerTargetDist <= 420.0f && !assignment.constructReissued)
+				{
+					std::string reason;
+					const bool issued = issueWorkerConstructNoReservation(player, worker, assignment.templateName, assignment.targetPosition, reason);
+					assignment.constructReissued = issued;
+					assignment.state = issued ? "reissued_construction" : "failed";
+					assignment.reason = reason;
+					assignment.lastCommandTick = now;
+					adapterLog(
+						"worker_shuttle_construct_reissue task=%u worker=%u technical=%u template=%s issued=%d distance=%.1f reason=%s",
+						assignment.taskId,
+						assignment.workerId,
+						assignment.technicalId,
+						assignment.templateName.c_str(),
+						issued ? 1 : 0,
+						workerTargetDist,
+						reason.c_str());
+					if (issued)
+					{
+						releaseWorkerShuttleAssignment(it, "construction_reissued");
+						continue;
+					}
+				}
+				else if (assignment.state == "entering" && now - assignment.lastCommandTick >= 10000u && assignment.commandReissueCount < 2)
+				{
+					std::string reason;
+					const bool issued = issueWorkerEnterTechnical(player, worker, technical, reason);
+					++assignment.commandReissueCount;
+					assignment.reason = reason;
+					assignment.lastCommandTick = now;
+					adapterLog(
+						"worker_shuttle_enter task=%u worker=%u technical=%u issued=%d reissue=%d reason=%s",
+						assignment.taskId,
+						assignment.workerId,
+						assignment.technicalId,
+						issued ? 1 : 0,
+						assignment.commandReissueCount,
+						reason.c_str());
+				}
+
+				telemetry.push_back(nlohmann::json::object({
+					{"task_id", assignment.taskId},
+					{"worker_id", assignment.workerId},
+					{"technical_id", assignment.technicalId},
+					{"template", assignment.templateName},
+					{"state", assignment.state},
+					{"reason", assignment.reason},
+					{"age_ms", static_cast<UnsignedInt>(now - assignment.createdTick)},
+					{"last_command_age_ms", static_cast<UnsignedInt>(now - assignment.lastCommandTick)},
+					{"worker_inside", workerInside},
+					{"worker_distance", workerTargetDist},
+					{"technical_distance", technicalTargetDist},
+					{"target", nlohmann::json::object({
+						{"x", assignment.targetPosition.x},
+						{"y", assignment.targetPosition.y},
+						{"z", assignment.targetPosition.z}
+					})}
+				}));
+				++it;
+			}
+
+			if (protectedTechnicals > 0)
+			{
+				std::vector<SpecialTaskReservation*> buildTasks = m_autonomy.taskReservationManager.findBuildTasks();
+				for (SpecialTaskReservation* task : buildTasks)
+				{
+					if (static_cast<int>(m_autonomy.state.workerShuttleAssignments.size()) >= protectedTechnicals)
+					{
+						break;
+					}
+					if (task == nullptr || task->targetObjectId != 0u)
+					{
+						continue;
+					}
+					if (task->state != SpecialTaskState::Assigned && task->state != SpecialTaskState::Moving)
+					{
+						continue;
+					}
+					if (m_autonomy.state.workerShuttleAssignments.find(task->taskId) != m_autonomy.state.workerShuttleAssignments.end())
+					{
+						continue;
+					}
+					Object* worker = TheGameLogic->findObjectByID(static_cast<ObjectID>(task->sourceObjectId));
+					if (worker == nullptr || worker->isEffectivelyDead() || !worker->isKindOf(KINDOF_DOZER))
+					{
+						continue;
+					}
+					if (worker->getContainedBy() != nullptr)
+					{
+						continue;
+					}
+					const Coord3D* workerPos = worker->getPosition();
+					if (workerPos == nullptr)
+					{
+						continue;
+					}
+					const Real dx = workerPos->x - task->targetPosition.x;
+					const Real dy = workerPos->y - task->targetPosition.y;
+					const Real distance = std::sqrt((dx * dx) + (dy * dy));
+					if (distance < 1200.0f)
+					{
+						continue;
+					}
+					Object* technical = chooseWorkerShuttleTechnical(player, worker);
+					if (technical == nullptr)
+					{
+						continue;
+					}
+					std::string reason;
+					const bool issued = issueWorkerEnterTechnical(player, worker, technical, reason);
+					adapterLog(
+						"worker_shuttle_assignment task=%u worker=%u technical=%u template=%s issued=%d distance=%.1f reason=%s",
+						task->taskId,
+						task->sourceObjectId,
+						static_cast<unsigned int>(technical->getID()),
+						task->expectedTemplate.c_str(),
+						issued ? 1 : 0,
+						distance,
+						reason.c_str());
+					if (!issued)
+					{
+						continue;
+					}
+					AutonomyWorkerShuttleAssignment assignment;
+					assignment.taskId = task->taskId;
+					assignment.workerId = task->sourceObjectId;
+					assignment.technicalId = static_cast<UnsignedInt>(technical->getID());
+					assignment.templateName = task->expectedTemplate;
+					assignment.targetPosition = task->targetPosition;
+					assignment.createdTick = now;
+					assignment.lastCommandTick = now;
+					assignment.lastProgressTick = now;
+					assignment.state = "entering";
+					assignment.reason = reason;
+					m_autonomy.state.workerShuttleAssignments[task->taskId] = assignment;
+					m_autonomy.taskReservationManager.updateTaskState(task->taskId, SpecialTaskState::Moving, "worker_shuttle_entering");
+				}
+			}
+
+			m_autonomy.state.glaUsaStrategyTelemetry["worker_shuttle_tasks"] = telemetry;
+			adapterLog(
+				"worker_shuttle_policy protected=%d active=%d reason=%s",
+				protectedTechnicals,
+				static_cast<int>(m_autonomy.state.workerShuttleAssignments.size()),
+				protectedTechnicals > 0 ? "worker_mobility" : "disabled");
+		}
+
 		bool shouldLogScoutReservationSkip(const std::string& key, DWORD now, DWORD heartbeatMs = 5000u)
 		{
 			std::unordered_map<std::string, DWORD>& ticks = m_autonomy.state.scoutReservationLogTickByKey;
@@ -11729,7 +12329,8 @@ namespace
 					!m_autonomy.taskReservationManager.isObjectReserved(unitId) &&
 					!isGarrisonReservedUnit(unitId) &&
 					(!isUnitProtectedByZoneDefenseFloor(owned.object) || (relaxDefenseFloor && canRelaxScoutDefenseFloorForUnit(owned.object))) &&
-					!m_autonomy.combatTaskManager.isUnitReserved(unitId))
+					!m_autonomy.combatTaskManager.isUnitReserved(unitId) &&
+					!isWorkerShuttleTechnicalProtected(player, owned))
 				{
 					hasAvailableTechnical = true;
 					break;
@@ -11792,6 +12393,7 @@ namespace
 					containsIgnoreCase(owned.name, "tomahawk") ||
 					containsIgnoreCase(owned.name, "nuke") ||
 					containsIgnoreCase(owned.name, "inferno");
+				candidate.workerShuttleReserved = owned.isTechnical && isWorkerShuttleTechnicalProtected(player, owned);
 				if (owned.isTechnical)
 				{
 					candidate.preference = 100;
@@ -11848,6 +12450,10 @@ namespace
 					else if (candidate.artilleryCounterReserved)
 					{
 						recordScoutUnavailable(outStats, "artillery_counter_reserved");
+					}
+					else if (candidate.workerShuttleReserved)
+					{
+						recordScoutUnavailable(outStats, "worker_shuttle_reserved");
 					}
 				}
 				candidates.push_back(candidate);
@@ -14617,6 +15223,21 @@ namespace
 								}
 							}
 						}
+					}
+					continue;
+				}
+				if (!includeScoutPoolTechnicals && isWorkerShuttleTechnicalProtected(player, owned))
+				{
+					const DWORD now = ::GetTickCount();
+					const std::string logKey =
+						std::string("worker_shuttle:") +
+						std::to_string(static_cast<unsigned int>(owned.object->getID())) +
+						":worker_shuttle_reserved";
+					if (shouldLogScoutReservationSkip(logKey, now))
+					{
+						adapterLog(
+							"combat_skip_reserved_worker_shuttle unit=%u reason=worker_mobility",
+							static_cast<unsigned int>(owned.object->getID()));
 					}
 					continue;
 				}

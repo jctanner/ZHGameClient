@@ -67,6 +67,9 @@ struct AIControlAdapterGlaUsaStrategyResult
 	bool workerMobilityDesired = false;
 	const char* workerMobilityMode = "walk";
 	int desiredShuttleTechnicals = 0;
+	int protectedShuttleTechnicals = 0;
+	bool shuttleTechnicalProductionNeeded = false;
+	const char* shuttleReservationReason = "not_needed";
 	const char* workerMobilityReason = "local_builds";
 
 	bool wmdConstructionDiagnosticNeeded = false;

@@ -218,6 +218,8 @@ struct AIControlAdapterEffectiveArmyCapPolicyInputs
  */
 int AIControlAdapterGetEffectiveArmyCap(const AIControlAdapterEffectiveArmyCapPolicyInputs& inputs);
 
+bool AIControlAdapterLooksLikeUsaIdentity(const std::string& value);
+
 /**
  * Decide whether to hold production at army cap limit.
  *

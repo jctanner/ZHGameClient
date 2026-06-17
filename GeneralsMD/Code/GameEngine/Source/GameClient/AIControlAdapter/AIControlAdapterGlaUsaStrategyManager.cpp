@@ -139,20 +139,27 @@ AIControlAdapterGlaUsaStrategyResult AIControlAdapterGlaUsaStrategyManager::Eval
 	if (result.workerMobilityDesired)
 	{
 		result.desiredShuttleTechnicals = input.remoteBuildGap >= 4 ? 2 : 1;
+		result.protectedShuttleTechnicals = result.desiredShuttleTechnicals;
+		result.shuttleTechnicalProductionNeeded =
+			input.readyArmsDealers > 0
+			&& effectiveTechnicals < result.desiredShuttleTechnicals;
 		if (effectiveTechnicals >= result.desiredShuttleTechnicals)
 		{
 			result.workerMobilityMode = "technical";
 			result.workerMobilityReason = "remote_build_distance";
+			result.shuttleReservationReason = "reserved_for_worker_mobility";
 		}
 		else if (input.tunnels >= 2)
 		{
 			result.workerMobilityMode = "mixed";
 			result.workerMobilityReason = "needs_more_technicals";
+			result.shuttleReservationReason = "needs_more_technicals";
 		}
 		else
 		{
 			result.workerMobilityMode = "walk";
 			result.workerMobilityReason = "technical_missing";
+			result.shuttleReservationReason = "technical_missing";
 		}
 	}
 	else if (input.remoteBuildGap <= 0)

@@ -83,6 +83,14 @@ int main()
 	}
 
 	{
+		expect(AIControlAdapterLooksLikeUsaIdentity("America"), "America side should identify USA opponent");
+		expect(AIControlAdapterLooksLikeUsaIdentity("AmericaSuperWeaponGeneral"), "America template should identify USA opponent");
+		expect(AIControlAdapterLooksLikeUsaIdentity("USA"), "USA token should identify USA opponent");
+		expect(!AIControlAdapterLooksLikeUsaIdentity("GLA"), "GLA side should not identify USA opponent");
+		expect(!AIControlAdapterLooksLikeUsaIdentity("China"), "China side should not identify USA opponent");
+	}
+
+	{
 		const AIControlAdapterProfilePolicyConfig config = AIControlAdapterResolveProfilePolicyConfig(
 			"sprawl",
 			0.65f,

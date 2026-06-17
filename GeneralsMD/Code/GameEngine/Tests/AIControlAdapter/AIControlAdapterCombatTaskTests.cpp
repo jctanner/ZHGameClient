@@ -1114,6 +1114,35 @@ TEST_F(AIControlAdapterCombatTaskTests, ScoutUnitSelection_RelaxedDefenseFloorSt
 	EXPECT_EQ(selected[1], 43u);
 }
 
+TEST_F(AIControlAdapterCombatTaskTests, ScoutUnitSelection_ExcludesWorkerShuttleReservedTechnicals)
+{
+	CombatTaskScoutCandidate reservedTechnical;
+	reservedTechnical.unitId = 50;
+	reservedTechnical.alive = true;
+	reservedTechnical.fast = true;
+	reservedTechnical.combatCapable = true;
+	reservedTechnical.preference = 100;
+	reservedTechnical.distanceFromOrigin = 25.0f;
+	reservedTechnical.workerShuttleReserved = true;
+
+	CombatTaskScoutCandidate availableQuad;
+	availableQuad.unitId = 51;
+	availableQuad.alive = true;
+	availableQuad.fast = true;
+	availableQuad.combatCapable = true;
+	availableQuad.preference = 60;
+	availableQuad.distanceFromOrigin = 50.0f;
+
+	std::vector<CombatTaskScoutCandidate> candidates;
+	candidates.push_back(reservedTechnical);
+	candidates.push_back(availableQuad);
+
+	std::vector<unsigned int> selected = selectCombatTaskScoutUnits(candidates, 2);
+
+	ASSERT_EQ(selected.size(), 1u);
+	EXPECT_EQ(selected[0], 51u);
+}
+
 TEST_F(AIControlAdapterCombatTaskTests, ScoutUnitSelection_BoundsCountAndPrefersFastUnits)
 {
 	std::vector<CombatTaskScoutCandidate> candidates;

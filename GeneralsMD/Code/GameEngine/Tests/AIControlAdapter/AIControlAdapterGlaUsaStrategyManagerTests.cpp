@@ -123,6 +123,9 @@ int main()
 		expect(result.workerMobilityDesired, "Far remote build gap should desire worker mobility");
 		expect(result.workerMobilityMode == std::string("technical"), "Available Technicals should choose Technical shuttle mode");
 		expect(result.desiredShuttleTechnicals == 2, "Large remote gap should desire two shuttle Technicals");
+		expect(result.protectedShuttleTechnicals == 2, "Large remote gap should protect two shuttle Technicals");
+		expect(!result.shuttleTechnicalProductionNeeded, "Existing Technicals should satisfy shuttle production");
+		expect(result.shuttleReservationReason == std::string("reserved_for_worker_mobility"), "Shuttle reservation should explain protected Technicals");
 	}
 
 	{
@@ -136,6 +139,20 @@ int main()
 		expect(result.workerMobilityDesired, "Remote build gap should still desire mobility without Technicals");
 		expect(result.workerMobilityMode == std::string("mixed"), "Tunnel network should produce mixed mobility recommendation");
 		expect(result.workerMobilityReason == std::string("needs_more_technicals"), "Policy should explain Technical shortage");
+		expect(result.protectedShuttleTechnicals == 1, "Smaller remote gap should protect one shuttle slot");
+		expect(result.shuttleTechnicalProductionNeeded, "Missing Technical should trigger shuttle production");
+		expect(result.shuttleReservationReason == std::string("needs_more_technicals"), "Shuttle reservation should expose shortage reason");
+	}
+
+	{
+		AIControlAdapterGlaUsaStrategyInput input = baseUsaInput();
+		input.remoteBuildGap = 0;
+		input.farthestRemoteBuildDistance = 1800.0f;
+		const AIControlAdapterGlaUsaStrategyResult result =
+			AIControlAdapterGlaUsaStrategyManager().Evaluate(input);
+		expect(!result.workerMobilityDesired, "No remote build gap should not desire worker mobility");
+		expect(result.protectedShuttleTechnicals == 0, "No worker mobility should not protect shuttle Technicals");
+		expect(!result.shuttleTechnicalProductionNeeded, "No worker mobility should not produce shuttle Technicals");
 	}
 
 	std::cout << "AIControlAdapterGlaUsaStrategyManagerTests passed\n";

@@ -208,6 +208,7 @@ struct CombatTaskScoutCandidate
 	bool artilleryCounterReserved = false;
 	int preference = 0;
 	Real distanceFromOrigin = 0.0f;
+	bool workerShuttleReserved = false;
 };
 
 struct CombatTaskScudTargetRefreshOverrideInput
