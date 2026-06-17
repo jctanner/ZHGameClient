@@ -1440,6 +1440,28 @@ int main()
 	}
 
 	{
+		// Phase 12: in-progress count below cap is not enough by itself;
+		// retry cooldown still blocks repeated command spam.
+		const AIControlAdapterZoneExpansionArbitrationInputs inputs = {
+			true,   // zoneExpansionIsUrgent
+			true,   // allowUrgentExpansionDespiteReserve
+			true,   // remoteZoneNeedsFollowup
+			10,     // stashZoneCount
+			30,     // desiredZoneCount
+			1,      // supplyStashesInProgress
+			false,  // shouldThrottleExtraStashGrowth
+			120000, // money
+			10000,  // reserveCash
+			true,   // isBalancedSprawl
+			false,  // isBuildAttemptReady/cooldown ready
+			3       // maxConcurrentSupplyStashes
+		};
+		const auto result = AIControlAdapterChooseZoneExpansionAction(inputs);
+		expect(!result.shouldAttemptExpansion, "Phase 12: expansion should still respect cooldown below concurrent cap");
+		expect(std::strcmp(result.reason, "build_cooldown") == 0, "Phase 12: cooldown block should report build_cooldown");
+	}
+
+	{
 		// Phase 12: once the configured concurrent cap is reached, block explicitly.
 		const AIControlAdapterZoneExpansionArbitrationInputs inputs = {
 			true,   // zoneExpansionIsUrgent
@@ -1458,6 +1480,178 @@ int main()
 		const auto result = AIControlAdapterChooseZoneExpansionAction(inputs);
 		expect(!result.shouldAttemptExpansion, "Phase 12: expansion should block when concurrent stash cap is reached");
 		expect(std::strcmp(result.reason, "in_progress_cap") == 0, "Phase 12: cap block should report in_progress_cap");
+	}
+
+	{
+		// Phase 12: many local supply zones can still be strategically insignificant
+		// when the footprint has not left the home quadrant.
+		const AIControlAdapterMacroExpansionSnapshot snapshot = {
+			true,    // isSprawlStyle
+			true,    // isBalancedSprawl
+			10,      // stashZoneCount
+			7,       // developedZoneCount
+			1,       // remoteSupplyZoneCount
+			900.0f,  // supplyFootprintRadius
+			30,      // desiredZoneCount
+			5,       // urgentZoneGapThreshold
+			1,       // supplyStashesInProgress
+			3,       // maxConcurrentSupplyStashes
+			true,    // remoteZoneNeedsFollowup
+			false,   // shouldThrottleExtraStashGrowth
+			true,    // isBuildCooldownReady
+			50000u,  // money
+			10000u,  // reserveCash
+			10000u   // expansionHighCashFloatThreshold
+		};
+		const auto decision = AIControlAdapterResolveMacroExpansionDecision(snapshot);
+		expect(decision.coverageExpansionUrgent, "Phase 12: low footprint should make expansion urgent despite local zone count");
+		expect(decision.zoneExpansionUrgent, "Phase 12: coverage urgency should set combined urgency");
+		expect(decision.preferRemoteSupplyExpansion, "Phase 12: poor footprint should prefer remote supply selection");
+		expect(decision.arbitration.shouldAttemptExpansion, "Phase 12: poor-footprint high-cash expansion should attempt another stash");
+		expect(std::strcmp(decision.expansionReason, "coverage_gap_high_cash") == 0, "Phase 12: reason should identify coverage gap");
+	}
+
+	{
+		// Phase 12: enough total zones but too few remote supply zones should still
+		// bias expansion toward far supply docks while under target.
+		const AIControlAdapterMacroExpansionSnapshot snapshot = {
+			true,    // isSprawlStyle
+			true,    // isBalancedSprawl
+			24,      // stashZoneCount
+			18,      // developedZoneCount
+			2,       // remoteSupplyZoneCount
+			2600.0f, // supplyFootprintRadius
+			30,      // desiredZoneCount
+			5,       // urgentZoneGapThreshold
+			0,       // supplyStashesInProgress
+			3,       // maxConcurrentSupplyStashes
+			false,   // remoteZoneNeedsFollowup
+			false,   // shouldThrottleExtraStashGrowth
+			true,    // isBuildCooldownReady
+			50000u,  // money
+			10000u,  // reserveCash
+			10000u   // expansionHighCashFloatThreshold
+		};
+		const auto decision = AIControlAdapterResolveMacroExpansionDecision(snapshot);
+		expect(decision.desiredRemoteSupplyZones == 7, "Phase 12: desired remote zones should scale from desired zone count");
+		expect(decision.coverageExpansionUrgent, "Phase 12: remote supply deficit should be urgent");
+		expect(decision.preferRemoteSupplyExpansion, "Phase 12: remote supply deficit should prefer remote selection");
+		expect(decision.arbitration.shouldAttemptExpansion, "Phase 12: remote supply deficit should allow expansion when spend conditions are met");
+	}
+
+	{
+		// Phase 12: footprint urgency still respects the reserve/high-cash gate.
+		const AIControlAdapterMacroExpansionSnapshot snapshot = {
+			true,    // isSprawlStyle
+			true,    // isBalancedSprawl
+			10,      // stashZoneCount
+			7,       // developedZoneCount
+			1,       // remoteSupplyZoneCount
+			900.0f,  // supplyFootprintRadius
+			30,      // desiredZoneCount
+			5,       // urgentZoneGapThreshold
+			1,       // supplyStashesInProgress
+			3,       // maxConcurrentSupplyStashes
+			true,    // remoteZoneNeedsFollowup
+			false,   // shouldThrottleExtraStashGrowth
+			true,    // isBuildCooldownReady
+			10500u,  // money
+			10000u,  // reserveCash
+			10000u   // expansionHighCashFloatThreshold
+		};
+		const auto decision = AIControlAdapterResolveMacroExpansionDecision(snapshot);
+		expect(decision.coverageExpansionUrgent, "Phase 12: coverage urgency should be detected even with low cash float");
+		expect(!decision.allowUrgentExpansionDespiteReserve, "Phase 12: low cash float should not allow urgent reserve spend");
+		expect(!decision.arbitration.shouldAttemptExpansion, "Phase 12: low cash float should block remote followup override");
+		expect(std::strcmp(decision.expansionReason, "coverage_gap_low_cash") == 0, "Phase 12: reason should identify low-cash coverage gap");
+	}
+
+	{
+		const AIControlAdapterZoneSeedPackageDecision decision = AIControlAdapterChooseZoneSeedPackage({
+			true,  // isSprawlStyle
+			true,  // canScaleMilitaryProduction
+			true,  // remoteZoneHasStash
+			false, // coverageExpansionUrgent
+			false, // activeZoneThreatened
+			true,  // allowExpansionBeforeFullRemoteFollowup
+			0,     // tunnels
+			0,     // tunnelsInProgress
+			0,     // stingers
+			0,     // stingersInProgress
+			0,     // barracks
+			0,     // barracksInProgress
+			0,     // armsDealers
+			0      // armsDealersInProgress
+		});
+		expect(decision.needsFollowup, "Phase 12: new remote stash should need followup");
+		expect(std::strcmp(decision.packageStage, "tunnel") == 0, "Phase 12: seed package should build tunnel first");
+		expect(std::strcmp(decision.command, "Game.BuildTunnelNetwork") == 0, "Phase 12: tunnel stage should produce tunnel command");
+	}
+
+	{
+		const AIControlAdapterZoneSeedPackageDecision decision = AIControlAdapterChooseZoneSeedPackage({
+			true,  // isSprawlStyle
+			true,  // canScaleMilitaryProduction
+			true,  // remoteZoneHasStash
+			false, // coverageExpansionUrgent
+			false, // activeZoneThreatened
+			true,  // allowExpansionBeforeFullRemoteFollowup
+			1,     // tunnels
+			0,     // tunnelsInProgress
+			0,     // stingers
+			0,     // stingersInProgress
+			0,     // barracks
+			0,     // barracksInProgress
+			0,     // armsDealers
+			0      // armsDealersInProgress
+		});
+		expect(decision.needsFollowup, "Phase 12: tunneled remote stash should need stinger followup");
+		expect(std::strcmp(decision.packageStage, "stinger") == 0, "Phase 12: seed package should build stinger after tunnel");
+		expect(std::strcmp(decision.command, "Game.BuildStingerSite") == 0, "Phase 12: stinger stage should produce stinger command");
+	}
+
+	{
+		const AIControlAdapterZoneSeedPackageDecision decision = AIControlAdapterChooseZoneSeedPackage({
+			true,  // isSprawlStyle
+			true,  // canScaleMilitaryProduction
+			true,  // remoteZoneHasStash
+			true,  // coverageExpansionUrgent
+			false, // activeZoneThreatened
+			true,  // allowExpansionBeforeFullRemoteFollowup
+			1,     // tunnels
+			0,     // tunnelsInProgress
+			1,     // stingers
+			0,     // stingersInProgress
+			0,     // barracks
+			0,     // barracksInProgress
+			0,     // armsDealers
+			0      // armsDealersInProgress
+		});
+		expect(!decision.needsFollowup, "Phase 12: coverage urgency should skip non-critical producer followup after basic defense");
+		expect(decision.command == nullptr, "Phase 12: coverage-priority seed decision should not emit producer command");
+		expect(std::strcmp(decision.reason, "coverage_expansion_priority") == 0, "Phase 12: skipped producer followup should explain coverage priority");
+	}
+
+	{
+		const AIControlAdapterZoneSeedPackageDecision decision = AIControlAdapterChooseZoneSeedPackage({
+			true,  // isSprawlStyle
+			true,  // canScaleMilitaryProduction
+			true,  // remoteZoneHasStash
+			true,  // coverageExpansionUrgent
+			true,  // activeZoneThreatened
+			true,  // allowExpansionBeforeFullRemoteFollowup
+			1,     // tunnels
+			0,     // tunnelsInProgress
+			0,     // stingers
+			0,     // stingersInProgress
+			0,     // barracks
+			0,     // barracksInProgress
+			0,     // armsDealers
+			0      // armsDealersInProgress
+		});
+		expect(decision.needsFollowup, "Phase 12: threatened zone should still receive defensive followup under coverage pressure");
+		expect(std::strcmp(decision.command, "Game.BuildStingerSite") == 0, "Phase 12: threatened tunneled zone should build stinger");
+		expect(std::strcmp(decision.reason, "threatened_needs_stinger") == 0, "Phase 12: threatened defensive followup should be explicit");
 	}
 
 	{
@@ -2591,6 +2785,15 @@ int main()
 		expect(result.commands.size() >= 3u, "Emergency survival should keep Scorpions and RPGs ahead of optional Rebels");
 		expect(result.commands[1] == "Game.QueueScorpionsAllWarFactories", "Emergency survival should prefer Scorpions before Barracks fallback");
 		expect(result.commands[2] == "Game.QueueRpgTroopersAllBarracks", "Emergency survival should choose RPGs before Rebels");
+		expect(
+			std::strcmp(AIControlAdapterChooseEmergencySurvivalProductionCommand(result, 0, 0, 0, 0), "Game.QueueQuadsAllWarFactories") == 0,
+			"Emergency survival should still seed the first Quad when both vehicle buckets are empty");
+		expect(
+			std::strcmp(AIControlAdapterChooseEmergencySurvivalProductionCommand(result, 6, 1, 1, 0), "Game.QueueScorpionsAllWarFactories") == 0,
+			"Emergency survival should choose Scorpions when the army is quad-heavy");
+		expect(
+			std::strcmp(AIControlAdapterChooseEmergencySurvivalProductionCommand(result, 4, 0, 5, 0), "Game.QueueQuadsAllWarFactories") == 0,
+			"Emergency survival should return to Quads once Scorpions catch up");
 	}
 
 	{
@@ -3373,6 +3576,37 @@ int main()
 		});
 		expect(emergency.maxAssignmentsThisCycle == 0, "Critical emergency should hold garrison throughput");
 		expect(emergency.reason == std::string("critical_emergency_reserve"), "Emergency hold reason should be explicit");
+	}
+
+	{
+		const AIControlAdapterMacroBuildIntentChoice choice = AIControlAdapterChooseMacroBuildIntent({
+			{ "market_growth", "Game.BuildBlackMarketSmart", 40, true, "market_growth" },
+			{ "expansion", "Game.BuildSupplyStashSmart", 100, true, "coverage_gap_high_cash" },
+			{ "zone_seed", "Game.BuildTunnelNetwork", 80, true, "needs_tunnel" }
+		});
+		expect(choice.index == 1, "Macro build intent should choose the highest-priority valid intent");
+		expect(choice.category == std::string("expansion"), "Macro build intent should expose selected category");
+		expect(choice.command == std::string("Game.BuildSupplyStashSmart"), "Macro build intent should expose selected command");
+		expect(choice.reason == std::string("coverage_gap_high_cash"), "Macro build intent should preserve selected reason");
+	}
+
+	{
+		const AIControlAdapterMacroBuildIntentChoice choice = AIControlAdapterChooseMacroBuildIntent({
+			{ "expansion", "Game.BuildSupplyStashSmart", 100, false, "reserve_protected" },
+			{ "zone_seed", "Game.BuildStingerSite", 70, true, "needs_stinger" },
+			{ "market_growth", "Game.BuildBlackMarketSmart", 40, true, "market_growth" }
+		});
+		expect(choice.index == 1, "Macro build intent should skip blocked higher-priority intents");
+		expect(choice.command == std::string("Game.BuildStingerSite"), "Macro build intent should fall through to the next valid candidate");
+	}
+
+	{
+		const AIControlAdapterMacroBuildIntentChoice choice = AIControlAdapterChooseMacroBuildIntent({
+			{ "expansion", "Game.BuildSupplyStashSmart", 100, false, "cooldown" },
+			{ "market_growth", "Game.BuildBlackMarketSmart", 40, false, "reserve_protected" }
+		});
+		expect(choice.index == -1, "Macro build intent should return no selection when every candidate is blocked");
+		expect(choice.reason == std::string("no_valid_intent"), "Macro build intent should explain empty selections");
 	}
 
 	std::cout << "AIControlAdapterPolicyTests passed\n";

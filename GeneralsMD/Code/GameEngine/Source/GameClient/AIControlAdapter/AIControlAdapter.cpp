@@ -9,7 +9,15 @@
 #include "GameClient/AIControlAdapter/AIControlAdapterDefenseManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterEconomyManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterEnemyMemory.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterMacroBuildDispatcher.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterMacroBuildManager.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterMacroBuildSnapshotBuilder.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterMacroBuildTelemetrySerializer.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterProfilePolicyManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterScheduler.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterStrategicSpendManager.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterStrategicSpendSnapshotBuilder.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterStrategicSpendTelemetrySerializer.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterTaskReservation.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterWMDTarget.h"
 
@@ -650,6 +658,7 @@ namespace
 		nlohmann::json brutalPressureTelemetry;
 		nlohmann::json emergencySurvivalTelemetry;
 		nlohmann::json strategicSpendTelemetry;
+		nlohmann::json macroBuildTelemetry;
 		nlohmann::json mainBaseCriticalOverrideTelemetry;
 		nlohmann::json zoneDefenseReserveTelemetry;
 		nlohmann::json pathingTelemetry;
@@ -880,16 +889,10 @@ namespace
 			m_autonomy.state.counterbatteryTelemetry = nlohmann::json::object();
 			m_autonomy.state.brutalPressureTelemetry = nlohmann::json::object();
 			m_autonomy.state.emergencySurvivalTelemetry = nlohmann::json::object();
-			m_autonomy.state.strategicSpendTelemetry = nlohmann::json::object({
-				{"protected_cash", 0},
-				{"last_allowed_category", "none"},
-				{"last_blocked_reason", "not_evaluated"},
-				{"emergency_batch_limit", 0},
-				{"economy_recovery_action", "none"},
-				{"healthy_market_foundations", 0},
-				{"stale_market_foundations", 0},
-				{"stale_strategic_foundations", 0}
-			});
+			m_autonomy.state.strategicSpendTelemetry =
+				AIControlAdapterStrategicSpendTelemetrySerializer().BuildDefaultTelemetry();
+			m_autonomy.state.macroBuildTelemetry =
+				AIControlAdapterMacroBuildTelemetrySerializer().BuildDefaultTelemetry();
 			m_autonomy.state.mainBaseCriticalOverrideTelemetry = nlohmann::json::object({
 				{"active", false},
 				{"zone", 0},
@@ -1064,30 +1067,22 @@ namespace
 
 		AIControlAdapterProfilePolicyConfig resolveAutonomyProfilePolicyConfig() const
 		{
-			AIControlAdapterProfilePolicyConfig config = AIControlAdapterResolveProfilePolicyConfig(
-				normalizeAsciiLower(m_autonomy.state.profile),
-				static_cast<float>(m_autonomy.state.economyBias),
-				static_cast<float>(m_autonomy.state.aggressionBias),
-				static_cast<float>(m_autonomy.state.defenseBias),
-				static_cast<float>(m_autonomy.state.expansionBias),
-				static_cast<float>(m_autonomy.state.sprawlMultiplier));
-			if (m_autonomy.state.hasUrgentZoneGapThresholdOverride)
-			{
-				config.urgentZoneGapThreshold = std::max<Int>(1, m_autonomy.state.urgentZoneGapThresholdOverride);
-			}
-			if (m_autonomy.state.hasMaxConcurrentExpansionStashesOverride)
-			{
-				config.normalMaxConcurrentExpansionStashes = std::max<Int>(1, m_autonomy.state.maxConcurrentExpansionStashesOverride);
-			}
-			if (m_autonomy.state.hasAllowExpansionBeforeFullRemoteFollowupOverride)
-			{
-				config.allowExpansionBeforeFullRemoteFollowup = m_autonomy.state.allowExpansionBeforeFullRemoteFollowupOverride;
-			}
-			if (m_autonomy.state.hasExpansionHighCashFloatThresholdOverride)
-			{
-				config.expansionHighCashFloatThreshold = m_autonomy.state.expansionHighCashFloatThresholdOverride;
-			}
-			return config;
+			AIControlAdapterProfilePolicyRequest request;
+			request.profile = m_autonomy.state.profile;
+			request.economyBias = static_cast<float>(m_autonomy.state.economyBias);
+			request.aggressionBias = static_cast<float>(m_autonomy.state.aggressionBias);
+			request.defenseBias = static_cast<float>(m_autonomy.state.defenseBias);
+			request.expansionBias = static_cast<float>(m_autonomy.state.expansionBias);
+			request.sprawlMultiplier = static_cast<float>(m_autonomy.state.sprawlMultiplier);
+			request.overrides.hasUrgentZoneGapThreshold = m_autonomy.state.hasUrgentZoneGapThresholdOverride;
+			request.overrides.urgentZoneGapThreshold = m_autonomy.state.urgentZoneGapThresholdOverride;
+			request.overrides.hasMaxConcurrentExpansionStashes = m_autonomy.state.hasMaxConcurrentExpansionStashesOverride;
+			request.overrides.maxConcurrentExpansionStashes = m_autonomy.state.maxConcurrentExpansionStashesOverride;
+			request.overrides.hasAllowExpansionBeforeFullRemoteFollowup = m_autonomy.state.hasAllowExpansionBeforeFullRemoteFollowupOverride;
+			request.overrides.allowExpansionBeforeFullRemoteFollowup = m_autonomy.state.allowExpansionBeforeFullRemoteFollowupOverride;
+			request.overrides.hasExpansionHighCashFloatThreshold = m_autonomy.state.hasExpansionHighCashFloatThresholdOverride;
+			request.overrides.expansionHighCashFloatThreshold = m_autonomy.state.expansionHighCashFloatThresholdOverride;
+			return AIControlAdapterProfilePolicyManager().Resolve(request);
 		}
 
 		void applyAutonomyRules()
@@ -1119,10 +1114,11 @@ namespace
 			m_automation.stashWorkerRule.targetWorkersPerStash = policyConfig.stashWorkersPerStash;
 			m_automation.stashWorkerRule.cooldownMs = policyConfig.stashWorkerCooldownMs;
 
-			m_automation.radarVanRule.enabled = (profile != "defensive" && profile != "builtin_passthrough");
+			const AIControlAdapterProfilePolicyManager profilePolicyManager;
+			m_automation.radarVanRule.enabled = profilePolicyManager.AllowsRadarVanAutomation(policyConfig);
 			m_automation.radarVanRule.hasExplicitPlayerIndex = m_autonomy.state.hasExplicitPlayerIndex;
 			m_automation.radarVanRule.playerIndex = m_autonomy.state.playerIndex;
-			m_automation.radarVanRule.minCount = (profile == "tech") ? 2 : 1;
+			m_automation.radarVanRule.minCount = profilePolicyManager.ResolveRadarVanMinCount(policyConfig);
 			m_automation.radarVanRule.cooldownMs = 12000u;
 
 			m_automation.attackRule.enabled = profile != "builtin_passthrough";
@@ -1356,9 +1352,9 @@ namespace
 					}
 				}, &guardCounts);
 
-				const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
 				const Int combatCount = guardCounts.soldiers + guardCounts.rpg + guardCounts.quads + guardCounts.scorpions;
-				const DWORD cadenceMs = (profile == "aggressive") ? 5000u : (((profile == "sprawl" || profile == "sprawl_balanced" || profile == "defensive")) ? 7000u : 6000u);
+				const AIControlAdapterProfilePolicyManager profilePolicyManager;
+				const DWORD cadenceMs = profilePolicyManager.ResolveGuardCadenceMs(resolveAutonomyProfilePolicyConfig());
 				if (combatCount > 0)
 				{
 					char requestIdBuffer[96];
@@ -3591,6 +3587,12 @@ namespace
 				return nextAllowedTick == nullptr || AIControlAdapterHasTickElapsed(*nextAllowedTick, now);
 			};
 
+			auto isBuildCooldownReady = [&](const char* cmd) -> bool
+			{
+				DWORD* nextAllowedTick = getBuildCooldownTick(cmd);
+				return nextAllowedTick == nullptr || AIControlAdapterHasTickElapsed(*nextAllowedTick, now);
+			};
+
 			auto recordBuildAttempt = [&](const char* cmd, bool success, const std::string& outReason)
 			{
 				DWORD* nextAllowedTick = getBuildCooldownTick(cmd);
@@ -3676,10 +3678,14 @@ namespace
 					++staleStrategicFoundations;
 				}
 			}
-			m_autonomy.state.strategicSpendTelemetry["healthy_market_foundations"] = inProgressBlackMarkets;
-			m_autonomy.state.strategicSpendTelemetry["stale_market_foundations"] = staleBlackMarketFoundations;
+			const AIControlAdapterStrategicSpendTelemetrySerializer strategicSpendTelemetrySerializer;
+			strategicSpendTelemetrySerializer.RecordMarketFoundationCounts(
+				m_autonomy.state.strategicSpendTelemetry,
+				static_cast<int>(inProgressBlackMarkets),
+				static_cast<int>(staleBlackMarketFoundations),
+				staleStrategicFoundations);
 			m_autonomy.state.strategicSpendTelemetry["market_foundations_no_builder"] = blackMarketFoundationsNoBuilder;
-			m_autonomy.state.strategicSpendTelemetry["stale_strategic_foundations"] = staleStrategicFoundations;
+			const AIControlAdapterStrategicSpendSnapshotBuilder strategicSpendSnapshotBuilder;
 
 			auto tryOpeningBarracksFallbackAfterSupplyFailure = [&](std::string& outReason) -> bool
 			{
@@ -3711,75 +3717,25 @@ namespace
 				std::string reason;
 				bool issued = false;
 				const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
-				const bool isBalancedSprawl = (profile == "sprawl_balanced");
-				const bool isSprawlStyle = (profile == "sprawl" || isBalancedSprawl);
 				const AIControlAdapterProfilePolicyConfig policyConfig = resolveAutonomyProfilePolicyConfig();
+				const bool isBalancedSprawl = policyConfig.isBalancedSprawl;
+				const bool isSprawlStyle = policyConfig.isSprawlStyle;
 				const Int sprawlSupplyCap = policyConfig.sprawlSupplyCap;
-				const Int sprawlBarracksCap = policyConfig.sprawlBarracksCap;
-				const Int sprawlArmsCap = policyConfig.sprawlArmsCap;
-				const Int sprawlMarketCap = policyConfig.sprawlMarketCap;
 				const Int sprawlTunnelCap = policyConfig.sprawlTunnelCap;
-				const Int sprawlStingerCap = policyConfig.sprawlStingerCap;
 				const UnsignedInt reserveCash = policyConfig.reserveCash;
 				const UnsignedInt blackMarketCost = 2500u;
 				const bool openingInfrastructureReady = counts.supplyStashes >= 1 && counts.barracks >= 1 && counts.armsDealers >= 1;
-				const bool openingEconomyReady = counts.supplyStashes >= 2 || counts.blackMarkets >= 1;
 				const Int effectiveTotalBlackMarkets = static_cast<Int>(completedBlackMarkets + inProgressBlackMarkets);
-				const bool canScaleMilitaryProduction = !isBalancedSprawl || (openingInfrastructureReady && openingEconomyReady);
-				const Int effectiveBarracksCap = isBalancedSprawl ? (canScaleMilitaryProduction ? sprawlBarracksCap : 1) : sprawlBarracksCap;
-				const Int effectiveArmsCap = isBalancedSprawl ? (canScaleMilitaryProduction ? sprawlArmsCap : 1) : sprawlArmsCap;
-				const Int sprawlDesiredMarketCount =
-					std::max<Int>(
-						isBalancedSprawl ? 2 : 1,
-						std::min<Int>(
-							sprawlMarketCap,
-							std::max<Int>(
-								isBalancedSprawl ? totalSupplyStashes : (totalSupplyStashes / 2),
-								isBalancedSprawl ? ((totalBarracks + totalArmsDealers + 1) / 2) : ((totalBarracks + totalArmsDealers) / 4))));
-				const bool remoteZoneHasStash = hasActiveZone && !activeZone.isMainBase && totalZoneSupplyStashes > 0;
-				const AIControlAdapterRemoteZoneFollowupResult remoteFollowup = AIControlAdapterChooseRemoteZoneFollowup({
-					remoteZoneHasStash,
-					totalZoneTunnels,
-					totalZoneBarracks,
-					totalZoneArmsDealers,
-					totalZoneStingers,
-					policyConfig.allowExpansionBeforeFullRemoteFollowup
-				});
-				const bool remoteZoneNeedsFollowup = remoteFollowup.needsFollowup;
-				if (remoteZoneHasStash)
-				{
-					adapterLog(
-						"sprawl_zone_seed zone=%u command=none issued=0 package_stage=%s reason=%s",
-						static_cast<unsigned int>(activeZone.anchorId),
-						remoteFollowup.packageStage,
-						remoteFollowup.reason);
-				}
-				const bool activeZoneIsDeveloped =
-					hasActiveZone
-					&& totalZoneSupplyStashes > 0
-					&& (totalZoneBarracks + totalZoneArmsDealers + totalZoneTunnels + totalZoneStingers) >= 3;
-				const bool shouldThrottleExtraStashGrowth =
-					isSprawlStyle
-					&& hasCompletedPalace
-					&& effectiveTotalBlackMarkets < std::max<Int>(isBalancedSprawl ? 2 : 1, isBalancedSprawl ? totalSupplyStashes : (totalSupplyStashes / 2))
-					&& activeZoneIsDeveloped;
-				const bool shouldPrioritizeMarketGrowth =
-					isSprawlStyle
-					&& hasCompletedPalace
-					&& money >= (isBalancedSprawl ? (reserveCash + blackMarketCost) : blackMarketCost)
-					&& (!isBalancedSprawl || inProgressBlackMarkets < 1)
-					&& effectiveTotalBlackMarkets < sprawlDesiredMarketCount;
-				const bool shouldPreserveReserve =
-					isBalancedSprawl
-					&& (money < reserveCash || inProgressBlackMarkets > 0)
-					&& hasCompletedPalace
-					&& effectiveTotalBlackMarkets > 0;
-				const bool shouldForceEcoRecovery =
-					isBalancedSprawl
-					&& money < reserveCash
-					&& totalSupplyStashes > 0;
 				Int stashZoneCount = 0;
 				Int developedZoneCount = 0;
+				Int remoteSupplyZoneCount = 0;
+				Real supplyFootprintRadius = 0.0f;
+				const bool hasMainZoneForFootprint = mainZoneIndex >= 0 && mainZoneIndex < static_cast<Int>(zones.size());
+				Coord3D mainZoneCenter = {};
+				if (hasMainZoneForFootprint)
+				{
+					mainZoneCenter = zones[static_cast<std::size_t>(mainZoneIndex)].center;
+				}
 				for (std::size_t zoneIdx = 0; zoneIdx < zoneCounts.size(); ++zoneIdx)
 				{
 					const Int zoneSupply = zoneCounts[zoneIdx].supplyStashes + zoneCounts[zoneIdx].supplyStashesInProgress;
@@ -3790,6 +3746,17 @@ namespace
 					if (zoneSupply > 0)
 					{
 						++stashZoneCount;
+						if (hasMainZoneForFootprint && zoneIdx < zones.size())
+						{
+							const Real dx = zones[zoneIdx].center.x - mainZoneCenter.x;
+							const Real dy = zones[zoneIdx].center.y - mainZoneCenter.y;
+							const Real dist = std::sqrt((dx * dx) + (dy * dy));
+							supplyFootprintRadius = std::max<Real>(supplyFootprintRadius, dist);
+							if (dist >= 1200.0f)
+							{
+								++remoteSupplyZoneCount;
+							}
+						}
 					}
 					if (zoneSupply > 0 && (zoneBarracks + zoneArms + zoneTunnels + zoneStingers) >= 3)
 					{
@@ -3797,114 +3764,143 @@ namespace
 					}
 				}
 				const Int desiredZoneCount = std::max<Int>(1, sprawlSupplyCap);
-				const bool zoneExpansionIsUrgent = AIControlAdapterIsZoneExpansionUrgent({
-					stashZoneCount,
-					desiredZoneCount,
-					policyConfig.urgentZoneGapThreshold
-				});
-				const Int zoneGap = desiredZoneCount - stashZoneCount;
-				const bool reserveProtected = money >= reserveCash;
-				const unsigned int cashAboveReserve = reserveProtected ? (money - reserveCash) : 0;
-				const bool cashFloatHigh = cashAboveReserve >= policyConfig.expansionHighCashFloatThreshold;
-				const bool allowUrgentExpansionDespiteReserve = zoneExpansionIsUrgent && cashFloatHigh;
-				auto evaluateMacroStrategicSpend = [&](StrategicSpendCategory category, unsigned int requestCost) -> AIControlAdapterStrategicSpendDecision
+				const auto activeThreatIt = hasActiveZone
+					? m_autonomy.state.zoneThreats.find(static_cast<UnsignedInt>(activeZone.anchorId))
+					: m_autonomy.state.zoneThreats.end();
+				const bool activeZoneThreatened = activeThreatIt != m_autonomy.state.zoneThreats.end()
+					&& (now - activeThreatIt->second.lastSeenTick) <= 45000u
+					&& (activeThreatIt->second.response == "defend" || activeThreatIt->second.sourceType == "unit_attack");
+				AIControlAdapterMacroBuildSnapshotBuilderInput macroSnapshotInput;
+				macroSnapshotInput.policyConfig = policyConfig;
+				macroSnapshotInput.money = money;
+				macroSnapshotInput.blackMarketCost = blackMarketCost;
+				macroSnapshotInput.hasCompletedPalace = hasCompletedPalace;
+				macroSnapshotInput.hasActiveZone = hasActiveZone;
+				macroSnapshotInput.activeZoneIsMainBase = hasActiveZone && activeZone.isMainBase;
+				macroSnapshotInput.activeZoneThreatened = activeZoneThreatened;
+				macroSnapshotInput.stashZoneCount = stashZoneCount;
+				macroSnapshotInput.developedZoneCount = developedZoneCount;
+				macroSnapshotInput.supplyFootprintRadius = static_cast<float>(supplyFootprintRadius);
+				macroSnapshotInput.remoteSupplyZoneCount = remoteSupplyZoneCount;
+				macroSnapshotInput.totalSupplyStashes = totalSupplyStashes;
+				macroSnapshotInput.totalBarracks = totalBarracks;
+				macroSnapshotInput.totalArmsDealers = totalArmsDealers;
+				macroSnapshotInput.totalPalaces = counts.palaces;
+				macroSnapshotInput.totalTunnels = totalTunnels;
+				macroSnapshotInput.totalStingers = totalStingers;
+				macroSnapshotInput.completedBlackMarkets = counts.blackMarkets;
+				macroSnapshotInput.inProgressBlackMarkets = static_cast<int>(inProgressBlackMarkets);
+				macroSnapshotInput.effectiveTotalBlackMarkets = effectiveTotalBlackMarkets;
+				macroSnapshotInput.supplyStashesInProgress = counts.supplyStashesInProgress;
+				macroSnapshotInput.barracksInProgress = counts.barracksInProgress;
+				macroSnapshotInput.armsDealersInProgress = counts.armsDealersInProgress;
+				macroSnapshotInput.palacesInProgress = counts.palacesInProgress;
+				macroSnapshotInput.tunnelsInProgress = counts.tunnelsInProgress;
+				macroSnapshotInput.stingersInProgress = counts.stingersInProgress;
+				macroSnapshotInput.totalZoneSupplyStashes = totalZoneSupplyStashes;
+				macroSnapshotInput.totalZoneBarracks = totalZoneBarracks;
+				macroSnapshotInput.totalZoneArmsDealers = totalZoneArmsDealers;
+				macroSnapshotInput.totalZoneTunnels = totalZoneTunnels;
+				macroSnapshotInput.totalZoneStingers = totalZoneStingers;
+				macroSnapshotInput.activeZoneTunnelsInProgress = activeZoneCounts.tunnelsInProgress;
+				macroSnapshotInput.activeZoneStingersInProgress = activeZoneCounts.stingersInProgress;
+				macroSnapshotInput.activeZoneBarracksInProgress = activeZoneCounts.barracksInProgress;
+				macroSnapshotInput.activeZoneArmsDealersInProgress = activeZoneCounts.armsDealersInProgress;
+				macroSnapshotInput.supplyBuildCooldownReady = isBuildCooldownReady("Game.BuildSupplyStashSmart");
+				macroSnapshotInput.blackMarketBuildCooldownReady = isBuildCooldownReady("Game.BuildBlackMarketSmart");
+				macroSnapshotInput.barracksBuildCooldownReady = isBuildCooldownReady("Game.BuildBarracksSmart");
+				macroSnapshotInput.armsDealerBuildCooldownReady = isBuildCooldownReady("Game.BuildArmsDealerSmart");
+				macroSnapshotInput.tunnelBuildCooldownReady = isBuildCooldownReady("Game.BuildTunnelNetwork");
+				macroSnapshotInput.stingerBuildCooldownReady = isBuildCooldownReady("Game.BuildStingerSite");
+				macroSnapshotInput.palaceBuildCooldownReady = isBuildCooldownReady("Game.BuildPalaceSmart");
+				macroSnapshotInput.wantsBaselineTwoMarkets =
+					AIControlAdapterProfilePolicyManager().WantsBaselineTwoMarkets(policyConfig);
+				AIControlAdapterMacroBuildSnapshot macroBuildSnapshotBase =
+					AIControlAdapterMacroBuildSnapshotBuilder().Build(macroSnapshotInput);
+				const bool remoteZoneHasStash = macroBuildSnapshotBase.remoteZoneHasStash;
+				const bool shouldThrottleExtraStashGrowth = macroBuildSnapshotBase.shouldThrottleExtraStashGrowth;
+				const bool shouldPreserveReserve = macroBuildSnapshotBase.shouldPreserveReserve;
+				const bool balancedZoneCanAddPalace = !isBalancedSprawl || !hasActiveZone || totalZonePalaces < 1;
+				const AIControlAdapterMacroBuildManager macroBuildManager;
+				const AIControlAdapterMacroBuildPolicyDecisions macroBuildPolicyDecisions = macroBuildManager.ResolvePolicyDecisions(macroBuildSnapshotBase);
+				const AIControlAdapterMacroExpansionDecision& macroExpansion = macroBuildPolicyDecisions.macroExpansion;
+				const AIControlAdapterZoneSeedPackageDecision& zoneSeedDecision = macroBuildPolicyDecisions.zoneSeedDecision;
+				const bool remoteZoneNeedsFollowup = macroBuildPolicyDecisions.remoteZoneNeedsFollowup;
+				const Int sprawlDesiredMarketCount = macroBuildPolicyDecisions.sprawlDesiredMarketCount;
+				const bool canAttemptBlackMarketNow = macroBuildPolicyDecisions.canAttemptBlackMarketNow;
+				const bool shouldForceEcoRecovery = macroBuildPolicyDecisions.shouldForceEcoRecovery;
+				const Int zoneGap = macroExpansion.zoneGap;
+				const bool reserveProtected = macroExpansion.reserveProtected;
+				const unsigned int cashAboveReserve = macroExpansion.cashAboveReserve;
+				const bool allowUrgentExpansionDespiteReserve = macroExpansion.allowUrgentExpansionDespiteReserve;
+				const bool preferRemoteSupplyExpansion = macroExpansion.preferRemoteSupplyExpansion;
+				const bool zoneExpansionIsUrgent = macroExpansion.zoneExpansionUrgent;
+				AIControlAdapterStrategicSpendEconomyFacts macroSpendEconomy;
+				macroSpendEconomy.money = money;
+				macroSpendEconomy.reserveCash = reserveCash;
+				macroSpendEconomy.completedMarkets = static_cast<int>(completedBlackMarkets);
+				macroSpendEconomy.healthyMarketsInProgress = static_cast<int>(inProgressBlackMarkets);
+				macroSpendEconomy.staleMarketFoundations = static_cast<int>(staleBlackMarketFoundations);
+				macroSpendEconomy.staleStrategicFoundations = staleStrategicFoundations;
+				macroSpendEconomy.activeWmdThreats = m_autonomy.wmdTargetTracker.hasActiveWMDThreat() ? 1 : 0;
+				macroSpendEconomy.mainBaseCritical =
+					m_autonomy.state.mainBaseCriticalOverrideTelemetry.is_object()
+					&& m_autonomy.state.mainBaseCriticalOverrideTelemetry.value("active", false);
+				AIControlAdapterStrategicSpendZoneFacts macroSpendZones;
+				macroSpendZones.currentZones = stashZoneCount;
+				macroSpendZones.developedZones = developedZoneCount;
+				macroSpendZones.desiredZones = desiredZoneCount;
+				AIControlAdapterStrategicSpendArmyFacts macroSpendArmy;
+				macroSpendArmy.armySize = counts.mobileUnits;
+				macroSpendArmy.armyCap = std::max(1, counts.mobileUnits);
+				macroSpendArmy.quads = counts.quads;
+				macroSpendArmy.buggies = counts.rocketBuggies;
+				macroSpendArmy.scorpions = counts.scorpions;
+				const AIControlAdapterStrategicSpendSnapshotBase macroSpendBase =
+					strategicSpendSnapshotBuilder.BuildBase(macroSpendEconomy, macroSpendZones, macroSpendArmy);
+				auto trySupplyExpansionBuild = [&](std::string& outReason) -> bool
 				{
-					AIControlAdapterStrategicSpendInput spendInput;
-					spendInput.money = money;
-					spendInput.reserveCash = reserveCash;
-					spendInput.requestCost = requestCost;
-					spendInput.currentZones = stashZoneCount;
-					spendInput.developedZones = developedZoneCount;
-					spendInput.desiredZones = desiredZoneCount;
-					spendInput.completedMarkets = static_cast<int>(completedBlackMarkets);
-					spendInput.healthyMarketsInProgress = static_cast<int>(inProgressBlackMarkets);
-					spendInput.staleMarketFoundations = static_cast<int>(staleBlackMarketFoundations);
-					spendInput.staleStrategicFoundations = staleStrategicFoundations;
-					spendInput.activeWmdThreats = m_autonomy.wmdTargetTracker.hasActiveWMDThreat() ? 1 : 0;
-					spendInput.armySize = counts.mobileUnits;
-					spendInput.armyCap = std::max(1, counts.mobileUnits);
-					spendInput.quads = counts.quads;
-					spendInput.buggies = counts.rocketBuggies;
-					spendInput.scorpions = counts.scorpions;
-					spendInput.mainBaseCritical = m_autonomy.state.mainBaseCriticalOverrideTelemetry.is_object()
-						&& m_autonomy.state.mainBaseCriticalOverrideTelemetry.value("active", false);
-					spendInput.expansionUrgent = zoneExpansionIsUrgent;
-					spendInput.incomeCritical = completedBlackMarkets == 0u;
-					spendInput.reserveDepleted = money < reserveCash;
-					const AIControlAdapterStrategicSpendDecision decision = AIControlAdapterEvaluateStrategicSpend(category, spendInput);
-					adapterLog(
-						"strategic_spend_policy category=%s allowed=%d money=%lu reserve=%lu protected_cash=%lu spend_budget=%lu batch_limit=%d reason=%s",
-						AIControlAdapterStrategicSpendCategoryName(category),
-						decision.allowed ? 1 : 0,
-						static_cast<unsigned long>(money),
-						static_cast<unsigned long>(reserveCash),
-						static_cast<unsigned long>(decision.protectedCash),
-						static_cast<unsigned long>(decision.spendBudget),
-						decision.batchLimit,
-						decision.reason);
-					m_autonomy.state.strategicSpendTelemetry["protected_cash"] = decision.protectedCash;
-					if (decision.allowed)
+					nlohmann::json args = nlohmann::json::object();
+					if (preferRemoteSupplyExpansion && hasMainZoneForFootprint)
 					{
-						m_autonomy.state.strategicSpendTelemetry["last_allowed_category"] = AIControlAdapterStrategicSpendCategoryName(category);
+						args["prefer_remote"] = true;
+						args["remote_origin"] = nlohmann::json::object({
+							{"x", mainZoneCenter.x},
+							{"y", mainZoneCenter.y}
+						});
 					}
-					else
-					{
-						m_autonomy.state.strategicSpendTelemetry["last_blocked_reason"] = decision.reason;
-					}
-					return decision;
+					return tryCommand("auto_macro", "Game.BuildSupplyStashSmart", args, outReason);
 				};
-
-				// Log zone expansion policy before macro decisions
-				const char* expansionMode = zoneExpansionIsUrgent ? "urgent" : (stashZoneCount < desiredZoneCount ? "normal" : "hold");
-				std::string expansionReason;
-				if (stashZoneCount >= desiredZoneCount)
+				AIControlAdapterStrategicSpendSnapshotOverrides macroSpendOverrides;
+				macroSpendOverrides.expansionUrgent = zoneExpansionIsUrgent;
+				macroSpendOverrides.incomeCritical = completedBlackMarkets == 0u;
+				macroSpendOverrides.reserveDepleted = money < reserveCash;
+				const AIControlAdapterStrategicSpendSnapshot macroSpendSnapshot =
+					strategicSpendSnapshotBuilder.Build(macroSpendBase, macroSpendOverrides);
+				const AIControlAdapterStrategicSpendManager strategicSpendManager;
+				const AIControlAdapterStrategicSpendPlan macroSpendPlan =
+					strategicSpendManager.EvaluateMacroPlan(macroSpendSnapshot, 1800u, blackMarketCost, blackMarketCost, 5000u, 1200u);
+				for (const AIControlAdapterStrategicSpendRecord& spendRecord : macroSpendPlan.records)
 				{
-					expansionReason = "target_reached";
+					const AIControlAdapterStrategicSpendDecision& decision = spendRecord.decision;
+					adapterLog(
+						"%s",
+						strategicSpendTelemetrySerializer.BuildPolicyLogLine({
+							spendRecord.category,
+							money,
+							reserveCash,
+							&decision
+						}).c_str());
+					strategicSpendTelemetrySerializer.RecordCategory(
+						m_autonomy.state.strategicSpendTelemetry,
+						spendRecord.category,
+						spendRecord.requestCost,
+						decision);
 				}
-				else if (zoneExpansionIsUrgent && cashFloatHigh)
-				{
-					expansionReason = "large_gap_high_cash";
-				}
-				else if (zoneExpansionIsUrgent && !cashFloatHigh)
-				{
-					expansionReason = "large_gap_low_cash";
-				}
-				else if (shouldPreserveReserve)
-				{
-					expansionReason = "below_target_reserve_hold";
-				}
-				else
-				{
-					expansionReason = "below_target_normal";
-				}
-				adapterLog(
-					"zone_expansion_policy mode=%s current=%d developed=%d desired=%d gap=%d reserve_protected=%d cash_float=%lu reason=%s",
-					expansionMode,
-					stashZoneCount,
-					developedZoneCount,
-					desiredZoneCount,
-					zoneGap,
-					reserveProtected ? 1 : 0,
-					static_cast<unsigned long>(cashAboveReserve),
-					expansionReason.c_str());
 
 				// Evaluate zone expansion arbitration
-				auto expansionDecision = AIControlAdapterChooseZoneExpansionAction({
-					zoneExpansionIsUrgent,
-					allowUrgentExpansionDespiteReserve,
-					remoteZoneNeedsFollowup,
-					stashZoneCount,
-					desiredZoneCount,
-					counts.supplyStashesInProgress,
-					shouldThrottleExtraStashGrowth,
-					money,
-					reserveCash,
-					isBalancedSprawl,
-					isBuildAttemptReady("Game.BuildSupplyStashSmart", counts.supplyStashesInProgress),
-					policyConfig.normalMaxConcurrentExpansionStashes
-				});
-				const AIControlAdapterStrategicSpendDecision expansionSpend =
-					evaluateMacroStrategicSpend(StrategicSpendCategory::Expansion, 1800u);
+				AIControlAdapterZoneExpansionArbitrationResult expansionDecision = macroBuildPolicyDecisions.expansionDecision;
+				const AIControlAdapterStrategicSpendDecision expansionSpend = macroSpendPlan.expansion;
 				if (expansionDecision.shouldAttemptExpansion && !expansionSpend.allowed)
 				{
 					expansionDecision.shouldAttemptExpansion = false;
@@ -3917,73 +3913,37 @@ namespace
 						expansionSpend.reason);
 				}
 
-				// Log zone expansion request decision
-				adapterLog(
-					"zone_expansion_request command=%s issued=%d reason=%s current=%d developed=%d desired=%d gap=%d "
-					"cash_above_reserve=%lu in_progress=%d max_in_progress=%d throttled=%d is_urgent=%d",
-					expansionDecision.command != nullptr ? expansionDecision.command : "none",
-					expansionDecision.shouldAttemptExpansion ? 1 : 0,
-					expansionDecision.reason,
-					stashZoneCount,
-					developedZoneCount,
-					desiredZoneCount,
-					zoneGap,
-					static_cast<unsigned long>(cashAboveReserve),
-					counts.supplyStashesInProgress,
-					policyConfig.normalMaxConcurrentExpansionStashes,
-					shouldThrottleExtraStashGrowth ? 1 : 0,
-					expansionDecision.isUrgent ? 1 : 0);
-				adapterLog(
-					"sprawl_expansion_throughput current=%d desired=%d gap=%d in_progress=%d max_in_progress=%d reserve=%lu cash_float=%lu action=%s reason=%s",
-					stashZoneCount,
-					desiredZoneCount,
-					zoneGap,
-					counts.supplyStashesInProgress,
-					policyConfig.normalMaxConcurrentExpansionStashes,
-					static_cast<unsigned long>(reserveCash),
-					static_cast<unsigned long>(cashAboveReserve),
-					expansionDecision.command != nullptr ? expansionDecision.command : "none",
-					expansionDecision.reason);
-
 				const char* requiredOpeningBuild = AIControlAdapterGetRequiredOpeningBuild({
 					counts.supplyStashes,
 					counts.barracks,
 					counts.armsDealers
 				});
-				const bool canAttemptBlackMarketNow = AIControlAdapterCanAttemptBlackMarket({
-					hasCompletedPalace,
-					isBalancedSprawl,
-					money,
+				const AIControlAdapterStrategicSpendDecision marketRecoverySpend = macroSpendPlan.economyRecovery;
+				const AIControlAdapterStrategicSpendDecision marketGrowthSpend = macroSpendPlan.economyGrowth;
+				const AIControlAdapterStrategicSpendDecision palaceSpend = macroSpendPlan.techPrerequisite;
+				const AIControlAdapterStrategicSpendDecision staticDefenseSpend = macroSpendPlan.staticDefense;
+				AIControlAdapterMacroBuildSnapshotRuntimeInput macroRuntimeInput;
+				macroRuntimeInput.expansionSpend = { expansionSpend.allowed, expansionSpend.reason };
+				macroRuntimeInput.marketRecoverySpend = { marketRecoverySpend.allowed, marketRecoverySpend.reason };
+				macroRuntimeInput.marketGrowthSpend = { marketGrowthSpend.allowed, marketGrowthSpend.reason };
+				macroRuntimeInput.palaceSpend = { palaceSpend.allowed, palaceSpend.reason };
+				macroRuntimeInput.staticDefenseSpend = { staticDefenseSpend.allowed, staticDefenseSpend.reason };
+				macroRuntimeInput.zoneSeedCooldownReady = zoneSeedDecision.command != nullptr ? isBuildCooldownReady(zoneSeedDecision.command) : false;
+				const AIControlAdapterMacroBuildSnapshotBuilder macroSnapshotBuilder;
+				AIControlAdapterMacroBuildSnapshot macroBuildSnapshot =
+					macroSnapshotBuilder.ApplyRuntimeInput(macroBuildSnapshotBase, macroRuntimeInput);
+				AIControlAdapterMacroBuildPlan macroBuildPlan = macroBuildManager.BuildPlan(macroBuildSnapshot);
+				const AIControlAdapterMacroBuildTelemetry& macroBuildTelemetry = macroBuildPlan.telemetry;
+				const AIControlAdapterMacroBuildTelemetrySerializer macroTelemetrySerializer;
+				for (const std::string& line : macroTelemetrySerializer.BuildExpansionLogLines({
+					&macroBuildTelemetry,
 					reserveCash,
-					counts.blackMarkets,
-					static_cast<Int>(inProgressBlackMarkets)
-				});
-				const bool shouldBuildFirstMarket =
-					isSprawlStyle
-					&& hasCompletedPalace
-					&& effectiveTotalBlackMarkets < 1
-					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", static_cast<Int>(inProgressBlackMarkets))
-					&& canAttemptBlackMarketNow;
-				const char* ecoRecoveryBuild = AIControlAdapterGetEcoRecoveryBuild({
-					isBalancedSprawl,
-					totalSupplyStashes,
-					counts.palaces,
-					effectiveTotalBlackMarkets,
-					sprawlDesiredMarketCount,
-					shouldThrottleExtraStashGrowth,
-					canAttemptBlackMarketNow
-				});
-				const AIControlAdapterStrategicSpendDecision marketRecoverySpend =
-					evaluateMacroStrategicSpend(StrategicSpendCategory::EconomyRecovery, blackMarketCost);
-				const AIControlAdapterStrategicSpendDecision marketGrowthSpend =
-					evaluateMacroStrategicSpend(StrategicSpendCategory::EconomyGrowth, blackMarketCost);
-				const AIControlAdapterStrategicSpendDecision palaceSpend =
-					evaluateMacroStrategicSpend(StrategicSpendCategory::TechPrerequisite, 5000u);
-				const AIControlAdapterStrategicSpendDecision staticDefenseSpend =
-					evaluateMacroStrategicSpend(StrategicSpendCategory::StaticDefense, 1200u);
-				const bool balancedZoneCanAddBarracks = !isBalancedSprawl || !hasActiveZone || totalZoneBarracks < 1;
-				const bool balancedZoneCanAddArmsDealer = !isBalancedSprawl || !hasActiveZone || totalZoneArmsDealers < 1;
-				const bool balancedZoneCanAddPalace = !isBalancedSprawl || !hasActiveZone || totalZonePalaces < 1;
+					hasActiveZone ? static_cast<unsigned int>(activeZone.anchorId) : 0u,
+					remoteZoneHasStash
+				}))
+				{
+					adapterLog("%s", line.c_str());
+				}
 				m_autonomy.state.staticDefenseTelemetry = nlohmann::json::array();
 				m_autonomy.state.palaceRedundancyTelemetry = nlohmann::json::array();
 				Int staticDefenseZoneIndex = -1;
@@ -4059,39 +4019,31 @@ namespace
 					{
 						localWorkerGap += std::max<int>(0, desiredLocalWorkers - countIdleWorkersNearZone(zone));
 					}
-					adapterLog(
-						"static_defense_policy zone=%u role=%s tunnels=%d/%d stingers=%d/%d in_progress=%d reason=%s",
+					const AIControlAdapterStaticDefensePolicyTelemetryInput staticTelemetryInput{
 						zoneAnchor,
-						staticPolicy.role,
-						staticPolicy.effectiveTunnels,
-						staticPolicy.desiredTunnels,
-						staticPolicy.effectiveStingers,
-						staticPolicy.desiredStingers,
-						staticInProgress,
-						staticPolicy.reason);
-					m_autonomy.state.staticDefenseTelemetry.push_back(nlohmann::json::object({
-						{"zone", zoneAnchor},
-						{"role", staticPolicy.role},
-						{"tunnels", staticPolicy.effectiveTunnels},
-						{"desired_tunnels", staticPolicy.desiredTunnels},
-						{"stingers", staticPolicy.effectiveStingers},
-						{"desired_stingers", staticPolicy.desiredStingers},
-						{"in_progress", staticInProgress},
-						{"reason", staticPolicy.reason}
-					}));
-					if (staticDefenseZoneIndex < 0 && !zoneExpansionIsUrgent && !shouldPreserveReserve)
+						&staticPolicy,
+						staticInProgress
+					};
+					adapterLog("%s", macroTelemetrySerializer.BuildStaticDefensePolicyLogLine(staticTelemetryInput).c_str());
+					m_autonomy.state.staticDefenseTelemetry.push_back(
+						macroTelemetrySerializer.BuildStaticDefensePolicyTelemetry(staticTelemetryInput));
+					if (staticDefenseZoneIndex < 0)
 					{
-						if (staticPolicy.shouldBuildStinger && money >= (isBalancedSprawl ? 1800u : 1200u) && isBuildAttemptReady("Game.BuildStingerSite", counts.stingersInProgress))
+						const AIControlAdapterStaticDefenseCandidateDecision staticCandidate =
+							macroBuildManager.EvaluateStaticDefenseCandidate({
+								&staticPolicy,
+								zoneExpansionIsUrgent,
+								shouldPreserveReserve,
+								isBalancedSprawl,
+								money,
+								isBuildAttemptReady("Game.BuildStingerSite", counts.stingersInProgress),
+								isBuildAttemptReady("Game.BuildTunnelNetwork", counts.tunnelsInProgress)
+							});
+						if (staticCandidate.shouldBuild)
 						{
 							staticDefenseZoneIndex = static_cast<Int>(zoneIdx);
-							staticDefenseCommand = "Game.BuildStingerSite";
-							staticDefenseReason = staticPolicy.reason;
-						}
-						else if (staticPolicy.shouldBuildTunnel && money >= (isBalancedSprawl ? 1400u : 900u) && isBuildAttemptReady("Game.BuildTunnelNetwork", counts.tunnelsInProgress))
-						{
-							staticDefenseZoneIndex = static_cast<Int>(zoneIdx);
-							staticDefenseCommand = "Game.BuildTunnelNetwork";
-							staticDefenseReason = staticPolicy.reason;
+							staticDefenseCommand = staticCandidate.command != nullptr ? staticCandidate.command : "";
+							staticDefenseReason = staticCandidate.reason != nullptr ? staticCandidate.reason : "no_candidate";
 						}
 					}
 
@@ -4109,30 +4061,52 @@ namespace
 						zc.palaces,
 						zc.palacesInProgress
 					});
-					adapterLog(
-						"palace_redundancy_policy zone=%u role=%s live=%d desired=%d in_progress=%d spend_allowed=%d reason=%s",
+					const AIControlAdapterPalaceRedundancyTelemetryInput palaceTelemetryInput{
 						zoneAnchor,
-						palacePolicy.role,
+						&palacePolicy,
 						zc.palaces,
-						palacePolicy.desiredZonePalaces,
-						zc.palacesInProgress + counts.palacesInProgress,
-						palacePolicy.spendAllowed ? 1 : 0,
-						palacePolicy.reason);
-					m_autonomy.state.palaceRedundancyTelemetry.push_back(nlohmann::json::object({
-						{"zone", zoneAnchor},
-						{"role", palacePolicy.role},
-						{"live", zc.palaces},
-						{"desired", palacePolicy.desiredZonePalaces},
-						{"in_progress", zc.palacesInProgress + counts.palacesInProgress},
-						{"spend_allowed", palacePolicy.spendAllowed},
-						{"reason", palacePolicy.reason}
-					}));
-					if (palaceRedundancyZoneIndex < 0 && palacePolicy.shouldBuild && isBuildAttemptReady("Game.BuildPalaceSmart", counts.palacesInProgress))
+						zc.palacesInProgress + counts.palacesInProgress
+					};
+					adapterLog("%s", macroTelemetrySerializer.BuildPalaceRedundancyLogLine(palaceTelemetryInput).c_str());
+					m_autonomy.state.palaceRedundancyTelemetry.push_back(
+						macroTelemetrySerializer.BuildPalaceRedundancyTelemetry(palaceTelemetryInput));
+					if (palaceRedundancyZoneIndex < 0)
 					{
-						palaceRedundancyZoneIndex = static_cast<Int>(zoneIdx);
-						palaceRedundancyReason = palacePolicy.reason;
+						const AIControlAdapterPalaceRedundancyCandidateDecision palaceCandidate =
+							macroBuildManager.EvaluatePalaceRedundancyCandidate({
+								&palacePolicy,
+								isBuildAttemptReady("Game.BuildPalaceSmart", counts.palacesInProgress)
+							});
+						if (palaceCandidate.shouldBuild)
+						{
+							palaceRedundancyZoneIndex = static_cast<Int>(zoneIdx);
+							palaceRedundancyReason = palaceCandidate.reason != nullptr ? palaceCandidate.reason : "no_candidate";
+						}
 					}
 				}
+				macroRuntimeInput.staticDefenseZoneIndex = staticDefenseZoneIndex;
+				macroRuntimeInput.staticDefenseCommand = !staticDefenseCommand.empty() ? staticDefenseCommand.c_str() : nullptr;
+				macroRuntimeInput.staticDefenseReason = staticDefenseReason.c_str();
+				macroRuntimeInput.palaceRedundancyZoneIndex = palaceRedundancyZoneIndex;
+				macroRuntimeInput.palaceRedundancyReason = palaceRedundancyReason.c_str();
+				macroBuildSnapshot = macroSnapshotBuilder.ApplyRuntimeInput(macroBuildSnapshotBase, macroRuntimeInput);
+				macroBuildPlan = macroBuildManager.BuildPlan(macroBuildSnapshot);
+				AIControlAdapterMacroBuildTelemetryInput macroTelemetryInput;
+				macroTelemetryInput.profile = profile;
+				macroTelemetryInput.money = money;
+				macroTelemetryInput.reserveCash = reserveCash;
+				macroTelemetryInput.cashAboveReserve = cashAboveReserve;
+				macroTelemetryInput.currentZones = stashZoneCount;
+				macroTelemetryInput.developedZones = developedZoneCount;
+				macroTelemetryInput.desiredZones = desiredZoneCount;
+				macroTelemetryInput.zoneGap = zoneGap;
+				macroTelemetryInput.activeZoneAnchor = hasActiveZone ? static_cast<unsigned int>(activeZone.anchorId) : 0u;
+				macroTelemetryInput.activeZoneThreatened = activeZoneThreatened;
+				macroTelemetryInput.remoteZoneNeedsFollowup = remoteZoneNeedsFollowup;
+				macroTelemetryInput.macroBuildPlan = &macroBuildPlan;
+				macroTelemetryInput.spendPlan = &macroSpendPlan;
+				m_autonomy.state.macroBuildTelemetry =
+					macroTelemetrySerializer.BuildTelemetry(macroTelemetryInput);
 				int garrisonGap = 0;
 				if (m_autonomy.state.garrisonTelemetry.is_array())
 				{
@@ -4197,32 +4171,21 @@ namespace
 					normalAttackReady,
 					emergencyUnitAttack
 				});
-				m_autonomy.state.brutalPressureTelemetry = nlohmann::json::object({
-					{"expansion_gap", expansionGap},
-					{"main_under_pressure", mainUnderPressure},
-					{"static_defense_gap", staticDefenseGap},
-					{"garrison_gap", garrisonGap},
-					{"local_worker_gap", localWorkerGap},
-					{"stale_foundations", staleFoundations},
-					{"mobile_siege_threats", mobileSiegeThreats},
-					{"reserve_protected", reserveProtected},
-					{"cash_float", cashAboveReserve},
-					{"chosen_priority", brutalPressure.chosenPriority},
-					{"reason", brutalPressure.reason}
-				});
-				adapterLog(
-					"brutal_pressure_policy expansion_gap=%d main_under_pressure=%d static_defense_gap=%d garrison_gap=%d local_worker_gap=%d stale_foundations=%d mobile_siege_threats=%d reserve_protected=%d cash_float=%lu chosen_priority=%s reason=%s",
+				const AIControlAdapterBrutalPressureTelemetryInput brutalPressureTelemetryInput{
 					expansionGap,
-					mainUnderPressure ? 1 : 0,
+					mainUnderPressure,
 					staticDefenseGap,
 					garrisonGap,
 					localWorkerGap,
 					staleFoundations,
 					mobileSiegeThreats,
-					reserveProtected ? 1 : 0,
-					static_cast<unsigned long>(cashAboveReserve),
-					brutalPressure.chosenPriority,
-					brutalPressure.reason);
+					reserveProtected,
+					cashAboveReserve,
+					&brutalPressure
+				};
+				m_autonomy.state.brutalPressureTelemetry =
+					macroTelemetrySerializer.BuildBrutalPressureTelemetry(brutalPressureTelemetryInput);
+				adapterLog("%s", macroTelemetrySerializer.BuildBrutalPressureLogLine(brutalPressureTelemetryInput).c_str());
 				std::string chosenCommand = "none";
 				const bool enemyWmdThreat = m_autonomy.wmdTargetTracker.hasActiveWMDThreat();
 				const AIControlAdapterPalaceRecoveryDecision palaceRecovery = AIControlAdapterChoosePalaceRecovery({
@@ -4234,57 +4197,124 @@ namespace
 					2500u,
 					isBuildAttemptReady("Game.BuildPalaceSmart", counts.palacesInProgress)
 				});
-				if (palaceRecovery.shouldBuild && openingInfrastructureReady)
+				const AIControlAdapterPalaceRecoveryCandidateDecision palaceRecoveryCandidate =
+					macroBuildManager.EvaluatePalaceRecoveryCandidate({
+						&palaceRecovery,
+						openingInfrastructureReady
+					});
+				if (palaceRecoveryCandidate.shouldAttempt && palaceRecoveryCandidate.command != nullptr)
 				{
-					chosenCommand = "Game.BuildPalaceSmart";
-					issued = tryMacroBuildWithFallback("Game.BuildPalaceSmart", false, reason);
-					recordBuildAttempt("Game.BuildPalaceSmart", issued, reason);
+					chosenCommand = palaceRecoveryCandidate.command;
+					issued = tryMacroBuildWithFallback(palaceRecoveryCandidate.command, false, reason);
+					recordBuildAttempt(palaceRecoveryCandidate.command, issued, reason);
 				}
-				const char* palaceRecoveryLogReason = palaceRecovery.reason;
-				if (palaceRecovery.shouldBuild && !openingInfrastructureReady)
-				{
-					palaceRecoveryLogReason = "placement_unavailable";
-				}
-				else if (palaceRecovery.shouldBuild && chosenCommand == "Game.BuildPalaceSmart" && !issued)
-				{
-					palaceRecoveryLogReason = "placement_unavailable";
-				}
+				const AIControlAdapterPalaceRecoveryResultDecision palaceRecoveryResult =
+					macroBuildManager.EvaluatePalaceRecoveryResult({
+						&palaceRecovery,
+						openingInfrastructureReady,
+						chosenCommand == "Game.BuildPalaceSmart",
+						issued
+					});
 				adapterLog(
 					"palace_recovery_policy live=%d in_progress=%d issued=%d reason=%s",
 					counts.palaces,
 					counts.palacesInProgress,
-					(chosenCommand == "Game.BuildPalaceSmart" && issued) ? 1 : 0,
-					palaceRecoveryLogReason);
+					palaceRecoveryResult.issued ? 1 : 0,
+					palaceRecoveryResult.reason);
+				auto tryMacroBuildIntentScheduler = [&]() -> bool
+				{
+					for (const AIControlAdapterMacroBuildIntent& intent : macroBuildPlan.intents)
+					{
+						adapterLog("%s", macroTelemetrySerializer.BuildIntentLogLine(intent, money).c_str());
+					}
+					const AIControlAdapterMacroBuildDispatcher dispatcher;
+					const AIControlAdapterMacroBuildDispatchRequest dispatch = dispatcher.BuildDispatch(macroBuildPlan);
+					if (!dispatch.shouldDispatch)
+					{
+						return false;
+					}
+
+					chosenCommand = dispatch.command;
+					if (dispatch.kind == AIControlAdapterMacroBuildDispatchKind::SpecificZone
+						&& dispatch.zoneIndex >= 0
+						&& dispatch.zoneIndex < static_cast<int>(zones.size()))
+					{
+						issued = trySpecificZoneCommand(
+							dispatch.taskName.c_str(),
+							dispatch.command.c_str(),
+							zones[static_cast<std::size_t>(dispatch.zoneIndex)],
+							nlohmann::json::object(),
+							reason);
+					}
+					else if (dispatch.kind == AIControlAdapterMacroBuildDispatchKind::SupplyExpansion)
+					{
+						issued = trySupplyExpansionBuild(reason);
+					}
+					else
+					{
+						issued = tryMacroBuildWithFallback(dispatch.command.c_str(), dispatch.preferZone, reason);
+					}
+					const AIControlAdapterMacroBuildDispatchResult dispatchResult =
+						dispatcher.CompleteDispatch(dispatch, issued, reason);
+					reason = dispatchResult.reason;
+					recordBuildAttempt(dispatchResult.command.c_str(), issued, reason);
+					adapterLog("%s", macroTelemetrySerializer.BuildDispatchResultLogLine(dispatchResult).c_str());
+					if (issued
+						&& hasActiveZone
+						&& (dispatchResult.command == "Game.BuildTunnelNetwork"
+							|| dispatchResult.command == "Game.BuildStingerSite")
+						&& (activeZone.anchorType == ZoneAnchorType::CapturedStructure
+							|| activeZone.anchorType == ZoneAnchorType::StrategicFoothold
+							|| activeZone.anchorType == ZoneAnchorType::MarketFoothold))
+					{
+						adapterLog(
+							"non_supply_zone_development anchor=%u type=%s command=%s issued=1 reason=%s",
+							static_cast<unsigned int>(activeZone.anchorId),
+							zoneAnchorTypeToString(activeZone.anchorType),
+							dispatchResult.command.c_str(),
+							dispatchResult.command == "Game.BuildTunnelNetwork" ? "zone_infrastructure" : "zone_defense");
+					}
+					return true;
+				};
 				if (chosenCommand == "Game.BuildPalaceSmart")
 				{
 					// Emergency Palace recovery intentionally leaves unit production to the production tick.
 				}
-				else if (requiredOpeningBuild != nullptr)
+				else
 				{
-					chosenCommand = requiredOpeningBuild;
-						if (std::strcmp(requiredOpeningBuild, "Game.BuildSupplyStashSmart") == 0)
+					const AIControlAdapterOpeningBuildDecision openingDecision =
+						macroBuildManager.EvaluateOpeningBuild({
+							requiredOpeningBuild,
+							totalSupplyStashes < 2
+								&& AIControlAdapterProfilePolicyManager().WantsAcceleratedOpeningSupply(
+									policyConfig,
+									static_cast<float>(m_autonomy.state.expansionBias)),
+							money,
+							counts.barracks,
+							counts.supplyStashesInProgress,
+							counts.barracksInProgress,
+							counts.armsDealersInProgress,
+							totalSupplyStashes,
+							isBuildAttemptReady("Game.BuildSupplyStashSmart", counts.supplyStashesInProgress),
+							isBuildAttemptReady("Game.BuildBarracksSmart", counts.barracksInProgress),
+							isBuildAttemptReady("Game.BuildArmsDealerSmart", counts.armsDealersInProgress)
+						});
+					if (openingDecision.handled)
+					{
+						chosenCommand = openingDecision.displayCommand != nullptr ? openingDecision.displayCommand : "";
+						if (openingDecision.command != nullptr)
 						{
-							if (counts.supplyStashesInProgress > 0)
+							if (openingDecision.executor == AIControlAdapterMacroBuildExecutor::SupplyExpansion)
 							{
-								if (counts.barracks < 1
-									&& counts.barracksInProgress < 1
-									&& isBuildAttemptReady("Game.BuildBarracksSmart", counts.barracksInProgress)
-									&& money >= 600u)
-								{
-									chosenCommand = "Game.BuildBarracksSmart";
-									issued = tryMacroBuildWithFallback("Game.BuildBarracksSmart", false, reason);
-									recordBuildAttempt("Game.BuildBarracksSmart", issued, reason);
-								}
-								else
-								{
-									reason = "opening_wait_supply_stash";
-								}
+								issued = trySupplyExpansionBuild(reason);
 							}
-							else if (isBuildAttemptReady(requiredOpeningBuild, counts.supplyStashesInProgress) && money >= 1200u)
+							else
 							{
-							issued = tryMacroBuildWithFallback(requiredOpeningBuild, false, reason);
-							recordBuildAttempt(requiredOpeningBuild, issued, reason);
+								issued = tryMacroBuildWithFallback(openingDecision.command, openingDecision.preferZone, reason);
+							}
+							recordBuildAttempt(openingDecision.command, issued, reason);
 							if (!issued
+								&& openingDecision.allowBarracksFallbackAfterSupplyFailure
 								&& reason != "no_money"
 								&& reason != "opening_wait_money"
 								&& tryOpeningBarracksFallbackAfterSupplyFailure(reason))
@@ -4295,548 +4325,185 @@ namespace
 						}
 						else
 						{
-							reason = money < 1200u ? "opening_wait_money" : "opening_wait_supply_stash";
+							reason = openingDecision.reason != nullptr ? openingDecision.reason : "";
 						}
 					}
-					else if (std::strcmp(requiredOpeningBuild, "Game.BuildBarracksSmart") == 0)
+					else if (totalPalaces < 1)
 					{
-						if (counts.barracksInProgress > 0)
+						if (openingInfrastructureReady
+							&& counts.workers >= 8
+							&& totalPalaces < 1
+							&& balancedZoneCanAddPalace
+							&& counts.palacesInProgress < 1
+							&& isBuildAttemptReady("Game.BuildPalaceSmart", counts.palacesInProgress)
+							&& palaceSpend.allowed
+							&& money >= 5000u)
 						{
-							reason = "opening_wait_barracks";
-						}
-						else if (isBuildAttemptReady(requiredOpeningBuild, counts.barracksInProgress) && money >= 600u)
-						{
-							issued = tryMacroBuildWithFallback(requiredOpeningBuild, false, reason);
-							recordBuildAttempt(requiredOpeningBuild, issued, reason);
-						}
-						else
-						{
-							reason = money < 600u ? "opening_wait_money" : "opening_wait_barracks";
+							chosenCommand = "Game.BuildPalaceSmart";
+							issued = tryMacroBuildWithFallback("Game.BuildPalaceSmart", false, reason);
+							recordBuildAttempt("Game.BuildPalaceSmart", issued, reason);
 						}
 					}
-					else if (std::strcmp(requiredOpeningBuild, "Game.BuildArmsDealerSmart") == 0)
+					else if (tryMacroBuildIntentScheduler())
 					{
-						if (counts.armsDealersInProgress > 0)
-						{
-							reason = "opening_wait_arms_dealer";
-						}
-						else if (isBuildAttemptReady(requiredOpeningBuild, counts.armsDealersInProgress) && money >= 2500u)
-						{
-							issued = tryMacroBuildWithFallback(requiredOpeningBuild, false, reason);
-							recordBuildAttempt(requiredOpeningBuild, issued, reason);
-						}
-						else
-						{
-							reason = money < 2500u ? "opening_wait_money" : "opening_wait_arms_dealer";
-						}
+						// Intent scheduler handled this macro build tick.
 					}
-				}
-				else if (totalSupplyStashes < 2 && (profile == "economic" || isSprawlStyle || m_autonomy.state.expansionBias >= 0.70f))
-				{
-					if (totalSupplyStashes < 2
-						&& counts.supplyStashesInProgress < 1
-						&& isBuildAttemptReady("Game.BuildSupplyStashSmart", counts.supplyStashesInProgress)
-						&& money >= 1600u)
-					{
-						chosenCommand = "Game.BuildSupplyStashSmart";
-						issued = tryMacroBuildWithFallback("Game.BuildSupplyStashSmart", false, reason);
-						recordBuildAttempt("Game.BuildSupplyStashSmart", issued, reason);
-					}
-				}
-				else if (totalPalaces < 1)
-				{
-					if (openingInfrastructureReady
-						&& counts.workers >= 8
-						&& totalPalaces < 1
-						&& balancedZoneCanAddPalace
-						&& counts.palacesInProgress < 1
-						&& isBuildAttemptReady("Game.BuildPalaceSmart", counts.palacesInProgress)
-						&& palaceSpend.allowed
-						&& money >= 5000u)
-					{
-						chosenCommand = "Game.BuildPalaceSmart";
-						issued = tryMacroBuildWithFallback("Game.BuildPalaceSmart", false, reason);
-						recordBuildAttempt("Game.BuildPalaceSmart", issued, reason);
-					}
-				}
-				else if (shouldBuildFirstMarket)
-				{
-					if (marketRecoverySpend.allowed)
-					{
-						chosenCommand = "Game.BuildBlackMarketSmart";
-						issued = tryMacroBuildWithFallback("Game.BuildBlackMarketSmart", false, reason);
-						recordBuildAttempt("Game.BuildBlackMarketSmart", issued, reason);
-					}
-					else
-					{
-						reason = marketRecoverySpend.reason;
-					}
-				}
-				else if (shouldForceEcoRecovery && ecoRecoveryBuild != nullptr)
-				{
-					chosenCommand = ecoRecoveryBuild;
-					if (std::strcmp(ecoRecoveryBuild, "Game.BuildBlackMarketSmart") == 0)
-					{
-						if (inProgressBlackMarkets > 0)
-						{
-							reason = "eco_recovery_wait_market";
-						}
-						else if (isBuildAttemptReady(ecoRecoveryBuild, static_cast<Int>(inProgressBlackMarkets)) && canAttemptBlackMarketNow && marketRecoverySpend.allowed)
-						{
-							issued = tryMacroBuildWithFallback(ecoRecoveryBuild, hasActiveZone, reason);
-							recordBuildAttempt(ecoRecoveryBuild, issued, reason);
-						}
-						else
-						{
-							reason = "eco_recovery_wait_market";
-						}
-					}
-					else if (std::strcmp(ecoRecoveryBuild, "Game.BuildSupplyStashSmart") == 0)
-					{
-						if (counts.supplyStashesInProgress > 0)
-						{
-							reason = "eco_recovery_wait_supply";
-						}
-						else if (isBuildAttemptReady(ecoRecoveryBuild, counts.supplyStashesInProgress) && money >= 1800u && expansionSpend.allowed)
-						{
-							issued = tryMacroBuildWithFallback(ecoRecoveryBuild, false, reason);
-							recordBuildAttempt(ecoRecoveryBuild, issued, reason);
-						}
-						else
-						{
-							reason = money < 1800u ? "eco_recovery_wait_money" : "eco_recovery_wait_supply";
-						}
-					}
-				}
-				else if (isSprawlStyle
-					&& remoteZoneNeedsFollowup
-					&& totalZoneTunnels < 1
-					&& activeZoneCounts.tunnelsInProgress < 1
-					&& isBuildAttemptReady("Game.BuildTunnelNetwork", activeZoneCounts.tunnelsInProgress)
-					&& money >= 900u)
-				{
-					chosenCommand = "Game.BuildTunnelNetwork";
-					issued = tryMacroBuildWithFallback("Game.BuildTunnelNetwork", true, reason);
-					recordBuildAttempt("Game.BuildTunnelNetwork", issued, reason);
-				}
-				else if (isSprawlStyle
-					&& remoteZoneNeedsFollowup
-					&& std::strcmp(remoteFollowup.packageStage, "stinger") == 0
-					&& totalZoneStingers < 1
-					&& activeZoneCounts.stingersInProgress < 1
-					&& isBuildAttemptReady("Game.BuildStingerSite", activeZoneCounts.stingersInProgress)
-					&& money >= (isBalancedSprawl ? 1800u : 1200u))
-				{
-					chosenCommand = "Game.BuildStingerSite";
-					issued = tryMacroBuildWithFallback("Game.BuildStingerSite", true, reason);
-					recordBuildAttempt("Game.BuildStingerSite", issued, reason);
-				}
-				else if (canScaleMilitaryProduction
-					&& isSprawlStyle
-					&& remoteZoneNeedsFollowup
-					&& totalZoneBarracks < 1
-					&& activeZoneCounts.barracksInProgress < 1
-					&& isBuildAttemptReady("Game.BuildBarracksSmart", activeZoneCounts.barracksInProgress)
-					&& money >= (isBalancedSprawl ? reserveCash : 800u))
-				{
-					chosenCommand = "Game.BuildBarracksSmart";
-					issued = tryMacroBuildWithFallback("Game.BuildBarracksSmart", true, reason);
-					recordBuildAttempt("Game.BuildBarracksSmart", issued, reason);
-				}
-				else if (canScaleMilitaryProduction
-					&& isSprawlStyle
-					&& remoteZoneNeedsFollowup
-					&& totalZoneArmsDealers < 1
-					&& activeZoneCounts.armsDealersInProgress < 1
-					&& isBuildAttemptReady("Game.BuildArmsDealerSmart", activeZoneCounts.armsDealersInProgress)
-					&& money >= (isBalancedSprawl ? reserveCash : 2600u))
-				{
-					chosenCommand = "Game.BuildArmsDealerSmart";
-					issued = tryMacroBuildWithFallback("Game.BuildArmsDealerSmart", true, reason);
-					recordBuildAttempt("Game.BuildArmsDealerSmart", issued, reason);
-				}
-				else if (isSprawlStyle
-					&& remoteZoneNeedsFollowup
-					&& totalZoneStingers < 1
-					&& activeZoneCounts.stingersInProgress < 1
-					&& isBuildAttemptReady("Game.BuildStingerSite", activeZoneCounts.stingersInProgress)
-					&& money >= (isBalancedSprawl ? 1800u : 1200u))
-				{
-					chosenCommand = "Game.BuildStingerSite";
-					issued = tryMacroBuildWithFallback("Game.BuildStingerSite", true, reason);
-					recordBuildAttempt("Game.BuildStingerSite", issued, reason);
-				}
-				else if (isSprawlStyle
-					&& !remoteZoneNeedsFollowup
-					&& stashZoneCount < desiredZoneCount
-					&& counts.supplyStashesInProgress < policyConfig.normalMaxConcurrentExpansionStashes
-					&& isBuildAttemptReady("Game.BuildSupplyStashSmart", counts.supplyStashesInProgress)
-					&& expansionSpend.allowed
-					&& money >= (isBalancedSprawl ? (reserveCash + 1800u) : 1800u))
-				{
-					chosenCommand = "Game.BuildSupplyStashSmart";
-					issued = tryMacroBuildWithFallback("Game.BuildSupplyStashSmart", false, reason);
-					recordBuildAttempt("Game.BuildSupplyStashSmart", issued, reason);
-				}
-				else if (isSprawlStyle
-					&& zoneExpansionIsUrgent
-					&& allowUrgentExpansionDespiteReserve
-					&& stashZoneCount < desiredZoneCount
-					&& counts.supplyStashesInProgress < policyConfig.normalMaxConcurrentExpansionStashes
-					&& isBuildAttemptReady("Game.BuildSupplyStashSmart", counts.supplyStashesInProgress)
-					&& expansionSpend.allowed
-					&& money >= (isBalancedSprawl ? 2200u : 1800u))
-				{
-					// Urgent expansion: large zone gap + high cash float
-					// This can proceed even if remoteZoneNeedsFollowup because zone deficit is critical
-					chosenCommand = "Game.BuildSupplyStashSmart";
-					issued = tryMacroBuildWithFallback("Game.BuildSupplyStashSmart", false, reason);
-					recordBuildAttempt("Game.BuildSupplyStashSmart", issued, reason);
-				}
-				else if (isSprawlStyle
-					&& effectiveTotalBlackMarkets < 1
-					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", static_cast<Int>(inProgressBlackMarkets))
-					&& canAttemptBlackMarketNow
-					&& marketRecoverySpend.allowed)
-				{
-					chosenCommand = "Game.BuildBlackMarketSmart";
-					issued = tryMacroBuildWithFallback("Game.BuildBlackMarketSmart", false, reason);
-					recordBuildAttempt("Game.BuildBlackMarketSmart", issued, reason);
-				}
-				else if (shouldPrioritizeMarketGrowth
-					&& !zoneExpansionIsUrgent
-					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", static_cast<Int>(inProgressBlackMarkets))
-					&& canAttemptBlackMarketNow
-					&& marketGrowthSpend.allowed)
-				{
-					chosenCommand = "Game.BuildBlackMarketSmart";
-					issued = tryMacroBuildWithFallback("Game.BuildBlackMarketSmart", false, reason);
-					recordBuildAttempt("Game.BuildBlackMarketSmart", issued, reason);
-				}
-				else if (staticDefenseZoneIndex >= 0 && !staticDefenseCommand.empty() && staticDefenseSpend.allowed)
-				{
-					chosenCommand = staticDefenseCommand;
-					issued = trySpecificZoneCommand(
-						"auto_static_defense",
-						staticDefenseCommand.c_str(),
-						zones[static_cast<std::size_t>(staticDefenseZoneIndex)],
-						nlohmann::json::object(),
-						reason);
-					recordBuildAttempt(staticDefenseCommand.c_str(), issued, reason);
-					if (!issued && reason.empty())
-					{
-						reason = staticDefenseReason;
-					}
-				}
-				else if (palaceRedundancyZoneIndex >= 0 && palaceSpend.allowed)
-				{
-					chosenCommand = "Game.BuildPalaceSmart";
-					issued = trySpecificZoneCommand(
-						"auto_palace_redundancy",
-						"Game.BuildPalaceSmart",
-						zones[static_cast<std::size_t>(palaceRedundancyZoneIndex)],
-						nlohmann::json::object(),
-						reason);
-					recordBuildAttempt("Game.BuildPalaceSmart", issued, reason);
-					if (!issued && reason.empty())
-					{
-						reason = palaceRedundancyReason;
-					}
-				}
-				else if (!shouldPreserveReserve
-					&& canScaleMilitaryProduction
-					&& isSprawlStyle
-					&& totalBarracks < effectiveBarracksCap
-					&& balancedZoneCanAddBarracks
-					&& counts.barracksInProgress < 1
-					&& isBuildAttemptReady("Game.BuildBarracksSmart", counts.barracksInProgress)
-					&& money >= (isBalancedSprawl ? reserveCash : 800u))
-				{
-					chosenCommand = "Game.BuildBarracksSmart";
-					issued = tryMacroBuildWithFallback("Game.BuildBarracksSmart", true, reason);
-					recordBuildAttempt("Game.BuildBarracksSmart", issued, reason);
-				}
-				else if (!shouldPreserveReserve
-					&& canScaleMilitaryProduction
-					&& isSprawlStyle
-					&& totalArmsDealers < effectiveArmsCap
-					&& balancedZoneCanAddArmsDealer
-					&& counts.armsDealersInProgress < 1
-					&& isBuildAttemptReady("Game.BuildArmsDealerSmart", counts.armsDealersInProgress)
-					&& money >= (isBalancedSprawl ? reserveCash : 2600u))
-				{
-					chosenCommand = "Game.BuildArmsDealerSmart";
-					issued = tryMacroBuildWithFallback("Game.BuildArmsDealerSmart", true, reason);
-					recordBuildAttempt("Game.BuildArmsDealerSmart", issued, reason);
-				}
-				else if (hasCompletedPalace
-					&& effectiveTotalBlackMarkets < ((profile == "economic" || profile == "tech") ? 2 : 1)
-					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", static_cast<Int>(inProgressBlackMarkets))
-					&& canAttemptBlackMarketNow
-					&& marketRecoverySpend.allowed)
-				{
-					chosenCommand = "Game.BuildBlackMarketSmart";
-					issued = tryMacroBuildWithFallback("Game.BuildBlackMarketSmart", false, reason);
-					recordBuildAttempt("Game.BuildBlackMarketSmart", issued, reason);
-				}
-				else if (isSprawlStyle
-					&& effectiveTotalBlackMarkets < sprawlMarketCap
-					&& isBuildAttemptReady("Game.BuildBlackMarketSmart", static_cast<Int>(inProgressBlackMarkets))
-					&& canAttemptBlackMarketNow
-					&& marketGrowthSpend.allowed)
-				{
-					chosenCommand = "Game.BuildBlackMarketSmart";
-					issued = tryMacroBuildWithFallback("Game.BuildBlackMarketSmart", true, reason);
-					recordBuildAttempt("Game.BuildBlackMarketSmart", issued, reason);
-				}
-				else if (!shouldPreserveReserve
-					&& isSprawlStyle
-					&& totalTunnels < sprawlTunnelCap
-					&& counts.tunnelsInProgress < 1
-					&& isBuildAttemptReady("Game.BuildTunnelNetwork", counts.tunnelsInProgress)
-					&& money >= (isBalancedSprawl ? 1400u : 900u))
-				{
-					chosenCommand = "Game.BuildTunnelNetwork";
-					issued = tryMacroBuildWithFallback("Game.BuildTunnelNetwork", true, reason);
-					recordBuildAttempt("Game.BuildTunnelNetwork", issued, reason);
-
-					// Phase 5.8: Log non-supply zone development if active zone is non-supply
-					if (issued && hasActiveZone
-						&& (activeZone.anchorType == ZoneAnchorType::CapturedStructure
-							|| activeZone.anchorType == ZoneAnchorType::StrategicFoothold
-							|| activeZone.anchorType == ZoneAnchorType::MarketFoothold))
-					{
-						adapterLog(
-							"non_supply_zone_development anchor=%u type=%s command=Game.BuildTunnelNetwork issued=1 reason=zone_infrastructure",
-							static_cast<unsigned int>(activeZone.anchorId),
-							zoneAnchorTypeToString(activeZone.anchorType));
-					}
-				}
-				else if (!shouldPreserveReserve
-					&& isSprawlStyle
-					&& totalStingers < sprawlStingerCap
-					&& counts.stingersInProgress < 1
-					&& isBuildAttemptReady("Game.BuildStingerSite", counts.stingersInProgress)
-					&& money >= (isBalancedSprawl ? 1800u : 1200u))
-				{
-					chosenCommand = "Game.BuildStingerSite";
-					issued = tryMacroBuildWithFallback("Game.BuildStingerSite", true, reason);
-					recordBuildAttempt("Game.BuildStingerSite", issued, reason);
-
-					// Phase 5.8: Log non-supply zone development if active zone is non-supply
-					if (issued && hasActiveZone
-						&& (activeZone.anchorType == ZoneAnchorType::CapturedStructure
-							|| activeZone.anchorType == ZoneAnchorType::StrategicFoothold
-							|| activeZone.anchorType == ZoneAnchorType::MarketFoothold))
-					{
-						adapterLog(
-							"non_supply_zone_development anchor=%u type=%s command=Game.BuildStingerSite issued=1 reason=zone_defense",
-							static_cast<unsigned int>(activeZone.anchorId),
-							zoneAnchorTypeToString(activeZone.anchorType));
-					}
-				}
-				else if ((!shouldPreserveReserve || allowUrgentExpansionDespiteReserve)
-					&& isSprawlStyle
-					&& !shouldThrottleExtraStashGrowth
-					&& totalSupplyStashes < sprawlSupplyCap
-					&& counts.supplyStashesInProgress < policyConfig.normalMaxConcurrentExpansionStashes
-					&& isBuildAttemptReady("Game.BuildSupplyStashSmart", counts.supplyStashesInProgress)
-					&& money >= (isBalancedSprawl ? 2200u : 1800u))
-				{
-					chosenCommand = "Game.BuildSupplyStashSmart";
-					issued = tryMacroBuildWithFallback("Game.BuildSupplyStashSmart", false, reason);
-					recordBuildAttempt("Game.BuildSupplyStashSmart", issued, reason);
 				}
 
 				// Phase 5.8: Non-supply expansion path for strategic/market footholds
 				// When supply expansion is blocked and economy is strong, allow Tunnel/Stinger foothold zones
-				if (!issued
-					&& isSprawlStyle
-					&& stashZoneCount < desiredZoneCount
-					&& allowUrgentExpansionDespiteReserve)
+				const AIControlAdapterNonSupplyFootholdDecision footholdDecision =
+					macroBuildManager.EvaluateNonSupplyFoothold({
+						issued,
+						isSprawlStyle,
+						stashZoneCount,
+						desiredZoneCount,
+						allowUrgentExpansionDespiteReserve,
+						reason.c_str(),
+						hasCompletedPalace,
+						static_cast<int>(completedBlackMarkets),
+						money,
+						totalTunnels,
+						sprawlTunnelCap,
+						counts.tunnelsInProgress,
+						isBuildAttemptReady("Game.BuildTunnelNetwork", counts.tunnelsInProgress)
+					});
+				if (footholdDecision.shouldEvaluatePlacement)
 				{
-					// Check if supply expansion repeatedly failed or is blocked
-					const bool supplyExpansionBlocked =
-						(reason == "no_legal_build_location" || reason == "placement_failed" || reason == "no_worker");
+					const ZoneAnchorType footholdType = footholdDecision.anchorType;
 
-					// Check if Palace and Black Market economy is online
-					const bool economyIsStrong =
-						hasCompletedPalace
-						&& completedBlackMarkets >= 4
-						&& money >= 3000u;
+					// Find candidate foothold location
+					std::string footholdReason;
+					const Coord3D footholdCandidate = findFootholdPlacement(footholdReason);
 
-					// Check if durable income is high enough
-					const int durableIncome = static_cast<int>(completedBlackMarkets) * 200; // Rough estimate: 200/min per market
-					const bool hasStrongIncome = durableIncome >= 800;
-
-					if ((supplyExpansionBlocked || hasStrongIncome) && economyIsStrong)
+					if (footholdReason == "valid_foothold_location")
 					{
-						// Determine foothold type: market_foothold if income is strong, strategic_foothold otherwise
-						const ZoneAnchorType footholdType = hasStrongIncome
-							? ZoneAnchorType::MarketFoothold
-							: ZoneAnchorType::StrategicFoothold;
-
-						// Find candidate foothold location
-						std::string footholdReason;
-						const Coord3D footholdCandidate = findFootholdPlacement(footholdReason);
-
-						if (footholdReason == "valid_foothold_location")
+						// Check if we already have a pending foothold at this location
+						bool duplicateFoothold = false;
+						for (std::size_t i = 0; i < m_autonomy.state.pendingFootholdAnchors.size(); ++i)
 						{
-							// Check if we already have a pending foothold at this location
-							bool duplicateFoothold = false;
-							for (std::size_t i = 0; i < m_autonomy.state.pendingFootholdAnchors.size(); ++i)
+							const AutonomyState::PendingFootholdAnchor& existing = m_autonomy.state.pendingFootholdAnchors[i];
+							const float dx = existing.targetX - footholdCandidate.x;
+							const float dy = existing.targetY - footholdCandidate.y;
+							const float distSq = (dx * dx) + (dy * dy);
+							if (distSq < (100.0f * 100.0f))
 							{
-								const AutonomyState::PendingFootholdAnchor& existing = m_autonomy.state.pendingFootholdAnchors[i];
-								const float dx = existing.targetX - footholdCandidate.x;
-								const float dy = existing.targetY - footholdCandidate.y;
-								const float distSq = (dx * dx) + (dy * dy);
-								if (distSq < (100.0f * 100.0f))
-								{
-									duplicateFoothold = true;
-									break;
-								}
+								duplicateFoothold = true;
+								break;
 							}
+						}
 
-							if (!duplicateFoothold)
+						if (!duplicateFoothold)
+						{
+							// Prefer Tunnel Network as first foothold structure
+							if (footholdDecision.shouldAttemptTunnel)
 							{
-								// Prefer Tunnel Network as first foothold structure
-								if (totalTunnels < sprawlTunnelCap
-									&& counts.tunnelsInProgress < 1
-									&& isBuildAttemptReady("Game.BuildTunnelNetwork", counts.tunnelsInProgress)
-									&& money >= 900u)
+								chosenCommand = "Game.BuildTunnelNetwork";
+								issued = tryMacroBuildWithFallback("Game.BuildTunnelNetwork", true, reason);
+								recordBuildAttempt("Game.BuildTunnelNetwork", issued, reason);
+
+								if (issued)
 								{
-									chosenCommand = "Game.BuildTunnelNetwork";
-									issued = tryMacroBuildWithFallback("Game.BuildTunnelNetwork", true, reason);
-									recordBuildAttempt("Game.BuildTunnelNetwork", issued, reason);
+									// Create pending foothold anchor
+									AutonomyState::PendingFootholdAnchor pending;
+									pending.syntheticAnchorId = m_autonomy.state.nextSyntheticAnchorId++;
+									pending.anchorType = footholdType;
+									pending.targetX = footholdCandidate.x;
+									pending.targetY = footholdCandidate.y;
+									pending.createdTick = GetTickCount();
+									pending.buildIssued = true;
+									pending.buildCommand = "Game.BuildTunnelNetwork";
+									pending.reason = "non_supply_expansion";
+									m_autonomy.state.pendingFootholdAnchors.push_back(pending);
 
-									if (issued)
-									{
-										// Create pending foothold anchor
-										AutonomyState::PendingFootholdAnchor pending;
-										pending.syntheticAnchorId = m_autonomy.state.nextSyntheticAnchorId++;
-										pending.anchorType = footholdType;
-										pending.targetX = footholdCandidate.x;
-										pending.targetY = footholdCandidate.y;
-										pending.createdTick = GetTickCount();
-										pending.buildIssued = true;
-										pending.buildCommand = "Game.BuildTunnelNetwork";
-										pending.reason = "non_supply_expansion";
-										m_autonomy.state.pendingFootholdAnchors.push_back(pending);
-
-										adapterLog(
-											"zone_anchor_candidate type=%s anchor_id=%u x=%.1f y=%.1f reason=non_supply_expansion tunnel_issued=1",
-											zoneAnchorTypeToString(footholdType),
-											static_cast<unsigned int>(pending.syntheticAnchorId),
-											footholdCandidate.x,
-											footholdCandidate.y);
-									}
-									else
-									{
-										adapterLog(
-											"zone_anchor_rejected type=%s reason=tunnel_build_failed detail=%s",
-											zoneAnchorTypeToString(footholdType),
-											reason.c_str());
-									}
+									adapterLog(
+										"zone_anchor_candidate type=%s anchor_id=%u x=%.1f y=%.1f reason=non_supply_expansion tunnel_issued=1",
+										zoneAnchorTypeToString(footholdType),
+										static_cast<unsigned int>(pending.syntheticAnchorId),
+										footholdCandidate.x,
+										footholdCandidate.y);
 								}
-								else if (!issued)
+								else
 								{
 									adapterLog(
-										"zone_anchor_rejected type=%s reason=tunnel_unavailable tunnels=%d cap=%d in_progress=%d money=%lu",
+										"zone_anchor_rejected type=%s reason=tunnel_build_failed detail=%s",
 										zoneAnchorTypeToString(footholdType),
-										totalTunnels,
-										sprawlTunnelCap,
-										counts.tunnelsInProgress,
-										static_cast<unsigned long>(money));
+										reason.c_str());
 								}
 							}
-							else
+							else if (!issued)
 							{
 								adapterLog(
-									"zone_anchor_rejected type=%s reason=duplicate x=%.1f y=%.1f",
+									"zone_anchor_rejected type=%s reason=tunnel_unavailable tunnels=%d cap=%d in_progress=%d money=%lu",
 									zoneAnchorTypeToString(footholdType),
-									footholdCandidate.x,
-									footholdCandidate.y);
+									totalTunnels,
+									sprawlTunnelCap,
+									counts.tunnelsInProgress,
+									static_cast<unsigned long>(money));
 							}
 						}
 						else
 						{
-							// Candidate selection failed
 							adapterLog(
-								"zone_anchor_rejected type=%s reason=%s",
+								"zone_anchor_rejected type=%s reason=duplicate x=%.1f y=%.1f",
 								zoneAnchorTypeToString(footholdType),
-								footholdReason.c_str());
+								footholdCandidate.x,
+								footholdCandidate.y);
 						}
 					}
-					else if (!economyIsStrong)
+					else
 					{
+						// Candidate selection failed
 						adapterLog(
-							"zone_anchor_rejected type=market_foothold reason=economy_not_ready palace=%d markets=%d money=%lu",
-							hasCompletedPalace ? 1 : 0,
-							static_cast<int>(completedBlackMarkets),
-							static_cast<unsigned long>(money));
+							"zone_anchor_rejected type=%s reason=%s",
+							zoneAnchorTypeToString(footholdType),
+							footholdReason.c_str());
 					}
+				}
+				else if (footholdDecision.reason == std::string("economy_not_ready"))
+				{
+					adapterLog(
+						"zone_anchor_rejected type=market_foothold reason=economy_not_ready palace=%d markets=%d money=%lu",
+						hasCompletedPalace ? 1 : 0,
+						static_cast<int>(completedBlackMarkets),
+						static_cast<unsigned long>(money));
 				}
 
 				if (!issued && reason.empty())
 				{
-					if (shouldPreserveReserve && !allowUrgentExpansionDespiteReserve)
-					{
-						reason = "macro_hold_reserve";
-					}
-					else if (allowUrgentExpansionDespiteReserve && stashZoneCount < desiredZoneCount)
-					{
-						// Expansion was urgent and cash was high, but expansion was not issued
-						// Report a concrete blocker instead of macro_hold_reserve
-						if (counts.supplyStashesInProgress > 0)
-						{
-							reason = "macro_wait_expansion_in_progress";
-						}
-						else if (counts.tunnelsInProgress > 0)
-						{
-							reason = "macro_wait_non_supply_anchor_build_in_progress";
-						}
-						else if (shouldThrottleExtraStashGrowth)
-						{
-							reason = "macro_wait_expansion_throttle";
-						}
-						else if (!hasCompletedPalace || completedBlackMarkets < 4)
-						{
-							reason = "macro_wait_non_supply_anchor_economy";
-						}
-						else if (totalTunnels >= sprawlTunnelCap)
-						{
-							reason = "macro_wait_non_supply_anchor_unavailable";
-						}
-						else
-						{
-							reason = "macro_wait_expansion_placement";
-						}
-					}
-					else if (shouldForceEcoRecovery)
-					{
-						reason = "macro_wait_eco_recovery";
-					}
-					else if (effectiveTotalBlackMarkets < sprawlDesiredMarketCount && !canAttemptBlackMarketNow)
-					{
-						reason = "macro_wait_market_cash";
-					}
-					else if (remoteZoneNeedsFollowup)
-					{
-						reason = "macro_wait_zone_followup";
-					}
-					else if (stashZoneCount < desiredZoneCount)
-					{
-						reason = "macro_wait_zone_expansion";
-					}
-					else
-					{
-						reason = "macro_no_priority";
-					}
+					reason = macroBuildManager.EvaluateMacroHoldReason({
+						shouldPreserveReserve,
+						allowUrgentExpansionDespiteReserve,
+						stashZoneCount,
+						desiredZoneCount,
+						counts.supplyStashesInProgress,
+						counts.tunnelsInProgress,
+						shouldThrottleExtraStashGrowth,
+						hasCompletedPalace,
+						static_cast<int>(completedBlackMarkets),
+						totalTunnels,
+						sprawlTunnelCap,
+						shouldForceEcoRecovery,
+						effectiveTotalBlackMarkets,
+						sprawlDesiredMarketCount,
+						canAttemptBlackMarketNow,
+						remoteZoneNeedsFollowup
+					});
 				}
 
 				m_autonomy.state.lastDecisionCategory = "macro";
 				m_autonomy.state.lastDecisionCommand = chosenCommand;
 				m_autonomy.state.lastDecisionReason = issued ? "ok" : reason;
+				if (!m_autonomy.state.macroBuildTelemetry.is_object())
+				{
+					m_autonomy.state.macroBuildTelemetry = nlohmann::json::object();
+				}
+				m_autonomy.state.macroBuildTelemetry["result"] = nlohmann::json::object({
+					{"command", chosenCommand},
+					{"issued", issued},
+					{"reason", issued ? "ok" : reason},
+					{"tick", static_cast<unsigned int>(now)}
+				});
 				// Mark zone telemetry as dirty when build command issued (will complete later)
 				if (issued && !chosenCommand.empty())
 				{
@@ -4903,8 +4570,10 @@ namespace
 
 			// Economy policy assessment: determines income health, reserve pressure, and spending mode
 			const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
-			const bool isBalancedSprawl = (profile == "sprawl_balanced");
-			const UnsignedInt reserveCash = isBalancedSprawl ? 10000u : 0u;
+			const AIControlAdapterProfilePolicyManager profilePolicyManager;
+			const AIControlAdapterProfilePolicyConfig profilePolicyConfig = resolveAutonomyProfilePolicyConfig();
+			const bool isBalancedSprawl = profilePolicyConfig.isBalancedSprawl;
+			const UnsignedInt reserveCash = profilePolicyConfig.reserveCash;
 
 			EconomyManagerInput economyInput;
 			economyInput.currentMoney = money;
@@ -4920,57 +4589,6 @@ namespace
 			// Calculate durable income capacity for telemetry
 			const unsigned int incomePerMarket = 225u;
 			const unsigned int durableIncome = completedBlackMarkets * incomePerMarket;
-			auto evaluateStrategicSpend = [&](StrategicSpendCategory category, unsigned int requestCost) -> AIControlAdapterStrategicSpendDecision
-			{
-				AIControlAdapterStrategicSpendInput spendInput;
-				spendInput.money = money;
-				spendInput.reserveCash = reserveCash;
-				spendInput.requestCost = requestCost;
-				spendInput.currentZones = static_cast<int>(m_autonomy.state.telemetryZones.is_array() ? m_autonomy.state.telemetryZones.size() : 0u);
-				spendInput.developedZones = 0;
-				spendInput.desiredZones = std::max(1, static_cast<int>(std::floor((isBalancedSprawl ? 3.0f : 4.0f) * std::max<Real>(0.5f, std::min<Real>(10.0f, m_autonomy.state.sprawlMultiplier)))));
-				spendInput.completedMarkets = static_cast<int>(completedBlackMarkets);
-				spendInput.healthyMarketsInProgress = static_cast<int>(inProgressBlackMarkets);
-				spendInput.staleMarketFoundations = static_cast<int>(staleBlackMarketFoundations);
-				spendInput.staleStrategicFoundations = staleStrategicFoundations;
-				spendInput.activeLocalEnemies = 0;
-				spendInput.activeWmdThreats = m_autonomy.wmdTargetTracker.hasActiveWMDThreat() ? 1 : 0;
-				spendInput.armySize = counts.mobileUnits;
-				spendInput.armyCap = std::max(1, counts.mobileUnits);
-				spendInput.quads = counts.quads;
-				spendInput.buggies = counts.rocketBuggies;
-				spendInput.scorpions = counts.scorpions;
-				spendInput.mainBaseCritical = m_autonomy.state.mainBaseCriticalOverrideTelemetry.is_object()
-					&& m_autonomy.state.mainBaseCriticalOverrideTelemetry.value("active", false);
-				spendInput.emergencySurvivalActive = false;
-				spendInput.expansionUrgent = false;
-				spendInput.incomeCritical = economyPolicy.incomeState == EconomyIncomeState::Critical || completedBlackMarkets == 0u;
-				spendInput.reserveDepleted = economyPolicy.reserveState == EconomyReserveState::Depleted || money < reserveCash;
-				const AIControlAdapterStrategicSpendDecision decision = AIControlAdapterEvaluateStrategicSpend(category, spendInput);
-				adapterLog(
-					"strategic_spend_policy category=%s allowed=%d money=%lu reserve=%lu protected_cash=%lu spend_budget=%lu batch_limit=%d reason=%s",
-					AIControlAdapterStrategicSpendCategoryName(category),
-					decision.allowed ? 1 : 0,
-					static_cast<unsigned long>(money),
-					static_cast<unsigned long>(reserveCash),
-					static_cast<unsigned long>(decision.protectedCash),
-					static_cast<unsigned long>(decision.spendBudget),
-					decision.batchLimit,
-					decision.reason);
-				m_autonomy.state.strategicSpendTelemetry["protected_cash"] = decision.protectedCash;
-				m_autonomy.state.strategicSpendTelemetry["healthy_market_foundations"] = inProgressBlackMarkets;
-				m_autonomy.state.strategicSpendTelemetry["stale_market_foundations"] = staleBlackMarketFoundations;
-				m_autonomy.state.strategicSpendTelemetry["stale_strategic_foundations"] = staleStrategicFoundations;
-				if (decision.allowed)
-				{
-					m_autonomy.state.strategicSpendTelemetry["last_allowed_category"] = AIControlAdapterStrategicSpendCategoryName(category);
-				}
-				else
-				{
-					m_autonomy.state.strategicSpendTelemetry["last_blocked_reason"] = decision.reason;
-				}
-				return decision;
-			};
 			adapterLog(
 				"economy_recovery_budget protected_cash=%lu recovery_action=%s reason=%s",
 				static_cast<unsigned long>(std::max<UnsignedInt>(reserveCash, completedBlackMarkets == 0u || staleBlackMarketFoundations > 0u ? 2500u : 0u)),
@@ -5049,8 +4667,59 @@ namespace
 			EconomyRecoveryRequest recoveryRequest = m_autonomy.economyManager.ChooseRecoveryAction(economyInput, economyPolicy);
 			if (recoveryRequest.shouldBuildIncome)
 			{
+				AIControlAdapterStrategicSpendEconomyFacts recoverySpendEconomy;
+				recoverySpendEconomy.money = money;
+				recoverySpendEconomy.reserveCash = reserveCash;
+				recoverySpendEconomy.completedMarkets = static_cast<int>(completedBlackMarkets);
+				recoverySpendEconomy.healthyMarketsInProgress = static_cast<int>(inProgressBlackMarkets);
+				recoverySpendEconomy.staleMarketFoundations = static_cast<int>(staleBlackMarketFoundations);
+				recoverySpendEconomy.staleStrategicFoundations = staleStrategicFoundations;
+				recoverySpendEconomy.activeWmdThreats = m_autonomy.wmdTargetTracker.hasActiveWMDThreat() ? 1 : 0;
+				recoverySpendEconomy.mainBaseCritical =
+					m_autonomy.state.mainBaseCriticalOverrideTelemetry.is_object()
+					&& m_autonomy.state.mainBaseCriticalOverrideTelemetry.value("active", false);
+				AIControlAdapterStrategicSpendZoneFacts recoverySpendZones;
+				recoverySpendZones.currentZones =
+					static_cast<int>(m_autonomy.state.telemetryZones.is_array() ? m_autonomy.state.telemetryZones.size() : 0u);
+				recoverySpendZones.developedZones = 0;
+				recoverySpendZones.desiredZones =
+					profilePolicyManager.ResolveStrategicSpendDesiredZoneCount(
+						profilePolicyConfig,
+						profilePolicyConfig.sprawlSupplyCap);
+				AIControlAdapterStrategicSpendArmyFacts recoverySpendArmy;
+				recoverySpendArmy.armySize = counts.mobileUnits;
+				recoverySpendArmy.armyCap = std::max(1, counts.mobileUnits);
+				recoverySpendArmy.quads = counts.quads;
+				recoverySpendArmy.buggies = counts.rocketBuggies;
+				recoverySpendArmy.scorpions = counts.scorpions;
+				const AIControlAdapterStrategicSpendSnapshotBase recoverySpendBase =
+					strategicSpendSnapshotBuilder.BuildBase(recoverySpendEconomy, recoverySpendZones, recoverySpendArmy);
+				AIControlAdapterStrategicSpendSnapshotOverrides recoverySpendOverrides;
+				recoverySpendOverrides.incomeCritical = economyPolicy.incomeState == EconomyIncomeState::Critical || completedBlackMarkets == 0u;
+				recoverySpendOverrides.reserveDepleted = economyPolicy.reserveState == EconomyReserveState::Depleted || money < reserveCash;
+				const AIControlAdapterStrategicSpendSnapshot recoverySpendSnapshot =
+					strategicSpendSnapshotBuilder.Build(recoverySpendBase, recoverySpendOverrides);
+				const AIControlAdapterStrategicSpendManager strategicSpendManager;
 				const AIControlAdapterStrategicSpendDecision recoverySpend =
-					evaluateStrategicSpend(StrategicSpendCategory::EconomyRecovery, 2500u);
+					strategicSpendManager.Evaluate(recoverySpendSnapshot, StrategicSpendCategory::EconomyRecovery, 2500u);
+				adapterLog(
+					"%s",
+					strategicSpendTelemetrySerializer.BuildPolicyLogLine({
+						StrategicSpendCategory::EconomyRecovery,
+						money,
+						reserveCash,
+						&recoverySpend
+					}).c_str());
+				strategicSpendTelemetrySerializer.RecordMarketFoundationCounts(
+					m_autonomy.state.strategicSpendTelemetry,
+					static_cast<int>(inProgressBlackMarkets),
+					static_cast<int>(staleBlackMarketFoundations),
+					staleStrategicFoundations);
+				strategicSpendTelemetrySerializer.RecordCategory(
+					m_autonomy.state.strategicSpendTelemetry,
+					StrategicSpendCategory::EconomyRecovery,
+					2500u,
+					recoverySpend);
 				m_autonomy.state.strategicSpendTelemetry["economy_recovery_action"] =
 					recoverySpend.allowed ? "market" : "blocked";
 				if (!recoverySpend.allowed)
@@ -6166,10 +5835,10 @@ namespace
 					counts.barracks,
 					counts.armsDealers,
 					counts.blackMarkets,
-					isBalancedSprawl ? 100 : 9999
+					profilePolicyManager.ResolveCombatArmyCapBase(profilePolicyConfig)
 				});
 				{
-					const int baseArmyCap = isBalancedSprawl ? 100 : 9999;
+					const int baseArmyCap = profilePolicyManager.ResolveCombatArmyCapBase(profilePolicyConfig);
 					const int productionCapacity = std::max(0, counts.barracks) + std::max(0, counts.armsDealers);
 					const int producerSupportedCap = 100 + (productionCapacity * 3);
 					const int incomePerMinuteForCap = static_cast<int>(std::floor(m_autonomy.state.smoothedNetCashPerMinute));
@@ -6230,28 +5899,41 @@ namespace
 						armyCount,
 						armyCapForLog
 					});
-				AIControlAdapterStrategicSpendInput emergencySpendInput;
-				emergencySpendInput.money = money;
-				emergencySpendInput.reserveCash = reserveCash;
-				emergencySpendInput.requestCost = 700u;
-				emergencySpendInput.currentZones = static_cast<int>(m_autonomy.state.telemetryZones.is_array() ? m_autonomy.state.telemetryZones.size() : 0u);
-				emergencySpendInput.desiredZones = std::max(1, static_cast<int>(std::floor((isBalancedSprawl ? 3.0f : 4.0f) * std::max<Real>(0.5f, std::min<Real>(10.0f, m_autonomy.state.sprawlMultiplier)))));
-				emergencySpendInput.completedMarkets = counts.blackMarkets;
-				emergencySpendInput.healthyMarketsInProgress = static_cast<int>(inProgressBlackMarkets);
-				emergencySpendInput.staleMarketFoundations = static_cast<int>(staleBlackMarketFoundations);
-				emergencySpendInput.staleStrategicFoundations = staleStrategicFoundations;
-				emergencySpendInput.activeLocalEnemies = localEnemyCount;
-				emergencySpendInput.armySize = armyCount;
-				emergencySpendInput.armyCap = armyCapForLog;
-				emergencySpendInput.quads = counts.quads;
-				emergencySpendInput.buggies = counts.rocketBuggies;
-				emergencySpendInput.scorpions = counts.scorpions;
-				emergencySpendInput.mainBaseCritical = mainUnderPressure;
-				emergencySpendInput.emergencySurvivalActive = emergencyDecision.active;
-				emergencySpendInput.incomeCritical = counts.blackMarkets <= 0;
-				emergencySpendInput.reserveDepleted = money < reserveCash;
+				AIControlAdapterStrategicSpendEconomyFacts emergencySpendEconomy;
+				emergencySpendEconomy.money = money;
+				emergencySpendEconomy.reserveCash = reserveCash;
+				emergencySpendEconomy.completedMarkets = counts.blackMarkets;
+				emergencySpendEconomy.healthyMarketsInProgress = static_cast<int>(inProgressBlackMarkets);
+				emergencySpendEconomy.staleMarketFoundations = static_cast<int>(staleBlackMarketFoundations);
+				emergencySpendEconomy.staleStrategicFoundations = staleStrategicFoundations;
+				emergencySpendEconomy.activeWmdThreats = m_autonomy.wmdTargetTracker.hasActiveWMDThreat() ? 1 : 0;
+				emergencySpendEconomy.mainBaseCritical = mainUnderPressure;
+				AIControlAdapterStrategicSpendZoneFacts emergencySpendZones;
+				emergencySpendZones.currentZones =
+					static_cast<int>(m_autonomy.state.telemetryZones.is_array() ? m_autonomy.state.telemetryZones.size() : 0u);
+				emergencySpendZones.developedZones = 0;
+				emergencySpendZones.desiredZones =
+					profilePolicyManager.ResolveStrategicSpendDesiredZoneCount(
+						profilePolicyConfig,
+						profilePolicyConfig.sprawlSupplyCap);
+				AIControlAdapterStrategicSpendArmyFacts emergencySpendArmy;
+				emergencySpendArmy.armySize = armyCount;
+				emergencySpendArmy.armyCap = armyCapForLog;
+				emergencySpendArmy.quads = counts.quads;
+				emergencySpendArmy.buggies = counts.rocketBuggies;
+				emergencySpendArmy.scorpions = counts.scorpions;
+				const AIControlAdapterStrategicSpendSnapshotBase emergencySpendBase =
+					strategicSpendSnapshotBuilder.BuildBase(emergencySpendEconomy, emergencySpendZones, emergencySpendArmy);
+				AIControlAdapterStrategicSpendSnapshotOverrides emergencySpendOverrides;
+				emergencySpendOverrides.activeLocalEnemies = localEnemyCount;
+				emergencySpendOverrides.emergencySurvivalActive = emergencyDecision.active;
+				emergencySpendOverrides.incomeCritical = counts.blackMarkets <= 0;
+				emergencySpendOverrides.reserveDepleted = money < reserveCash;
+				const AIControlAdapterStrategicSpendSnapshot emergencySpendSnapshot =
+					strategicSpendSnapshotBuilder.Build(emergencySpendBase, emergencySpendOverrides);
+				const AIControlAdapterStrategicSpendManager strategicSpendManager;
 				const AIControlAdapterStrategicSpendDecision emergencySpend =
-					AIControlAdapterEvaluateStrategicSpend(StrategicSpendCategory::EmergencyDefenseUnits, emergencySpendInput);
+					strategicSpendManager.Evaluate(emergencySpendSnapshot, StrategicSpendCategory::EmergencyDefenseUnits, 700u);
 				adapterLog(
 					"emergency_spend_gate money=%lu reserve=%lu allow=%d batch_limit=%d protected_cash=%lu reason=%s",
 					static_cast<unsigned long>(money),
@@ -6261,15 +5943,13 @@ namespace
 					static_cast<unsigned long>(emergencySpend.protectedCash),
 					emergencySpend.reason);
 				adapterLog(
-					"strategic_spend_policy category=%s allowed=%d money=%lu reserve=%lu protected_cash=%lu spend_budget=%lu batch_limit=%d reason=%s",
-					AIControlAdapterStrategicSpendCategoryName(StrategicSpendCategory::EmergencyDefenseUnits),
-					emergencySpend.allowed ? 1 : 0,
-					static_cast<unsigned long>(money),
-					static_cast<unsigned long>(reserveCash),
-					static_cast<unsigned long>(emergencySpend.protectedCash),
-					static_cast<unsigned long>(emergencySpend.spendBudget),
-					emergencySpend.batchLimit,
-					emergencySpend.reason);
+					"%s",
+					strategicSpendTelemetrySerializer.BuildPolicyLogLine({
+						StrategicSpendCategory::EmergencyDefenseUnits,
+						money,
+						reserveCash,
+						&emergencySpend
+					}).c_str());
 				m_autonomy.state.emergencySurvivalTelemetry = nlohmann::json::object({
 					{"active", emergencyDecision.active},
 					{"allow_reserve_spend", emergencyDecision.allowReserveSpend},
@@ -6281,6 +5961,11 @@ namespace
 					{"reason", emergencyDecision.reason}
 				});
 				m_autonomy.state.strategicSpendTelemetry["emergency_batch_limit"] = emergencySpend.batchLimit;
+				strategicSpendTelemetrySerializer.RecordCategory(
+					m_autonomy.state.strategicSpendTelemetry,
+					StrategicSpendCategory::EmergencyDefenseUnits,
+					700u,
+					emergencySpend);
 				adapterLog(
 					"emergency_survival_policy active=%d main_under_pressure=%d local_enemies=%d artillery=%d money=%lu reserve=%lu army=%d/%d reason=%s",
 					emergencyDecision.active ? 1 : 0,
@@ -6367,8 +6052,14 @@ namespace
 				{
 					if (emergencySpend.allowed && emergencySpend.batchLimit > 0 && !emergencyDecision.commands.empty())
 					{
+						const char* emergencyCommand = AIControlAdapterChooseEmergencySurvivalProductionCommand(
+							emergencyDecision,
+							counts.quads,
+							counts.queuedQuads,
+							counts.scorpions,
+							counts.queuedScorpions);
 						prodIntent.shouldProduce = true;
-						prodIntent.commandName = emergencyDecision.commands[0];
+						prodIntent.commandName = emergencyCommand != nullptr ? emergencyCommand : emergencyDecision.commands[0];
 						prodIntent.producerKind = "any";
 						prodIntent.producerObjectId = -1;
 						prodIntent.unitTemplate = "";
@@ -6723,8 +6414,8 @@ namespace
 
 			if (techDue)
 			{
-				const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
-				if (profile == "sprawl" || profile == "sprawl_balanced" || profile == "tech")
+				const AIControlAdapterProfilePolicyManager profilePolicyManager;
+				if (profilePolicyManager.UsesTechRetryPolicy(resolveAutonomyProfilePolicyConfig()))
 				{
 					const bool hasScienceEconomy = totalSupplyStashes >= 2;
 					const bool hasScienceAdvanced = counts.palaces > 0;
@@ -6951,8 +6642,8 @@ namespace
 						productionReason = result.resultReason;
 
 						// Update production telemetry (for all production decisions, including holds)
-						const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
-						const bool isBalancedSprawl = (profile == "sprawl_balanced");
+						const AIControlAdapterProfilePolicyConfig profilePolicyConfig = resolveAutonomyProfilePolicyConfig();
+						const bool isBalancedSprawl = profilePolicyConfig.isBalancedSprawl;
 						const Int armyCap = AIControlAdapterGetEffectiveArmyCap({
 							isBalancedSprawl,
 							money,
@@ -6960,7 +6651,7 @@ namespace
 							counts.barracks,
 							counts.armsDealers,
 							counts.blackMarkets,
-							isBalancedSprawl ? 100 : 9999
+							AIControlAdapterProfilePolicyManager().ResolveCombatArmyCapBase(profilePolicyConfig)
 						});
 
 						const std::string actionName = result.commandName.empty() ? "none" : result.commandName;
@@ -7007,8 +6698,8 @@ namespace
 			// Update next tech tick (always advance when techDue)
 			if (techDue)
 			{
-				const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
-				if (profile == "sprawl" || profile == "sprawl_balanced" || profile == "tech")
+				const AIControlAdapterProfilePolicyManager profilePolicyManager;
+				if (profilePolicyManager.UsesTechRetryPolicy(resolveAutonomyProfilePolicyConfig()))
 				{
 					m_autonomy.state.nextTechTick = now + AIControlAdapterGetTechRetryDelayMs(techIssued, techReason.c_str());
 				}
@@ -7020,9 +6711,9 @@ namespace
 
 			if (AIControlAdapterHasTickElapsed(m_autonomy.state.nextGuardTick, now))
 			{
-				const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
 				const Int combatCount = counts.soldiers + counts.rpg + counts.quads + counts.scorpions;
-				const DWORD cadenceMs = (profile == "aggressive") ? 5000u : (((profile == "sprawl" || profile == "sprawl_balanced" || profile == "defensive")) ? 7000u : 6000u);
+				const AIControlAdapterProfilePolicyManager profilePolicyManager;
+				const DWORD cadenceMs = profilePolicyManager.ResolveGuardCadenceMs(resolveAutonomyProfilePolicyConfig());
 				if (combatCount > 0)
 				{
 					std::string reason;
@@ -8021,11 +7712,20 @@ namespace
 			result["debug_draw"] = m_autonomy.state.debugDrawEnabled;
 			result["target_player_index"] = m_autonomy.state.hasExplicitTargetPlayerIndex ? m_autonomy.state.targetPlayerIndex : -1;
 			const AIControlAdapterProfilePolicyConfig policyConfig = resolveAutonomyProfilePolicyConfig();
+			const AIControlAdapterProfilePolicyManager profilePolicyManager;
 			result["profile_policy"] = nlohmann::json::object({
 				{"profile", policyConfig.profile},
+				{"is_aggressive", policyConfig.isAggressive},
+				{"is_economic", policyConfig.isEconomic},
+				{"is_defensive", policyConfig.isDefensive},
+				{"is_tech", policyConfig.isTech},
 				{"is_balanced_sprawl", policyConfig.isBalancedSprawl},
 				{"is_sprawl_style", policyConfig.isSprawlStyle},
 				{"reserve_cash", policyConfig.reserveCash},
+				{"reserve_cash_with_garrison_floor", profilePolicyManager.ResolveReserveCashWithFloor(policyConfig, 5000u)},
+				{"guard_cadence_ms", profilePolicyManager.ResolveGuardCadenceMs(policyConfig)},
+				{"combat_army_cap_base", profilePolicyManager.ResolveCombatArmyCapBase(policyConfig)},
+				{"uses_tech_retry_policy", profilePolicyManager.UsesTechRetryPolicy(policyConfig)},
 				{"worker_min_idle", policyConfig.workerMinIdle},
 				{"worker_queue_count", policyConfig.workerQueueCount},
 				{"worker_cooldown_ms", policyConfig.workerCooldownMs},
@@ -8257,16 +7957,10 @@ namespace
 				});
 			result["strategic_spend"] = m_autonomy.state.strategicSpendTelemetry.is_object()
 				? m_autonomy.state.strategicSpendTelemetry
-				: nlohmann::json::object({
-					{"protected_cash", 0},
-					{"last_allowed_category", "none"},
-					{"last_blocked_reason", "not_evaluated"},
-					{"emergency_batch_limit", 0},
-					{"economy_recovery_action", "none"},
-					{"healthy_market_foundations", 0},
-					{"stale_market_foundations", 0},
-					{"stale_strategic_foundations", 0}
-				});
+				: AIControlAdapterStrategicSpendTelemetrySerializer().BuildDefaultTelemetry();
+			result["macro_build"] = m_autonomy.state.macroBuildTelemetry.is_object()
+				? m_autonomy.state.macroBuildTelemetry
+				: AIControlAdapterMacroBuildTelemetrySerializer().BuildDefaultTelemetry();
 			result["main_base_critical_override"] = m_autonomy.state.mainBaseCriticalOverrideTelemetry.is_object()
 				? m_autonomy.state.mainBaseCriticalOverrideTelemetry
 				: nlohmann::json::object({
@@ -8795,14 +8489,10 @@ namespace
 				result["current_zone_count"] = currentZoneCount;
 				result["developed_zone_count"] = developedZoneCount;
 			}
-			const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
-			if (profile == "sprawl" || profile == "sprawl_balanced")
+			const AIControlAdapterProfilePolicyConfig zoneTargetPolicyConfig = resolveAutonomyProfilePolicyConfig();
+			if (zoneTargetPolicyConfig.isSprawlStyle)
 			{
-				const bool isBalancedSprawl = (profile == "sprawl_balanced");
-				const Real sprawlMultiplier = std::max<Real>(0.5f, std::min<Real>(10.0f, m_autonomy.state.sprawlMultiplier));
-				result["desired_zone_count"] = std::max<Int>(
-					1,
-					static_cast<Int>(std::floor((isBalancedSprawl ? 3.0f : 4.0f) * sprawlMultiplier)));
+				result["desired_zone_count"] = std::max<Int>(1, zoneTargetPolicyConfig.sprawlSupplyCap);
 			}
 			if (m_autonomy.state.telemetryZones.is_array() && !m_autonomy.state.telemetryZones.empty())
 			{
@@ -10328,7 +10018,9 @@ namespace
 
 			const Money* wallet = player->getMoney();
 			const UnsignedInt money = wallet != nullptr ? wallet->countMoney() : 0u;
-			const UnsignedInt reserveCash = normalizeAsciiLower(m_autonomy.state.profile) == "sprawl_balanced" ? 10000u : 5000u;
+			const AIControlAdapterProfilePolicyManager profilePolicyManager;
+			const UnsignedInt reserveCash =
+				profilePolicyManager.ResolveReserveCashWithFloor(resolveAutonomyProfilePolicyConfig(), 5000u);
 			int assignedGarrisonInfantry = 0;
 			int enteredGarrisonInfantry = 0;
 			for (const auto& pair : m_autonomy.state.garrisonAssignments)
@@ -11618,8 +11310,7 @@ namespace
 			{
 				money = static_cast<unsigned int>(wallet->countMoney());
 			}
-			const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
-			const unsigned int reserveCash = profile == "sprawl_balanced" ? 10000u : (profile == "sprawl" ? 5000u : 0u);
+			const unsigned int reserveCash = resolveAutonomyProfilePolicyConfig().reserveCash;
 			const CombatTaskScoutPoolDecision pool = evaluateCombatTaskScoutPool({
 				armsDealerReady,
 				true,
@@ -12028,8 +11719,7 @@ namespace
 				const int walletMoney = scoutWallet->countMoney();
 				scoutPoolMoney = walletMoney > 0 ? static_cast<unsigned int>(walletMoney) : 0u;
 			}
-			const std::string scoutProfile = normalizeAsciiLower(m_autonomy.state.profile);
-			const unsigned int scoutReserveCash = scoutProfile == "sprawl_balanced" ? 10000u : (scoutProfile == "sprawl" ? 5000u : 0u);
+			const unsigned int scoutReserveCash = resolveAutonomyProfilePolicyConfig().reserveCash;
 			const int activeScoutAssignments = m_autonomy.combatTaskManager.getScoutAssignedUnitCount();
 			const CombatTaskScoutPoolDecision scoutPoolDecision = evaluateCombatTaskScoutPool({
 				scoutPoolArmsDealerReady,
@@ -13186,11 +12876,9 @@ namespace
 
 			const Money* wallet = player->getMoney();
 			const UnsignedInt currentMoney = wallet != nullptr ? wallet->countMoney() : 0u;
-			const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
-			const bool isBalancedSprawl = (profile == "sprawl_balanced");
-			const bool isSprawlStyle = (profile == "sprawl" || isBalancedSprawl);
-			const UnsignedInt reserveCash = isBalancedSprawl ? 10000u : (profile == "sprawl" ? 5000u : 0u);
-			const Real sprawlMultiplier = std::max<Real>(0.5f, std::min<Real>(10.0f, m_autonomy.state.sprawlMultiplier));
+			const AIControlAdapterProfilePolicyManager profilePolicyManager;
+			const AIControlAdapterProfilePolicyConfig profilePolicyConfig = resolveAutonomyProfilePolicyConfig();
+			const UnsignedInt reserveCash = profilePolicyConfig.reserveCash;
 			Int currentZoneCount = 0;
 			if (m_autonomy.state.telemetryZones.is_array())
 			{
@@ -13207,9 +12895,9 @@ namespace
 					}
 				}
 			}
-			const Int desiredZoneCount = isSprawlStyle
-				? std::max<Int>(1, static_cast<Int>(std::floor((isBalancedSprawl ? 3.0f : 4.0f) * sprawlMultiplier)))
-				: std::max<Int>(1, currentZoneCount);
+			const Int desiredZoneCount = profilePolicyManager.ResolveStrategicSpendDesiredZoneCount(
+				profilePolicyConfig,
+				currentZoneCount);
 			const AIControlAdapterScudStormConstructionPolicyResult buildPolicy =
 				AIControlAdapterEvaluateScudStormConstruction({
 					scudStormPrereqReady,
@@ -13224,23 +12912,29 @@ namespace
 					1,
 					25000u
 				});
-			AIControlAdapterStrategicSpendInput scudSpendInput;
-			scudSpendInput.money = currentMoney;
-			scudSpendInput.reserveCash = reserveCash;
-			scudSpendInput.requestCost = 5000u;
-			scudSpendInput.currentZones = currentZoneCount;
-			scudSpendInput.desiredZones = desiredZoneCount;
-			scudSpendInput.completedMarkets = 0;
-			scudSpendInput.healthyMarketsInProgress = 0;
-			scudSpendInput.staleMarketFoundations = 0;
-			scudSpendInput.activeWmdThreats = hasWMDThreat ? 1 : 0;
-			scudSpendInput.expansionUrgent = buildPolicy.zoneExpansionUrgent;
-			scudSpendInput.incomeCritical = currentZoneCount <= 1;
-			scudSpendInput.reserveDepleted = currentMoney < reserveCash;
+			AIControlAdapterStrategicSpendEconomyFacts scudSpendEconomy;
+			scudSpendEconomy.money = currentMoney;
+			scudSpendEconomy.reserveCash = reserveCash;
+			scudSpendEconomy.activeWmdThreats = hasWMDThreat ? 1 : 0;
+			AIControlAdapterStrategicSpendZoneFacts scudSpendZones;
+			scudSpendZones.currentZones = currentZoneCount;
+			scudSpendZones.desiredZones = desiredZoneCount;
+			const AIControlAdapterStrategicSpendArmyFacts scudSpendArmy;
+			const AIControlAdapterStrategicSpendSnapshotBuilder strategicSpendSnapshotBuilder;
+			const AIControlAdapterStrategicSpendSnapshotBase scudSpendBase =
+				strategicSpendSnapshotBuilder.BuildBase(scudSpendEconomy, scudSpendZones, scudSpendArmy);
+			AIControlAdapterStrategicSpendSnapshotOverrides scudSpendOverrides;
+			scudSpendOverrides.expansionUrgent = buildPolicy.zoneExpansionUrgent;
+			scudSpendOverrides.incomeCritical = currentZoneCount <= 1;
+			scudSpendOverrides.reserveDepleted = currentMoney < reserveCash;
+			const AIControlAdapterStrategicSpendSnapshot scudSpendSnapshot =
+				strategicSpendSnapshotBuilder.Build(scudSpendBase, scudSpendOverrides);
+			const AIControlAdapterStrategicSpendManager strategicSpendManager;
 			const AIControlAdapterStrategicSpendDecision centralScudSpend =
-				AIControlAdapterEvaluateStrategicSpend(
+				strategicSpendManager.Evaluate(
+					scudSpendSnapshot,
 					hasWMDThreat ? StrategicSpendCategory::DefensiveWmd : StrategicSpendCategory::LuxuryBaseline,
-					scudSpendInput);
+					5000u);
 			const bool scudSpendAllowed = buildPolicy.spendAllowed && centralScudSpend.allowed;
 			const std::string policyReason =
 				scudSpendAllowed && !buildPolicy.highCashOverride ? reason :
@@ -13261,16 +12955,21 @@ namespace
 				buildPolicy.maxInProgress,
 				scudSpendAllowed ? 1 : 0,
 				policyReason.c_str());
+			const StrategicSpendCategory scudSpendCategory =
+				hasWMDThreat ? StrategicSpendCategory::DefensiveWmd : StrategicSpendCategory::LuxuryBaseline;
 			adapterLog(
-				"strategic_spend_policy category=%s allowed=%d money=%lu reserve=%lu protected_cash=%lu spend_budget=%lu batch_limit=%d reason=%s",
-				AIControlAdapterStrategicSpendCategoryName(hasWMDThreat ? StrategicSpendCategory::DefensiveWmd : StrategicSpendCategory::LuxuryBaseline),
-				centralScudSpend.allowed ? 1 : 0,
-				static_cast<unsigned long>(currentMoney),
-				static_cast<unsigned long>(reserveCash),
-				static_cast<unsigned long>(centralScudSpend.protectedCash),
-				static_cast<unsigned long>(centralScudSpend.spendBudget),
-				centralScudSpend.batchLimit,
-				centralScudSpend.reason);
+				"%s",
+				AIControlAdapterStrategicSpendTelemetrySerializer().BuildPolicyLogLine({
+					scudSpendCategory,
+					static_cast<unsigned int>(currentMoney),
+					static_cast<unsigned int>(reserveCash),
+					&centralScudSpend
+				}).c_str());
+			AIControlAdapterStrategicSpendTelemetrySerializer().RecordCategory(
+				m_autonomy.state.strategicSpendTelemetry,
+				scudSpendCategory,
+				5000u,
+				centralScudSpend);
 
 			std::vector<AIControlAdapterScudStormStrategicTargetCandidate> strategicCandidates;
 			for (const EnemyMemoryItem& item : m_autonomy.enemyMemory.getItems())
@@ -14826,7 +14525,9 @@ namespace
 
 			const Money* wallet = player->getMoney();
 			const UnsignedInt money = wallet != nullptr ? wallet->countMoney() : 0u;
-			const UnsignedInt reserve = normalizeAsciiLower(m_autonomy.state.profile) == "sprawl_balanced" ? 10000u : 5000u;
+			const AIControlAdapterProfilePolicyManager profilePolicyManager;
+			const UnsignedInt reserve =
+				profilePolicyManager.ResolveReserveCashWithFloor(resolveAutonomyProfilePolicyConfig(), 5000u);
 			const UnsignedInt cashFloat = money > reserve ? money - reserve : 0u;
 			const int workerCap = 80;
 			int globalWorkers = 0;
@@ -15346,9 +15047,9 @@ namespace
 			const Int armsCount = counts.armsCount;
 			const Int radarVanCount = counts.radarVanCount;
 			const Int combatVehicleCount = counts.combatVehicleCount;
-			const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
-			const bool isBalancedSprawl = (profile == "sprawl_balanced");
-			const UnsignedInt reserveCash = isBalancedSprawl ? 10000u : 0u;
+			const AIControlAdapterProfilePolicyConfig profilePolicyConfig = resolveAutonomyProfilePolicyConfig();
+			const bool isBalancedSprawl = profilePolicyConfig.isBalancedSprawl;
+			const UnsignedInt reserveCash = profilePolicyConfig.reserveCash;
 			const bool openingInfrastructureReady = supplyStashCount >= 1 && barracksCount >= 1 && armsCount >= 1;
 			const bool openingEconomyReady = supplyStashCount >= 2 || blackMarketCount >= 1;
 			const bool wasRecoveringFromReserve =
@@ -15370,7 +15071,7 @@ namespace
 				isBalancedSprawl,
 				wasArmyCapReached,
 				combatVehicleCount,
-				isBalancedSprawl ? 100 : 9999
+				AIControlAdapterProfilePolicyManager().ResolveCombatArmyCapBase(profilePolicyConfig)
 			});
 
 			if (!AIControlAdapterShouldQueueRadarVan({

@@ -1155,6 +1155,57 @@
 			return best;
 		}
 
+		Object* chooseRemoteSupplySource(
+			const std::vector<SupplySourceInfo>& sources,
+			const Coord3D* remoteOrigin,
+			Player* player,
+			bool preferUnclaimed,
+			Int avoidSourceId = -1)
+		{
+			Object* best = nullptr;
+			Real bestDistSq = 0.0f;
+			Object* bestUnclaimed = nullptr;
+			Real bestUnclaimedDistSq = 0.0f;
+
+			for (const SupplySourceInfo& info : sources)
+			{
+				if (info.source == nullptr || info.source->getPosition() == nullptr || remoteOrigin == nullptr)
+				{
+					continue;
+				}
+				if (avoidSourceId > 0 && static_cast<Int>(info.source->getID()) == avoidSourceId)
+				{
+					continue;
+				}
+				const Real distSq = distanceSq2D(info.source->getPosition(), remoteOrigin);
+				if (best == nullptr || distSq > bestDistSq)
+				{
+					best = info.source;
+					bestDistSq = distSq;
+				}
+
+				if (!preferUnclaimed)
+				{
+					continue;
+				}
+				if (hasNearbyOwnedSupplyDropoff(player, info.source, 430.0f))
+				{
+					continue;
+				}
+				if (bestUnclaimed == nullptr || distSq > bestUnclaimedDistSq)
+				{
+					bestUnclaimed = info.source;
+					bestUnclaimedDistSq = distSq;
+				}
+			}
+
+			if (bestUnclaimed != nullptr)
+			{
+				return bestUnclaimed;
+			}
+			return best;
+		}
+
 		bool findBuildLocationNearSupply(Player* player, Object* worker, Object* supplySource, const ThingTemplate* buildingTemplate, Coord3D& outLocation, Real& outAngle)
 		{
 			if (player == nullptr || worker == nullptr || supplySource == nullptr || buildingTemplate == nullptr || TheBuildAssistant == nullptr)
