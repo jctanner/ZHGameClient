@@ -78,7 +78,7 @@ int main()
 		expect(config.sprawlTunnelCap == 50, "balanced sprawl multiplier 10 should resolve 50 tunnels");
 		expect(config.sprawlStingerCap == 40, "balanced sprawl multiplier 10 should resolve 40 stingers");
 		expect(config.urgentZoneGapThreshold == 5, "profile config should expose urgent expansion gap threshold");
-		expect(config.normalMaxConcurrentExpansionStashes == 3, "maxed balanced sprawl should allow three concurrent expansion stashes");
+		expect(config.normalMaxConcurrentExpansionStashes == 3, "maxed balanced sprawl should keep three normal concurrent expansion stashes");
 		expect(config.allowExpansionBeforeFullRemoteFollowup, "maxed balanced sprawl should allow seeded zones before full follow-up");
 	}
 
@@ -1480,6 +1480,81 @@ int main()
 		const auto result = AIControlAdapterChooseZoneExpansionAction(inputs);
 		expect(!result.shouldAttemptExpansion, "Phase 12: expansion should block when concurrent stash cap is reached");
 		expect(std::strcmp(result.reason, "in_progress_cap") == 0, "Phase 12: cap block should report in_progress_cap");
+	}
+
+	{
+		const AIControlAdapterMacroExpansionSnapshot snapshot = {
+			true,    // isSprawlStyle
+			true,    // isBalancedSprawl
+			10,      // stashZoneCount
+			7,       // developedZoneCount
+			3,       // remoteSupplyZoneCount
+			1800.0f, // supplyFootprintRadius
+			30,      // desiredZoneCount
+			5,       // urgentZoneGapThreshold
+			5,       // supplyStashesInProgress
+			3,       // maxConcurrentSupplyStashes
+			false,   // remoteZoneNeedsFollowup
+			false,   // shouldThrottleExtraStashGrowth
+			true,    // isBuildCooldownReady
+			16000u,  // money
+			10000u,  // reserveCash
+			10000u   // expansionHighCashFloatThreshold
+		};
+		const auto decision = AIControlAdapterResolveMacroExpansionDecision(snapshot);
+		expect(decision.zoneExpansionUrgent, "Phase 12 follow-up: large zone gap should be urgent");
+		expect(decision.maxConcurrentExpansionStashes == 6, "Phase 12 follow-up: protected urgent expansion should raise cap to six");
+		expect(std::strcmp(decision.concurrencyReason, "urgent_reserve_protected") == 0, "Phase 12 follow-up: protected cap reason should be explicit");
+		expect(decision.arbitration.shouldAttemptExpansion, "Phase 12 follow-up: five in progress should still allow the sixth expansion");
+	}
+
+	{
+		const AIControlAdapterMacroExpansionSnapshot snapshot = {
+			true,    // isSprawlStyle
+			true,    // isBalancedSprawl
+			10,      // stashZoneCount
+			7,       // developedZoneCount
+			3,       // remoteSupplyZoneCount
+			1800.0f, // supplyFootprintRadius
+			30,      // desiredZoneCount
+			5,       // urgentZoneGapThreshold
+			7,       // supplyStashesInProgress
+			3,       // maxConcurrentSupplyStashes
+			false,   // remoteZoneNeedsFollowup
+			false,   // shouldThrottleExtraStashGrowth
+			true,    // isBuildCooldownReady
+			40000u,  // money
+			10000u,  // reserveCash
+			10000u   // expansionHighCashFloatThreshold
+		};
+		const auto decision = AIControlAdapterResolveMacroExpansionDecision(snapshot);
+		expect(decision.maxConcurrentExpansionStashes == 8, "Phase 12 follow-up: high-cash urgent expansion should raise cap to eight");
+		expect(std::strcmp(decision.concurrencyReason, "urgent_high_cash") == 0, "Phase 12 follow-up: high-cash cap reason should be explicit");
+		expect(decision.arbitration.shouldAttemptExpansion, "Phase 12 follow-up: seven in progress should still allow the eighth expansion");
+	}
+
+	{
+		const AIControlAdapterMacroExpansionSnapshot snapshot = {
+			true,    // isSprawlStyle
+			true,    // isBalancedSprawl
+			10,      // stashZoneCount
+			7,       // developedZoneCount
+			3,       // remoteSupplyZoneCount
+			1800.0f, // supplyFootprintRadius
+			30,      // desiredZoneCount
+			5,       // urgentZoneGapThreshold
+			8,       // supplyStashesInProgress
+			3,       // maxConcurrentSupplyStashes
+			false,   // remoteZoneNeedsFollowup
+			false,   // shouldThrottleExtraStashGrowth
+			true,    // isBuildCooldownReady
+			40000u,  // money
+			10000u,  // reserveCash
+			10000u   // expansionHighCashFloatThreshold
+		};
+		const auto decision = AIControlAdapterResolveMacroExpansionDecision(snapshot);
+		expect(!decision.arbitration.shouldAttemptExpansion, "Phase 12 follow-up: eight in progress should hit the high-cash cap");
+		expect(std::strcmp(decision.arbitration.reason, "in_progress_cap") == 0, "Phase 12 follow-up: cap block should remain explicit");
 	}
 
 	{

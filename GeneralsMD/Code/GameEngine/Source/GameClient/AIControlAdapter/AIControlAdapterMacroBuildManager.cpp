@@ -227,6 +227,7 @@ AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 	}
 	const AIControlAdapterZoneSeedPackageDecision& zoneSeedDecision = decisions.zoneSeedDecision;
 	const char* ecoRecoveryBuild = decisions.ecoRecoveryBuild;
+	const int effectiveExpansionCap = std::max(1, decisions.macroExpansion.maxConcurrentExpansionStashes);
 
 	AIControlAdapterMacroBuildPlan plan;
 	plan.telemetry.stashZoneCount = snapshot.stashZoneCount;
@@ -247,7 +248,8 @@ AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 	plan.telemetry.expansionDecisionReason = expansionDecision.reason != nullptr ? expansionDecision.reason : "target_reached";
 	plan.telemetry.expansionIsUrgent = expansionDecision.isUrgent;
 	plan.telemetry.supplyStashesInProgress = snapshot.supplyStashesInProgress;
-	plan.telemetry.maxConcurrentExpansionStashes = snapshot.maxConcurrentExpansionStashes;
+	plan.telemetry.maxConcurrentExpansionStashes = effectiveExpansionCap;
+	plan.telemetry.expansionConcurrencyReason = decisions.macroExpansion.concurrencyReason;
 	plan.telemetry.shouldThrottleExtraStashGrowth = snapshot.shouldThrottleExtraStashGrowth;
 	plan.telemetry.zoneSeedCommand = zoneSeedDecision.command;
 	plan.telemetry.zoneSeedPackageStage = zoneSeedDecision.packageStage != nullptr ? zoneSeedDecision.packageStage : "none";
@@ -266,7 +268,7 @@ AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 			expansionDecision.reason,
 			0u,
 			snapshot.supplyStashesInProgress,
-			snapshot.maxConcurrentExpansionStashes,
+			effectiveExpansionCap,
 			snapshot.supplyBuildCooldownReady,
 			{ true, "allowed" },
 			false,
@@ -326,7 +328,7 @@ AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 				"eco_recovery_supply",
 				1800u,
 				snapshot.supplyStashesInProgress,
-				snapshot.maxConcurrentExpansionStashes,
+				effectiveExpansionCap,
 				snapshot.supplyBuildCooldownReady,
 				snapshot.expansionSpend,
 				false,
@@ -553,7 +555,7 @@ AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 			"sprawl_supply_cap_growth",
 			snapshot.isBalancedSprawl ? 2200u : 1800u,
 			snapshot.supplyStashesInProgress,
-			snapshot.maxConcurrentExpansionStashes,
+			effectiveExpansionCap,
 			snapshot.supplyBuildCooldownReady,
 			{ true, "allowed" },
 			false,

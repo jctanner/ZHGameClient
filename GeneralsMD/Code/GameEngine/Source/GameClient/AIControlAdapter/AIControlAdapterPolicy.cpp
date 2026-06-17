@@ -747,6 +747,8 @@ AIControlAdapterMacroExpansionDecision AIControlAdapterResolveMacroExpansionDeci
 	decision.reserveProtected = snapshot.money >= snapshot.reserveCash;
 	decision.cashAboveReserve = decision.reserveProtected ? (snapshot.money - snapshot.reserveCash) : 0u;
 	decision.cashFloatHigh = decision.cashAboveReserve >= snapshot.expansionHighCashFloatThreshold;
+	decision.maxConcurrentExpansionStashes = std::max(1, snapshot.maxConcurrentSupplyStashes);
+	decision.concurrencyReason = "profile_cap";
 
 	if (snapshot.isSprawlStyle)
 	{
@@ -767,6 +769,16 @@ AIControlAdapterMacroExpansionDecision AIControlAdapterResolveMacroExpansionDeci
 	decision.zoneExpansionUrgent = decision.countExpansionUrgent || decision.coverageExpansionUrgent;
 	decision.allowUrgentExpansionDespiteReserve = decision.zoneExpansionUrgent && decision.cashFloatHigh;
 	decision.preferRemoteSupplyExpansion = decision.coverageExpansionUrgent;
+	if (decision.zoneExpansionUrgent && decision.reserveProtected)
+	{
+		decision.maxConcurrentExpansionStashes = std::max(decision.maxConcurrentExpansionStashes, 6);
+		decision.concurrencyReason = "urgent_reserve_protected";
+	}
+	if (decision.zoneExpansionUrgent && decision.cashAboveReserve >= 25000u)
+	{
+		decision.maxConcurrentExpansionStashes = std::max(decision.maxConcurrentExpansionStashes, 8);
+		decision.concurrencyReason = "urgent_high_cash";
+	}
 	decision.expansionMode = decision.zoneExpansionUrgent
 		? "urgent"
 		: (snapshot.stashZoneCount < snapshot.desiredZoneCount ? "normal" : "hold");
@@ -812,7 +824,7 @@ AIControlAdapterMacroExpansionDecision AIControlAdapterResolveMacroExpansionDeci
 		snapshot.reserveCash,
 		snapshot.isBalancedSprawl,
 		snapshot.isBuildCooldownReady,
-		snapshot.maxConcurrentSupplyStashes
+		decision.maxConcurrentExpansionStashes
 	});
 	return decision;
 }
