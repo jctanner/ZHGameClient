@@ -54,6 +54,9 @@
 			Int minimumCash = 1;
 			Int requestedSupplyId = -1;
 			Int avoidSupplyId = -1;
+			bool preferRemoteSupply = false;
+			Coord3D remoteOrigin = {};
+			bool hasRemoteOrigin = false;
 			const auto argsIt = message.find("args");
 			if (argsIt != message.end() && argsIt->is_object())
 			{
@@ -67,6 +70,24 @@
 				if (sourceIdIt != argsIt->end() && sourceIdIt->is_number_integer())
 				{
 					requestedSupplyId = sourceIdIt->get<Int>();
+				}
+				const auto preferRemoteIt = argsIt->find("prefer_remote");
+				if (preferRemoteIt != argsIt->end() && preferRemoteIt->is_boolean())
+				{
+					preferRemoteSupply = preferRemoteIt->get<bool>();
+				}
+				const auto remoteOriginIt = argsIt->find("remote_origin");
+				if (remoteOriginIt != argsIt->end() && remoteOriginIt->is_object())
+				{
+					const auto xIt = remoteOriginIt->find("x");
+					const auto yIt = remoteOriginIt->find("y");
+					if (xIt != remoteOriginIt->end() && xIt->is_number() && yIt != remoteOriginIt->end() && yIt->is_number())
+					{
+						remoteOrigin.x = xIt->get<Real>();
+						remoteOrigin.y = yIt->get<Real>();
+						remoteOrigin.z = 0.0f;
+						hasRemoteOrigin = true;
+					}
 				}
 			}
 
@@ -162,7 +183,14 @@
 			}
 			else
 			{
-				selectedSupply = chooseClosestSupplySource(sources, worker->getPosition(), player, true, avoidSupplyId);
+				if (preferRemoteSupply && hasRemoteOrigin)
+				{
+					selectedSupply = chooseRemoteSupplySource(sources, &remoteOrigin, player, true, avoidSupplyId);
+				}
+				if (selectedSupply == nullptr)
+				{
+					selectedSupply = chooseClosestSupplySource(sources, worker->getPosition(), player, true, avoidSupplyId);
+				}
 				if (selectedSupply == nullptr)
 				{
 					reason = "supply_source_not_found";
@@ -199,6 +227,17 @@
 					location.x,
 					location.y,
 					angle);
+				if (preferRemoteSupply)
+				{
+					adapterLog(
+						"supply_stash_remote_selection request_id=%s selected_supply=%d origin=(%.1f,%.1f) supply_pos=(%.1f,%.1f) reason=coverage_footprint",
+						requestId.c_str(),
+						static_cast<int>(selectedSupply->getID()),
+						remoteOrigin.x,
+						remoteOrigin.y,
+						supplyPos != nullptr ? supplyPos->x : 0.0f,
+						supplyPos != nullptr ? supplyPos->y : 0.0f);
+				}
 				if (requestId.rfind("auto_", 0) == 0)
 				{
 					recordAutonomyTelemetryEvent("build", "build_supply_stash_construct", "supply_zone", &location);
@@ -1160,4 +1199,3 @@
 			target.z = 0.0f;
 			return true;
 		}
-

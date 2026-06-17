@@ -95,6 +95,10 @@ inline const char* zoneAnchorTypeToString(ZoneAnchorType type)
 struct AIControlAdapterProfilePolicyConfig
 {
 	std::string profile;
+	bool isAggressive = false;
+	bool isEconomic = false;
+	bool isDefensive = false;
+	bool isTech = false;
 	bool isBalancedSprawl = false;
 	bool isSprawlStyle = false;
 	unsigned int reserveCash = 0u;
@@ -890,6 +894,47 @@ struct AIControlAdapterZoneExpansionArbitrationResult
 AIControlAdapterZoneExpansionArbitrationResult AIControlAdapterChooseZoneExpansionAction(
 	const AIControlAdapterZoneExpansionArbitrationInputs& inputs);
 
+struct AIControlAdapterMacroExpansionSnapshot
+{
+	bool isSprawlStyle = false;
+	bool isBalancedSprawl = false;
+	int stashZoneCount = 0;
+	int developedZoneCount = 0;
+	int remoteSupplyZoneCount = 0;
+	float supplyFootprintRadius = 0.0f;
+	int desiredZoneCount = 1;
+	int urgentZoneGapThreshold = 5;
+	int supplyStashesInProgress = 0;
+	int maxConcurrentSupplyStashes = 1;
+	bool remoteZoneNeedsFollowup = false;
+	bool shouldThrottleExtraStashGrowth = false;
+	bool isBuildCooldownReady = false;
+	unsigned int money = 0u;
+	unsigned int reserveCash = 0u;
+	unsigned int expansionHighCashFloatThreshold = 10000u;
+};
+
+struct AIControlAdapterMacroExpansionDecision
+{
+	int zoneGap = 0;
+	int desiredRemoteSupplyZones = 0;
+	float desiredSupplyFootprintRadius = 0.0f;
+	unsigned int cashAboveReserve = 0u;
+	bool reserveProtected = false;
+	bool cashFloatHigh = false;
+	bool countExpansionUrgent = false;
+	bool coverageExpansionUrgent = false;
+	bool zoneExpansionUrgent = false;
+	bool allowUrgentExpansionDespiteReserve = false;
+	bool preferRemoteSupplyExpansion = false;
+	const char* expansionMode = "hold";
+	const char* expansionReason = "target_reached";
+	AIControlAdapterZoneExpansionArbitrationResult arbitration;
+};
+
+AIControlAdapterMacroExpansionDecision AIControlAdapterResolveMacroExpansionDecision(
+	const AIControlAdapterMacroExpansionSnapshot& snapshot);
+
 struct AIControlAdapterRemoteZoneFollowupInputs
 {
 	bool remoteZoneHasStash = false;
@@ -909,6 +954,58 @@ struct AIControlAdapterRemoteZoneFollowupResult
 
 AIControlAdapterRemoteZoneFollowupResult AIControlAdapterChooseRemoteZoneFollowup(
 	const AIControlAdapterRemoteZoneFollowupInputs& inputs);
+
+struct AIControlAdapterZoneSeedPackageInputs
+{
+	bool isSprawlStyle = false;
+	bool canScaleMilitaryProduction = false;
+	bool remoteZoneHasStash = false;
+	bool coverageExpansionUrgent = false;
+	bool activeZoneThreatened = false;
+	bool allowExpansionBeforeFullRemoteFollowup = false;
+	int tunnels = 0;
+	int tunnelsInProgress = 0;
+	int stingers = 0;
+	int stingersInProgress = 0;
+	int barracks = 0;
+	int barracksInProgress = 0;
+	int armsDealers = 0;
+	int armsDealersInProgress = 0;
+};
+
+struct AIControlAdapterZoneSeedPackageDecision
+{
+	bool needsFollowup = false;
+	const char* packageStage = "none";
+	const char* command = nullptr;
+	bool preferZone = true;
+	int priority = 0;
+	const char* reason = "no_remote_stash";
+};
+
+AIControlAdapterZoneSeedPackageDecision AIControlAdapterChooseZoneSeedPackage(
+	const AIControlAdapterZoneSeedPackageInputs& inputs);
+
+struct AIControlAdapterMacroBuildIntentOption
+{
+	const char* category = "unknown";
+	const char* command = nullptr;
+	int priority = 0;
+	bool valid = false;
+	const char* reason = "unavailable";
+};
+
+struct AIControlAdapterMacroBuildIntentChoice
+{
+	int index = -1;
+	const char* category = "none";
+	const char* command = nullptr;
+	int priority = 0;
+	const char* reason = "no_valid_intent";
+};
+
+AIControlAdapterMacroBuildIntentChoice AIControlAdapterChooseMacroBuildIntent(
+	const std::vector<AIControlAdapterMacroBuildIntentOption>& options);
 
 // =============================================================================
 // SCUD STORM CONSTRUCTION POLICY
@@ -1474,6 +1571,13 @@ struct AIControlAdapterEmergencySurvivalProductionDecision
 
 AIControlAdapterEmergencySurvivalProductionDecision AIControlAdapterChooseEmergencySurvivalProduction(
 	const AIControlAdapterEmergencySurvivalProductionInputs& inputs);
+
+const char* AIControlAdapterChooseEmergencySurvivalProductionCommand(
+	const AIControlAdapterEmergencySurvivalProductionDecision& decision,
+	int quads,
+	int queuedQuads,
+	int scorpions,
+	int queuedScorpions);
 
 struct AIControlAdapterPalaceRecoveryInputs
 {

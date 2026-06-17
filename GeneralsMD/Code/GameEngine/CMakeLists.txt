@@ -141,7 +141,15 @@ set(GAMEENGINE_SRC
     Include/GameClient/AIControlAdapter/AIControlAdapter.h
     Include/GameClient/AIControlAdapter/AIControlAdapterDefenseManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterEconomyManager.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterMacroBuildDispatcher.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterMacroBuildManager.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterMacroBuildSnapshotBuilder.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterMacroBuildTelemetrySerializer.h
     Include/GameClient/AIControlAdapter/AIControlAdapterPolicy.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterProfilePolicyManager.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendManager.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendSnapshotBuilder.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendTelemetrySerializer.h
     Include/GameClient/AIControlAdapter/AIControlAdapterCombatTask.h
     Include/GameClient/AIControlAdapter/AIControlAdapterProductionManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterScheduler.h
@@ -699,8 +707,16 @@ set(GAMEENGINE_SRC
     Source/GameClient/AIControlAdapter/AIControlAdapter.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterDefenseManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterEconomyManager.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildDispatcher.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildManager.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildSnapshotBuilder.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildTelemetrySerializer.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterCombatTask.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterPolicy.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterProfilePolicyManager.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendManager.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendSnapshotBuilder.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendTelemetrySerializer.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterProductionManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterScheduler.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterTaskReservation.cpp
@@ -1276,7 +1292,15 @@ add_compile_definitions(GENERALS_ONLINE)
 
 if(BUILD_TESTING)
     set(AI_CONTROL_ADAPTER_POLICY_SOURCES
+        Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildDispatcher.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildManager.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildSnapshotBuilder.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildTelemetrySerializer.cpp
         Source/GameClient/AIControlAdapter/AIControlAdapterPolicy.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterProfilePolicyManager.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendManager.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendSnapshotBuilder.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendTelemetrySerializer.cpp
     )
 
     function(configure_ai_control_adapter_unit_test target_name)
@@ -1300,6 +1324,78 @@ if(BUILD_TESTING)
     configure_ai_control_adapter_unit_test(z_gameengine_adapter_tests)
 
     add_test(NAME z_gameengine_adapter_tests COMMAND z_gameengine_adapter_tests)
+
+    add_executable(z_gameengine_adapter_macrobuild_tests
+        Tests/AIControlAdapter/AIControlAdapterMacroBuildManagerTests.cpp
+        ${AI_CONTROL_ADAPTER_POLICY_SOURCES}
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_macrobuild_tests)
+
+    add_test(NAME z_gameengine_adapter_macrobuild_tests COMMAND z_gameengine_adapter_macrobuild_tests)
+
+    add_executable(z_gameengine_adapter_macrobuild_snapshot_tests
+        Tests/AIControlAdapter/AIControlAdapterMacroBuildSnapshotBuilderTests.cpp
+        ${AI_CONTROL_ADAPTER_POLICY_SOURCES}
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_macrobuild_snapshot_tests)
+
+    add_test(NAME z_gameengine_adapter_macrobuild_snapshot_tests COMMAND z_gameengine_adapter_macrobuild_snapshot_tests)
+
+    add_executable(z_gameengine_adapter_macrobuild_dispatcher_tests
+        Tests/AIControlAdapter/AIControlAdapterMacroBuildDispatcherTests.cpp
+        ${AI_CONTROL_ADAPTER_POLICY_SOURCES}
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_macrobuild_dispatcher_tests)
+
+    add_test(NAME z_gameengine_adapter_macrobuild_dispatcher_tests COMMAND z_gameengine_adapter_macrobuild_dispatcher_tests)
+
+    add_executable(z_gameengine_adapter_macrobuild_telemetry_tests
+        Tests/AIControlAdapter/AIControlAdapterMacroBuildTelemetrySerializerTests.cpp
+        ${AI_CONTROL_ADAPTER_POLICY_SOURCES}
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_macrobuild_telemetry_tests)
+
+    add_test(NAME z_gameengine_adapter_macrobuild_telemetry_tests COMMAND z_gameengine_adapter_macrobuild_telemetry_tests)
+
+    add_executable(z_gameengine_adapter_profilepolicy_tests
+        Tests/AIControlAdapter/AIControlAdapterProfilePolicyManagerTests.cpp
+        ${AI_CONTROL_ADAPTER_POLICY_SOURCES}
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_profilepolicy_tests)
+
+    add_test(NAME z_gameengine_adapter_profilepolicy_tests COMMAND z_gameengine_adapter_profilepolicy_tests)
+
+    add_executable(z_gameengine_adapter_strategicspend_tests
+        Tests/AIControlAdapter/AIControlAdapterStrategicSpendManagerTests.cpp
+        ${AI_CONTROL_ADAPTER_POLICY_SOURCES}
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_strategicspend_tests)
+
+    add_test(NAME z_gameengine_adapter_strategicspend_tests COMMAND z_gameengine_adapter_strategicspend_tests)
+
+    add_executable(z_gameengine_adapter_strategicspend_snapshot_tests
+        Tests/AIControlAdapter/AIControlAdapterStrategicSpendSnapshotBuilderTests.cpp
+        ${AI_CONTROL_ADAPTER_POLICY_SOURCES}
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_strategicspend_snapshot_tests)
+
+    add_test(NAME z_gameengine_adapter_strategicspend_snapshot_tests COMMAND z_gameengine_adapter_strategicspend_snapshot_tests)
+
+    add_executable(z_gameengine_adapter_strategicspend_telemetry_tests
+        Tests/AIControlAdapter/AIControlAdapterStrategicSpendTelemetrySerializerTests.cpp
+        ${AI_CONTROL_ADAPTER_POLICY_SOURCES}
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_strategicspend_telemetry_tests)
+
+    add_test(NAME z_gameengine_adapter_strategicspend_telemetry_tests COMMAND z_gameengine_adapter_strategicspend_telemetry_tests)
 
     add_executable(z_gameengine_adapter_techmanager_tests
         Tests/AIControlAdapter/AIControlAdapterTechManagerTests.cpp

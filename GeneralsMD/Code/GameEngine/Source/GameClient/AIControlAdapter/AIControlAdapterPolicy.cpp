@@ -15,11 +15,6 @@
 
 namespace
 {
-	float AIControlAdapterClampUnitFloat(float value)
-	{
-		return std::max(0.0f, std::min(1.0f, value));
-	}
-
 	std::string AIControlAdapterLowerCopy(std::string value)
 	{
 		std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) -> unsigned char
@@ -176,126 +171,6 @@ namespace
 		}
 		return false;
 	}
-}
-
-AIControlAdapterProfilePolicyConfig AIControlAdapterResolveProfilePolicyConfig(
-	const std::string& profile,
-	float economyBias,
-	float aggressionBias,
-	float defenseBias,
-	float /*expansionBias*/,
-	float sprawlMultiplier)
-{
-	const std::string normalizedProfile = AIControlAdapterLowerCopy(profile);
-	const float econ = AIControlAdapterClampUnitFloat(economyBias);
-	const float aggro = AIControlAdapterClampUnitFloat(aggressionBias);
-	const float defense = AIControlAdapterClampUnitFloat(defenseBias);
-	const float multiplier = std::max(0.5f, std::min(10.0f, sprawlMultiplier));
-
-	AIControlAdapterProfilePolicyConfig config;
-	config.profile = normalizedProfile;
-	config.isBalancedSprawl = normalizedProfile == "sprawl_balanced";
-	config.isSprawlStyle = normalizedProfile == "sprawl" || config.isBalancedSprawl;
-	config.reserveCash = config.isBalancedSprawl ? 10000u : (normalizedProfile == "sprawl" ? 5000u : 0u);
-
-	config.workerMinIdle = (econ >= 0.70f || normalizedProfile == "economic" || config.isSprawlStyle) ? 2 : 1;
-	config.workerQueueCount = (econ >= 0.75f || normalizedProfile == "economic" || config.isSprawlStyle) ? 2 : 1;
-	config.workerCooldownMs = (normalizedProfile == "aggressive") ? 1500u : 2500u;
-	if (normalizedProfile == "sprawl")
-	{
-		config.workerMinIdle = 3;
-		config.workerQueueCount = 1;
-		config.workerCooldownMs = 2000u;
-	}
-	else if (config.isBalancedSprawl)
-	{
-		config.workerMinIdle = 2;
-		config.workerQueueCount = 1;
-		config.workerCooldownMs = 2500u;
-	}
-
-	config.stashWorkersPerStash = 8;
-	if (normalizedProfile == "economic" || config.isSprawlStyle || econ >= 0.70f)
-	{
-		config.stashWorkersPerStash = 10;
-	}
-	else if (normalizedProfile == "aggressive")
-	{
-		config.stashWorkersPerStash = 7;
-	}
-	config.stashWorkerCooldownMs = 5000u;
-	if (normalizedProfile == "sprawl")
-	{
-		config.stashWorkersPerStash = 3;
-		config.stashWorkerCooldownMs = 12000u;
-	}
-	else if (config.isBalancedSprawl)
-	{
-		config.stashWorkersPerStash = 6;
-		config.stashWorkerCooldownMs = 8000u;
-	}
-
-	config.attackMinUnits = 38;
-	config.attackGroupSize = 28;
-	config.attackCooldownMs = 18000u;
-	if (normalizedProfile == "aggressive" || aggro >= 0.70f)
-	{
-		config.attackMinUnits = 24;
-		config.attackGroupSize = 20;
-		config.attackCooldownMs = 12000u;
-	}
-	else if (normalizedProfile == "economic")
-	{
-		config.attackMinUnits = 50;
-		config.attackGroupSize = 34;
-		config.attackCooldownMs = 22000u;
-	}
-	else if (normalizedProfile == "defensive" || defense >= 0.70f)
-	{
-		config.attackMinUnits = 60;
-		config.attackGroupSize = 40;
-		config.attackCooldownMs = 26000u;
-	}
-	else if (normalizedProfile == "tech")
-	{
-		config.attackMinUnits = 44;
-		config.attackGroupSize = 30;
-		config.attackCooldownMs = 20000u;
-	}
-	else if (normalizedProfile == "sprawl")
-	{
-		config.attackMinUnits = 70;
-		config.attackGroupSize = 45;
-		config.attackCooldownMs = 26000u;
-	}
-	else if (config.isBalancedSprawl)
-	{
-		config.attackMinUnits = 55;
-		config.attackGroupSize = 28;
-		config.attackCooldownMs = 22000u;
-	}
-
-	config.sprawlSupplyCap = std::max(1, static_cast<int>(std::floor((config.isBalancedSprawl ? 3.0f : 4.0f) * multiplier)));
-	config.sprawlBarracksCap = std::max(1, static_cast<int>(std::floor((config.isBalancedSprawl ? 1.5f : 2.0f) * multiplier)));
-	config.sprawlArmsCap = std::max(1, static_cast<int>(std::floor((config.isBalancedSprawl ? 2.0f : 3.0f) * multiplier)));
-	config.sprawlMarketCap = std::max(1, static_cast<int>(std::floor((config.isBalancedSprawl ? 6.0f : 8.0f) * multiplier)));
-	config.sprawlTunnelCap = std::max(1, static_cast<int>(std::floor((config.isBalancedSprawl ? 5.0f : 8.0f) * multiplier)));
-	config.sprawlStingerCap = std::max(1, static_cast<int>(std::floor((config.isBalancedSprawl ? 4.0f : 6.0f) * multiplier)));
-
-	config.urgentZoneGapThreshold = 5;
-	config.normalMaxConcurrentExpansionStashes = 1;
-	if (config.isSprawlStyle && multiplier >= 5.0f)
-	{
-		config.normalMaxConcurrentExpansionStashes = config.isBalancedSprawl ? 2 : 3;
-	}
-	if (config.isSprawlStyle && multiplier >= 8.0f)
-	{
-		config.normalMaxConcurrentExpansionStashes = config.isBalancedSprawl ? 3 : 4;
-	}
-	config.allowExpansionBeforeFullRemoteFollowup = config.isSprawlStyle && multiplier >= 8.0f;
-	config.expansionHighCashFloatThreshold = 10000u;
-	config.scudStormHighCashFloatThreshold = 25000u;
-	return config;
 }
 
 bool AIControlAdapterShouldPauseCombatProduction(const AIControlAdapterProductionPolicyInputs& inputs)
@@ -864,6 +739,84 @@ AIControlAdapterZoneExpansionArbitrationResult AIControlAdapterChooseZoneExpansi
 	return result;
 }
 
+AIControlAdapterMacroExpansionDecision AIControlAdapterResolveMacroExpansionDecision(
+	const AIControlAdapterMacroExpansionSnapshot& snapshot)
+{
+	AIControlAdapterMacroExpansionDecision decision;
+	decision.zoneGap = snapshot.desiredZoneCount - snapshot.stashZoneCount;
+	decision.reserveProtected = snapshot.money >= snapshot.reserveCash;
+	decision.cashAboveReserve = decision.reserveProtected ? (snapshot.money - snapshot.reserveCash) : 0u;
+	decision.cashFloatHigh = decision.cashAboveReserve >= snapshot.expansionHighCashFloatThreshold;
+
+	if (snapshot.isSprawlStyle)
+	{
+		decision.desiredRemoteSupplyZones = std::max<int>(2, std::min<int>(8, snapshot.desiredZoneCount / 4));
+		decision.desiredSupplyFootprintRadius = 2400.0f;
+	}
+
+	decision.countExpansionUrgent = AIControlAdapterIsZoneExpansionUrgent({
+		snapshot.stashZoneCount,
+		snapshot.desiredZoneCount,
+		snapshot.urgentZoneGapThreshold
+	});
+	decision.coverageExpansionUrgent =
+		snapshot.isSprawlStyle
+		&& snapshot.stashZoneCount < snapshot.desiredZoneCount
+		&& (snapshot.remoteSupplyZoneCount < decision.desiredRemoteSupplyZones
+			|| snapshot.supplyFootprintRadius < decision.desiredSupplyFootprintRadius);
+	decision.zoneExpansionUrgent = decision.countExpansionUrgent || decision.coverageExpansionUrgent;
+	decision.allowUrgentExpansionDespiteReserve = decision.zoneExpansionUrgent && decision.cashFloatHigh;
+	decision.preferRemoteSupplyExpansion = decision.coverageExpansionUrgent;
+	decision.expansionMode = decision.zoneExpansionUrgent
+		? "urgent"
+		: (snapshot.stashZoneCount < snapshot.desiredZoneCount ? "normal" : "hold");
+
+	if (snapshot.stashZoneCount >= snapshot.desiredZoneCount)
+	{
+		decision.expansionReason = "target_reached";
+	}
+	else if (decision.coverageExpansionUrgent && decision.cashFloatHigh)
+	{
+		decision.expansionReason = "coverage_gap_high_cash";
+	}
+	else if (decision.coverageExpansionUrgent && !decision.cashFloatHigh)
+	{
+		decision.expansionReason = "coverage_gap_low_cash";
+	}
+	else if (decision.countExpansionUrgent && decision.cashFloatHigh)
+	{
+		decision.expansionReason = "large_gap_high_cash";
+	}
+	else if (decision.countExpansionUrgent && !decision.cashFloatHigh)
+	{
+		decision.expansionReason = "large_gap_low_cash";
+	}
+	else if (snapshot.isBalancedSprawl && snapshot.money < snapshot.reserveCash)
+	{
+		decision.expansionReason = "below_target_reserve_hold";
+	}
+	else
+	{
+		decision.expansionReason = "below_target_normal";
+	}
+
+	decision.arbitration = AIControlAdapterChooseZoneExpansionAction({
+		decision.zoneExpansionUrgent,
+		decision.allowUrgentExpansionDespiteReserve,
+		snapshot.remoteZoneNeedsFollowup,
+		snapshot.stashZoneCount,
+		snapshot.desiredZoneCount,
+		snapshot.supplyStashesInProgress,
+		snapshot.shouldThrottleExtraStashGrowth,
+		snapshot.money,
+		snapshot.reserveCash,
+		snapshot.isBalancedSprawl,
+		snapshot.isBuildCooldownReady,
+		snapshot.maxConcurrentSupplyStashes
+	});
+	return decision;
+}
+
 AIControlAdapterRemoteZoneFollowupResult AIControlAdapterChooseRemoteZoneFollowup(
 	const AIControlAdapterRemoteZoneFollowupInputs& inputs)
 {
@@ -920,6 +873,98 @@ AIControlAdapterRemoteZoneFollowupResult AIControlAdapterChooseRemoteZoneFollowu
 	result.packageStage = "complete";
 	result.reason = "full_followup_complete";
 	return result;
+}
+
+AIControlAdapterZoneSeedPackageDecision AIControlAdapterChooseZoneSeedPackage(
+	const AIControlAdapterZoneSeedPackageInputs& inputs)
+{
+	AIControlAdapterZoneSeedPackageDecision decision;
+	if (!inputs.isSprawlStyle)
+	{
+		decision.reason = "not_sprawl";
+		return decision;
+	}
+	if (!inputs.remoteZoneHasStash)
+	{
+		decision.reason = "no_remote_stash";
+		return decision;
+	}
+
+	if (inputs.tunnels <= 0 && inputs.tunnelsInProgress <= 0)
+	{
+		decision.needsFollowup = true;
+		decision.packageStage = "tunnel";
+		decision.command = "Game.BuildTunnelNetwork";
+		decision.priority = inputs.activeZoneThreatened ? 100 : 80;
+		decision.reason = inputs.activeZoneThreatened ? "threatened_needs_tunnel" : "needs_tunnel";
+		return decision;
+	}
+
+	if (inputs.stingers <= 0 && inputs.stingersInProgress <= 0)
+	{
+		decision.needsFollowup = true;
+		decision.packageStage = "stinger";
+		decision.command = "Game.BuildStingerSite";
+		decision.priority = inputs.activeZoneThreatened ? 95 : 70;
+		decision.reason = inputs.activeZoneThreatened ? "threatened_needs_stinger" : "needs_stinger";
+		return decision;
+	}
+
+	if (inputs.coverageExpansionUrgent && !inputs.activeZoneThreatened)
+	{
+		decision.needsFollowup = !inputs.allowExpansionBeforeFullRemoteFollowup;
+		decision.packageStage = "coverage";
+		decision.command = nullptr;
+		decision.priority = 10;
+		decision.reason = "coverage_expansion_priority";
+		return decision;
+	}
+
+	if (inputs.canScaleMilitaryProduction && inputs.barracks <= 0 && inputs.barracksInProgress <= 0)
+	{
+		decision.needsFollowup = true;
+		decision.packageStage = "barracks";
+		decision.command = "Game.BuildBarracksSmart";
+		decision.priority = 50;
+		decision.reason = "needs_barracks";
+		return decision;
+	}
+
+	if (inputs.canScaleMilitaryProduction && inputs.armsDealers <= 0 && inputs.armsDealersInProgress <= 0)
+	{
+		decision.needsFollowup = true;
+		decision.packageStage = "arms_dealer";
+		decision.command = "Game.BuildArmsDealerSmart";
+		decision.priority = 45;
+		decision.reason = "needs_arms_dealer";
+		return decision;
+	}
+
+	decision.reason = "seed_complete";
+	return decision;
+}
+
+AIControlAdapterMacroBuildIntentChoice AIControlAdapterChooseMacroBuildIntent(
+	const std::vector<AIControlAdapterMacroBuildIntentOption>& options)
+{
+	AIControlAdapterMacroBuildIntentChoice choice;
+	for (std::size_t i = 0; i < options.size(); ++i)
+	{
+		const AIControlAdapterMacroBuildIntentOption& option = options[i];
+		if (!option.valid || option.command == nullptr)
+		{
+			continue;
+		}
+		if (choice.index < 0 || option.priority > choice.priority)
+		{
+			choice.index = static_cast<int>(i);
+			choice.category = option.category != nullptr ? option.category : "unknown";
+			choice.command = option.command;
+			choice.priority = option.priority;
+			choice.reason = option.reason != nullptr ? option.reason : "selected";
+		}
+	}
+	return choice;
 }
 
 AIControlAdapterScudStormConstructionPolicyResult AIControlAdapterEvaluateScudStormConstruction(
@@ -2320,6 +2365,50 @@ AIControlAdapterEmergencySurvivalProductionDecision AIControlAdapterChooseEmerge
 	}
 
 	return result;
+}
+
+const char* AIControlAdapterChooseEmergencySurvivalProductionCommand(
+	const AIControlAdapterEmergencySurvivalProductionDecision& decision,
+	int quads,
+	int queuedQuads,
+	int scorpions,
+	int queuedScorpions)
+{
+	if (decision.commands.empty())
+	{
+		return nullptr;
+	}
+
+	const char* quadCommand = nullptr;
+	const char* scorpionCommand = nullptr;
+	for (const std::string& command : decision.commands)
+	{
+		if (command == "Game.QueueQuadsAllWarFactories")
+		{
+			quadCommand = command.c_str();
+		}
+		else if (command == "Game.QueueScorpionsAllWarFactories")
+		{
+			scorpionCommand = command.c_str();
+		}
+	}
+
+	if (quadCommand != nullptr && scorpionCommand != nullptr)
+	{
+		const int effectiveQuads = quads + queuedQuads;
+		const int effectiveScorpions = scorpions + queuedScorpions;
+		if (effectiveQuads <= 2 && effectiveQuads <= effectiveScorpions)
+		{
+			return quadCommand;
+		}
+		if (effectiveScorpions <= 3 || effectiveScorpions < effectiveQuads)
+		{
+			return scorpionCommand;
+		}
+		return quadCommand;
+	}
+
+	return decision.commands.front().c_str();
 }
 
 AIControlAdapterPalaceRecoveryDecision AIControlAdapterChoosePalaceRecovery(
