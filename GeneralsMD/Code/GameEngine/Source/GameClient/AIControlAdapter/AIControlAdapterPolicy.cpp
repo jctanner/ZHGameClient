@@ -268,6 +268,13 @@ int AIControlAdapterGetEffectiveArmyCap(const AIControlAdapterEffectiveArmyCapPo
 	return std::max(baseArmyCap, cappedSurplusCap);
 }
 
+bool AIControlAdapterLooksLikeUsaIdentity(const std::string& value)
+{
+	const std::string lower = AIControlAdapterLowerCopy(value);
+	return AIControlAdapterContainsToken(lower, "america")
+		|| AIControlAdapterContainsToken(lower, "usa");
+}
+
 const char* AIControlAdapterGetRequiredOpeningBuild(const AIControlAdapterOpeningPolicyInputs& inputs)
 {
 	if (inputs.completedSupplyStashes < 1)

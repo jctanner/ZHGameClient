@@ -1132,6 +1132,9 @@ void updateSpecialTaskReservations(Player* player)
 	// Update construction task lifecycle
 	updateConstructionTaskLifecycle(player);
 
+	// Use protected worker-shuttle Technicals for far remote GLA build tasks.
+	updateWorkerShuttleAssignments(player);
+
 	// Attempt recovery for abandoned foundations
 	attemptAbandonedFoundationRecovery(player);
 

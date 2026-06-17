@@ -631,7 +631,8 @@ std::vector<unsigned int> selectCombatTaskScoutUnits(
 			candidate.constructionTaskReserved ||
 			candidate.garrisonReserved ||
 			candidate.combatTaskReserved ||
-			candidate.artilleryCounterReserved)
+			candidate.artilleryCounterReserved ||
+			candidate.workerShuttleReserved)
 		{
 			continue;
 		}
