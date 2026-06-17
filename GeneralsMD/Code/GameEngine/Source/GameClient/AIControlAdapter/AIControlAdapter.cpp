@@ -9,6 +9,7 @@
 #include "GameClient/AIControlAdapter/AIControlAdapterDefenseManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterEconomyManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterEnemyMemory.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterGlaUsaStrategyManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterMacroBuildDispatcher.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterMacroBuildManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterMacroBuildSnapshotBuilder.h"
@@ -663,6 +664,7 @@ namespace
 		nlohmann::json brutalPressureTelemetry;
 		nlohmann::json emergencySurvivalTelemetry;
 		nlohmann::json survivalPolicyTelemetry;
+		nlohmann::json glaUsaStrategyTelemetry;
 		nlohmann::json strategicSpendTelemetry;
 		nlohmann::json macroBuildTelemetry;
 		nlohmann::json mainBaseCriticalOverrideTelemetry;
@@ -896,6 +898,7 @@ namespace
 			m_autonomy.state.brutalPressureTelemetry = nlohmann::json::object();
 			m_autonomy.state.emergencySurvivalTelemetry = nlohmann::json::object();
 			m_autonomy.state.survivalPolicyTelemetry = nlohmann::json::object();
+			m_autonomy.state.glaUsaStrategyTelemetry = nlohmann::json::object();
 			m_autonomy.state.strategicSpendTelemetry =
 				AIControlAdapterStrategicSpendTelemetrySerializer().BuildDefaultTelemetry();
 			m_autonomy.state.macroBuildTelemetry =
@@ -5761,6 +5764,7 @@ namespace
 				}
 			}
 
+			AIControlAdapterGlaUsaStrategyResult glaUsaStrategy;
 			if (productionDue)
 			{
 				const Int armyCount = std::max<Int>(0, counts.mobileUnits - counts.workers);
@@ -5899,6 +5903,158 @@ namespace
 						++criticalThreatZones;
 					}
 				}
+				int enemyUsaWmdTargets = 0;
+				for (const WMDTarget& target : m_autonomy.wmdTargetTracker.getAllTargets())
+				{
+					if (target.alive
+						&& (containsIgnoreCase(target.templateName, "america")
+							|| containsIgnoreCase(target.templateName, "particlecannon")))
+					{
+						++enemyUsaWmdTargets;
+					}
+				}
+				const bool enemyUsaDetected = enemyUsaWmdTargets > 0;
+				const int activeDefenseTaskCount = m_autonomy.combatTaskManager.getDefenseTaskCount();
+				const int activeCombatTaskCount = m_autonomy.combatTaskManager.getActiveTaskCount();
+				const int activeAttackTaskEstimate = std::max(0, activeCombatTaskCount - activeDefenseTaskCount);
+				const int currentZoneCount =
+					static_cast<int>(m_autonomy.state.telemetryZones.is_array() ? m_autonomy.state.telemetryZones.size() : 0u);
+				const int desiredZoneCountForStrategy =
+					profilePolicyManager.ResolveStrategicSpendDesiredZoneCount(
+						profilePolicyConfig,
+						profilePolicyConfig.sprawlSupplyCap);
+				int exposedExpansionZones = 0;
+				float farthestRemoteBuildDistance = 0.0f;
+				if (m_autonomy.state.telemetryZones.is_array())
+				{
+					for (const auto& zoneJson : m_autonomy.state.telemetryZones)
+					{
+						if (!zoneJson.is_object())
+						{
+							continue;
+						}
+						const int zoneTunnels = zoneJson.value("tunnels", 0);
+						const int zoneStingers = zoneJson.value("stingers", 0);
+						const bool isMainBaseZone = zoneJson.value("is_main_base", false);
+						if (!isMainBaseZone && (zoneTunnels + zoneStingers) <= 0)
+						{
+							++exposedExpansionZones;
+						}
+						if (hasActiveZone && zoneJson.contains("center_x") && zoneJson.contains("center_y"))
+						{
+							const float dx = zoneJson.value("center_x", activeZone.center.x) - activeZone.center.x;
+							const float dy = zoneJson.value("center_y", activeZone.center.y) - activeZone.center.y;
+							farthestRemoteBuildDistance = std::max(farthestRemoteBuildDistance, std::sqrt((dx * dx) + (dy * dy)));
+						}
+					}
+				}
+				AIControlAdapterGlaUsaStrategyInput glaUsaInput;
+				glaUsaInput.enemyUsaDetected = enemyUsaDetected;
+				glaUsaInput.enemyUsaWmdTargets = enemyUsaWmdTargets;
+				glaUsaInput.enemyArmorThreats = criticalThreatZones > 0 ? localEnemyCount : 0;
+				glaUsaInput.enemyAirThreats = 0;
+				glaUsaInput.enemyMixedThreats = enemyArtilleryCount > 0 && localEnemyCount > 0 ? localEnemyCount : 0;
+				glaUsaInput.criticalZoneCount = criticalThreatZones;
+				glaUsaInput.mainBaseCritical = mainUnderPressure;
+				glaUsaInput.producerSpineBroken =
+					m_autonomy.state.survivalPolicyTelemetry.is_object()
+					&& m_autonomy.state.survivalPolicyTelemetry.value("state", std::string()) == "producer_spine_broken";
+				glaUsaInput.collapseImminent =
+					m_autonomy.state.survivalPolicyTelemetry.is_object()
+					&& m_autonomy.state.survivalPolicyTelemetry.value("state", std::string()) == "collapse_imminent";
+				glaUsaInput.money = money;
+				glaUsaInput.reserveCash = reserveCash;
+				glaUsaInput.completedPalaces = hasCompletedPalace ? counts.palaces : 0;
+				glaUsaInput.readyBarracks = counts.barracks;
+				glaUsaInput.readyArmsDealers = counts.armsDealers;
+				glaUsaInput.tunnels = counts.tunnels;
+				glaUsaInput.stingers = counts.stingers;
+				glaUsaInput.exposedExpansionZones = exposedExpansionZones;
+				glaUsaInput.quads = counts.quads;
+				glaUsaInput.queuedQuads = counts.queuedQuads;
+				glaUsaInput.scorpions = counts.scorpions;
+				glaUsaInput.queuedScorpions = counts.queuedScorpions;
+				glaUsaInput.rocketBuggies = counts.rocketBuggies;
+				glaUsaInput.armyCount = armyCount;
+				glaUsaInput.activeDefenseTasks = activeDefenseTaskCount;
+				glaUsaInput.activeAttackTasks = activeAttackTaskEstimate;
+				glaUsaInput.workers = counts.workers;
+				glaUsaInput.technicals = counts.technicals;
+				glaUsaInput.queuedTechnicals = counts.queuedTechnicals;
+				glaUsaInput.remoteBuildGap = std::max(0, desiredZoneCountForStrategy - currentZoneCount);
+				glaUsaInput.farthestRemoteBuildDistance = farthestRemoteBuildDistance;
+				glaUsaStrategy = AIControlAdapterGlaUsaStrategyManager().Evaluate(glaUsaInput);
+				const unsigned int glaUsaCashFloat = money > reserveCash ? money - reserveCash : 0u;
+				m_autonomy.state.glaUsaStrategyTelemetry = nlohmann::json::object({
+					{"active", glaUsaStrategy.active},
+					{"usa_enemy", enemyUsaDetected},
+					{"pressure", glaUsaStrategy.pressure},
+					{"reason", glaUsaStrategy.reason},
+					{"tunnel_role", glaUsaStrategy.tunnelRole},
+					{"tunnel_missiles_satisfy_armor", glaUsaStrategy.tunnelMissilesSatisfyArmor},
+					{"scorpion_floor", glaUsaStrategy.scorpionFloor},
+					{"quad_floor", glaUsaStrategy.quadFloor},
+					{"prefer_scorpion_production", glaUsaStrategy.preferScorpionProduction},
+					{"prefer_quad_production", glaUsaStrategy.preferQuadProduction},
+					{"preserve_attack_group", glaUsaStrategy.preserveAttackGroup},
+					{"reserved_strike_group", glaUsaStrategy.reservedStrikeGroup},
+					{"prioritize_producer_recovery", glaUsaStrategy.prioritizeProducerRecovery},
+					{"enemy_usa_wmd_targets", enemyUsaWmdTargets},
+					{"armor_threats", glaUsaInput.enemyArmorThreats},
+					{"air_threats", glaUsaInput.enemyAirThreats},
+					{"mixed_threats", glaUsaInput.enemyMixedThreats},
+					{"exposed_expansion_zones", exposedExpansionZones},
+					{"camouflage", nlohmann::json::object({
+						{"desired", glaUsaStrategy.camouflageDesired},
+						{"spend_allowed", glaUsaStrategy.camouflageSpendAllowed},
+						{"reason", glaUsaStrategy.camouflageReason},
+						{"cash_float", glaUsaCashFloat},
+						{"palace", hasCompletedPalace ? 1 : 0},
+						{"tunnels", counts.tunnels},
+						{"stingers", counts.stingers},
+						{"usa_enemy", enemyUsaDetected}
+					})},
+					{"worker_mobility", nlohmann::json::object({
+						{"desired", glaUsaStrategy.workerMobilityDesired},
+						{"mode", glaUsaStrategy.workerMobilityMode},
+						{"workers", counts.workers},
+						{"technicals", counts.technicals},
+						{"queued_technicals", counts.queuedTechnicals},
+						{"desired_shuttle_technicals", glaUsaStrategy.desiredShuttleTechnicals},
+						{"remote_gap", glaUsaInput.remoteBuildGap},
+						{"farthest_distance", farthestRemoteBuildDistance},
+						{"reason", glaUsaStrategy.workerMobilityReason}
+					})},
+					{"wmd_construction_diagnostic_needed", glaUsaStrategy.wmdConstructionDiagnosticNeeded},
+					{"wmd_construction_reason", glaUsaStrategy.wmdConstructionReason}
+				});
+				adapterLog(
+					"gla_usa_strategy usa_enemy=%d pressure=%s scorpion_floor=%d quad_floor=%d tunnel_role=%s preserve_attack=%d reason=%s",
+					enemyUsaDetected ? 1 : 0,
+					glaUsaStrategy.pressure,
+					glaUsaStrategy.scorpionFloor,
+					glaUsaStrategy.quadFloor,
+					glaUsaStrategy.tunnelRole,
+					glaUsaStrategy.preserveAttackGroup ? 1 : 0,
+					glaUsaStrategy.reason);
+				adapterLog(
+					"camouflage_policy desired=%d spend_allowed=%d reason=%s cash_float=%lu palace=%d tunnels=%d stingers=%d usa_enemy=%d",
+					glaUsaStrategy.camouflageDesired ? 1 : 0,
+					glaUsaStrategy.camouflageSpendAllowed ? 1 : 0,
+					glaUsaStrategy.camouflageReason,
+					static_cast<unsigned long>(glaUsaCashFloat),
+					hasCompletedPalace ? 1 : 0,
+					counts.tunnels,
+					counts.stingers,
+					enemyUsaDetected ? 1 : 0);
+				adapterLog(
+					"worker_mobility_policy desired=%d mode=%s workers=%d technicals=%d remote_gap=%d reason=%s",
+					glaUsaStrategy.workerMobilityDesired ? 1 : 0,
+					glaUsaStrategy.workerMobilityMode,
+					counts.workers,
+					counts.technicals,
+					glaUsaInput.remoteBuildGap,
+					glaUsaStrategy.workerMobilityReason);
 
 				const Int armyCapForLog = AIControlAdapterGetEffectiveArmyCap({
 					isBalancedSprawl,
@@ -6158,11 +6314,33 @@ namespace
 							emergencyDecision.bypassArmyCapBuffer ? 1 : 0,
 							emergencySpend.batchLimit,
 							emergencySpend.allowed ? emergencyDecision.reason : emergencySpend.reason);
+						}
 					}
-				}
 
-				// Phase 6.3: Log capture source production decisions
-				if (prodIntent.shouldProduce && prodIntent.reason == "capture_utility_reserve")
+					if (glaUsaStrategy.active && counts.armsDealers > 0)
+					{
+						if (glaUsaStrategy.preferScorpionProduction)
+						{
+							prodIntent.shouldProduce = true;
+							prodIntent.commandName = "Game.QueueScorpionsAllWarFactories";
+							prodIntent.producerKind = "any";
+							prodIntent.producerObjectId = -1;
+							prodIntent.unitTemplate = "";
+							prodIntent.reason = "gla_usa_armor_scorpion_floor";
+						}
+						else if (glaUsaStrategy.preferQuadProduction)
+						{
+							prodIntent.shouldProduce = true;
+							prodIntent.commandName = "Game.QueueQuadsAllWarFactories";
+							prodIntent.producerKind = "any";
+							prodIntent.producerObjectId = -1;
+							prodIntent.unitTemplate = "";
+							prodIntent.reason = "gla_usa_quad_floor";
+						}
+					}
+
+					// Phase 6.3: Log capture source production decisions
+					if (prodIntent.shouldProduce && prodIntent.reason == "capture_utility_reserve")
 				{
 					adapterLog(
 						"capture_source_army_cap_override army_count=%d army_cap=%d desired=%d reason=capture_utility_reserve",
@@ -6510,17 +6688,45 @@ namespace
 						return tryCommand(category, command, args, outReason);
 					};
 
-					auto playerHasUpgrade = [&](const char* upgradeName) -> bool
-					{
-						const UpgradeTemplate* upgradeT = TheUpgradeCenter != nullptr
-							? TheUpgradeCenter->findUpgrade(upgradeName)
-							: nullptr;
-						return upgradeT != nullptr && player != nullptr && player->hasUpgradeComplete(upgradeT);
-					};
+						auto playerHasUpgrade = [&](const char* upgradeName) -> bool
+						{
+							const UpgradeTemplate* upgradeT = TheUpgradeCenter != nullptr
+								? TheUpgradeCenter->findUpgrade(upgradeName)
+								: nullptr;
+							return upgradeT != nullptr && player != nullptr && player->hasUpgradeComplete(upgradeT);
+						};
 
-					// Submit science intent to scheduler
-					if (money >= 1000u)
-					{
+						if (glaUsaStrategy.camouflageSpendAllowed
+							&& money >= 1500u
+							&& counts.blackMarkets > 0
+							&& !playerHasUpgrade("Upgrade_GLACamoNetting"))
+						{
+							Intent camouflageIntent;
+							camouflageIntent.category = IntentCategory::TECH_UPGRADE;
+							camouflageIntent.priority = IntentPriority::HIGH;
+							camouflageIntent.commandName = "Game.QueueUpgrade";
+							camouflageIntent.targetName = "Upgrade_GLACamoNetting";
+							camouflageIntent.reason = glaUsaStrategy.camouflageReason;
+							camouflageIntent.executeFunc = [&, tryUpgradeCommand](std::string& resultReason) -> bool {
+								const bool issued = tryUpgradeCommand(
+									"auto_tech",
+									"Game.QueueUpgrade",
+									"black_market",
+									"Upgrade_GLACamoNetting",
+									resultReason);
+								adapterLog(
+									"camouflage_upgrade command=Game.QueueUpgrade issued=%d reason=%s",
+									issued ? 1 : 0,
+									issued ? "usa_anchor_multiplier" : resultReason.c_str());
+								return issued;
+							};
+							m_autonomy.scheduler.SubmitIntent(camouflageIntent);
+							schedulerHasIntents = true;
+						}
+
+						// Submit science intent to scheduler
+						if (money >= 1000u)
+						{
 						Intent scienceIntent;
 						scienceIntent.category = IntentCategory::TECH_SCIENCE;
 						scienceIntent.priority = IntentPriority::HIGH;
@@ -8002,9 +8208,9 @@ namespace
 					{"reason", "not_evaluated"}
 				});
 			result["mobile_siege_counterbattery"] = result["counterbattery"];
-			result["survival_policy"] = m_autonomy.state.survivalPolicyTelemetry.is_object()
-				? m_autonomy.state.survivalPolicyTelemetry
-				: nlohmann::json::object({
+				result["survival_policy"] = m_autonomy.state.survivalPolicyTelemetry.is_object()
+					? m_autonomy.state.survivalPolicyTelemetry
+					: nlohmann::json::object({
 					{"state", "stable"},
 					{"priority", "normal_macro"},
 					{"reason", "not_evaluated"},
@@ -8017,10 +8223,35 @@ namespace
 					{"ready_arms_dealers", 0},
 					{"money", 0},
 					{"reserve", 0},
-					{"cash_float", 0},
-					{"block_exposed_wmd_foundations", false}
-				});
-			result["brutal_pressure"] = m_autonomy.state.brutalPressureTelemetry.is_object()
+						{"cash_float", 0},
+						{"block_exposed_wmd_foundations", false}
+					});
+				result["gla_usa_strategy"] = m_autonomy.state.glaUsaStrategyTelemetry.is_object()
+					? m_autonomy.state.glaUsaStrategyTelemetry
+					: nlohmann::json::object({
+						{"active", false},
+						{"usa_enemy", false},
+						{"pressure", "none"},
+						{"reason", "not_evaluated"},
+						{"tunnel_role", "standard_defense"},
+						{"tunnel_missiles_satisfy_armor", true},
+						{"scorpion_floor", 0},
+						{"quad_floor", 0},
+						{"preserve_attack_group", false},
+						{"reserved_strike_group", 0},
+						{"camouflage", nlohmann::json::object({
+							{"desired", false},
+							{"spend_allowed", false},
+							{"reason", "not_evaluated"}
+						})},
+						{"worker_mobility", nlohmann::json::object({
+							{"desired", false},
+							{"mode", "walk"},
+							{"desired_shuttle_technicals", 0},
+							{"reason", "not_evaluated"}
+						})}
+					});
+				result["brutal_pressure"] = m_autonomy.state.brutalPressureTelemetry.is_object()
 				? m_autonomy.state.brutalPressureTelemetry
 				: nlohmann::json::object({
 					{"expansion_gap", 0},
@@ -13225,17 +13456,36 @@ namespace
 				}
 			}
 
-			// Build defensive SCUD Storms up to the standing baseline.
-			if (productionNeeded && AIControlAdapterIsTickInFuture(s_nextScudStormBuildTick, now))
-			{
-				return;
-			}
-			if (productionNeeded && !scudSpendAllowed)
-			{
-				s_nextScudStormBuildTick = now + 10000u;
-				adapterLog(
-					"scud_storm_build command=Game.BuildScudStormSmart issued=0 desired=%d live=%d in_progress=%d reason=%s",
-					desiredScudStorms,
+				// Build defensive SCUD Storms up to the standing baseline.
+				if (productionNeeded && AIControlAdapterIsTickInFuture(s_nextScudStormBuildTick, now))
+				{
+					if (hasWMDThreat)
+					{
+						adapterLog(
+							"wmd_construction_blocked reason=build_cooldown prereq=%d money=%u reserve=%u in_progress=%d",
+							scudStormPrereqReady ? 1 : 0,
+							static_cast<unsigned int>(currentMoney),
+							static_cast<unsigned int>(reserveCash),
+							inProgressScudStorms);
+					}
+					return;
+				}
+				if (productionNeeded && !scudSpendAllowed)
+				{
+					s_nextScudStormBuildTick = now + 10000u;
+					if (hasWMDThreat)
+					{
+						adapterLog(
+							"wmd_construction_blocked reason=%s prereq=%d money=%u reserve=%u in_progress=%d",
+							policyReason.c_str(),
+							scudStormPrereqReady ? 1 : 0,
+							static_cast<unsigned int>(currentMoney),
+							static_cast<unsigned int>(reserveCash),
+							inProgressScudStorms);
+					}
+					adapterLog(
+						"scud_storm_build command=Game.BuildScudStormSmart issued=0 desired=%d live=%d in_progress=%d reason=%s",
+						desiredScudStorms,
 					liveScudStorms,
 					inProgressScudStorms,
 					policyReason.c_str());
@@ -13354,8 +13604,27 @@ namespace
 					}
 					return best;
 				};
-				const ScudStormPlacementChoice placement = chooseScudStormPlacement();
-				std::vector<AIControlAdapterStrategicFoundationFact> foundationFacts;
+					const ScudStormPlacementChoice placement = chooseScudStormPlacement();
+					if (!placement.hasPlacement)
+					{
+						s_nextScudStormBuildTick = now + 10000u;
+						if (hasWMDThreat)
+						{
+							adapterLog(
+								"wmd_construction_blocked reason=no_safe_placement prereq=%d money=%u reserve=%u in_progress=%d",
+								scudStormPrereqReady ? 1 : 0,
+								static_cast<unsigned int>(currentMoney),
+								static_cast<unsigned int>(reserveCash),
+								inProgressScudStorms);
+						}
+						adapterLog(
+							"scud_storm_build command=Game.BuildScudStormSmart issued=0 desired=%d live=%d in_progress=%d reason=no_safe_placement",
+							desiredScudStorms,
+							liveScudStorms,
+							inProgressScudStorms);
+						return;
+					}
+					std::vector<AIControlAdapterStrategicFoundationFact> foundationFacts;
 				foundationFacts.reserve(m_autonomy.state.strategicFoundationHealth.size());
 				for (const auto& foundationPair : m_autonomy.state.strategicFoundationHealth)
 				{
@@ -13414,11 +13683,21 @@ namespace
 					placement.score,
 					placement.reason.c_str(),
 					static_cast<unsigned int>(now));
-				if (rebuildBlock.blocked)
-				{
-					s_nextScudStormBuildTick = now + 15000u;
-					adapterLog(
-						"strategic_foundation_rebuild_blocked template=GLAScudStorm foundation=%u reason=%s",
+					if (rebuildBlock.blocked)
+					{
+						s_nextScudStormBuildTick = now + 15000u;
+						if (hasWMDThreat)
+						{
+							adapterLog(
+								"wmd_construction_blocked reason=%s prereq=%d money=%u reserve=%u in_progress=%d",
+								rebuildBlock.reason,
+								scudStormPrereqReady ? 1 : 0,
+								static_cast<unsigned int>(currentMoney),
+								static_cast<unsigned int>(reserveCash),
+								inProgressScudStorms);
+						}
+						adapterLog(
+							"strategic_foundation_rebuild_blocked template=GLAScudStorm foundation=%u reason=%s",
 						static_cast<unsigned int>(rebuildBlock.foundationId),
 						rebuildBlock.reason);
 					adapterLog(
@@ -13453,14 +13732,24 @@ namespace
 				const bool buildIssued = executeGameBuildScudStormSmart(message, buildReason);
 				s_nextScudStormBuildTick = now + (buildIssued ? 15000u : 10000u);
 
-				adapterLog(
-					"scud_storm_build command=Game.BuildScudStormSmart issued=%d desired=%d live=%d in_progress=%d reason=%s",
-					buildIssued ? 1 : 0,
-					desiredScudStorms,
+					adapterLog(
+						"scud_storm_build command=Game.BuildScudStormSmart issued=%d desired=%d live=%d in_progress=%d reason=%s",
+						buildIssued ? 1 : 0,
+						desiredScudStorms,
 					liveScudStorms,
-					inProgressScudStorms,
-					buildIssued ? policyReason.c_str() : buildReason.c_str());
-			}
+						inProgressScudStorms,
+						buildIssued ? policyReason.c_str() : buildReason.c_str());
+					if (hasWMDThreat && !buildIssued)
+					{
+						adapterLog(
+							"wmd_construction_blocked reason=%s prereq=%d money=%u reserve=%u in_progress=%d",
+							buildReason.c_str(),
+							scudStormPrereqReady ? 1 : 0,
+							static_cast<unsigned int>(currentMoney),
+							static_cast<unsigned int>(reserveCash),
+							inProgressScudStorms);
+					}
+				}
 		}
 
 		void evaluateBattlefieldCounterbattery(Player* player)
