@@ -141,6 +141,7 @@ set(GAMEENGINE_SRC
     Include/GameClient/AIControlAdapter/AIControlAdapter.h
     Include/GameClient/AIControlAdapter/AIControlAdapterDefenseManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterEconomyManager.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterGlaUsaStrategyManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterMacroBuildDispatcher.h
     Include/GameClient/AIControlAdapter/AIControlAdapterMacroBuildManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterMacroBuildSnapshotBuilder.h
@@ -709,6 +710,7 @@ set(GAMEENGINE_SRC
     Source/GameClient/AIControlAdapter/AIControlAdapter.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterDefenseManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterEconomyManager.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterGlaUsaStrategyManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildDispatcher.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildSnapshotBuilder.cpp
@@ -1297,6 +1299,7 @@ add_compile_definitions(GENERALS_ONLINE)
 if(BUILD_TESTING)
     set(AI_CONTROL_ADAPTER_POLICY_SOURCES
         Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildDispatcher.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterGlaUsaStrategyManager.cpp
         Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildManager.cpp
         Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildSnapshotBuilder.cpp
         Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildTelemetrySerializer.cpp
@@ -1411,6 +1414,15 @@ if(BUILD_TESTING)
     configure_ai_control_adapter_unit_test(z_gameengine_adapter_survivalpolicy_tests)
 
     add_test(NAME z_gameengine_adapter_survivalpolicy_tests COMMAND z_gameengine_adapter_survivalpolicy_tests)
+
+    add_executable(z_gameengine_adapter_glausa_strategy_tests
+        Tests/AIControlAdapter/AIControlAdapterGlaUsaStrategyManagerTests.cpp
+        ${AI_CONTROL_ADAPTER_POLICY_SOURCES}
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_glausa_strategy_tests)
+
+    add_test(NAME z_gameengine_adapter_glausa_strategy_tests COMMAND z_gameengine_adapter_glausa_strategy_tests)
 
     add_executable(z_gameengine_adapter_techmanager_tests
         Tests/AIControlAdapter/AIControlAdapterTechManagerTests.cpp
