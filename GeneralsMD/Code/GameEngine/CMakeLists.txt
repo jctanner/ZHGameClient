@@ -147,9 +147,11 @@ set(GAMEENGINE_SRC
     Include/GameClient/AIControlAdapter/AIControlAdapterMacroBuildTelemetrySerializer.h
     Include/GameClient/AIControlAdapter/AIControlAdapterPolicy.h
     Include/GameClient/AIControlAdapter/AIControlAdapterProfilePolicyManager.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterStrategicFoundationSurvivalManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendSnapshotBuilder.h
     Include/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendTelemetrySerializer.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterSurvivalPolicyManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterCombatTask.h
     Include/GameClient/AIControlAdapter/AIControlAdapterProductionManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterScheduler.h
@@ -714,9 +716,11 @@ set(GAMEENGINE_SRC
     Source/GameClient/AIControlAdapter/AIControlAdapterCombatTask.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterPolicy.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterProfilePolicyManager.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterStrategicFoundationSurvivalManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendSnapshotBuilder.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendTelemetrySerializer.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterSurvivalPolicyManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterProductionManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterScheduler.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterTaskReservation.cpp
@@ -1298,9 +1302,11 @@ if(BUILD_TESTING)
         Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildTelemetrySerializer.cpp
         Source/GameClient/AIControlAdapter/AIControlAdapterPolicy.cpp
         Source/GameClient/AIControlAdapter/AIControlAdapterProfilePolicyManager.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterStrategicFoundationSurvivalManager.cpp
         Source/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendManager.cpp
         Source/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendSnapshotBuilder.cpp
         Source/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendTelemetrySerializer.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterSurvivalPolicyManager.cpp
     )
 
     function(configure_ai_control_adapter_unit_test target_name)
@@ -1396,6 +1402,15 @@ if(BUILD_TESTING)
     configure_ai_control_adapter_unit_test(z_gameengine_adapter_strategicspend_telemetry_tests)
 
     add_test(NAME z_gameengine_adapter_strategicspend_telemetry_tests COMMAND z_gameengine_adapter_strategicspend_telemetry_tests)
+
+    add_executable(z_gameengine_adapter_survivalpolicy_tests
+        Tests/AIControlAdapter/AIControlAdapterSurvivalPolicyManagerTests.cpp
+        ${AI_CONTROL_ADAPTER_POLICY_SOURCES}
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_survivalpolicy_tests)
+
+    add_test(NAME z_gameengine_adapter_survivalpolicy_tests COMMAND z_gameengine_adapter_survivalpolicy_tests)
 
     add_executable(z_gameengine_adapter_techmanager_tests
         Tests/AIControlAdapter/AIControlAdapterTechManagerTests.cpp

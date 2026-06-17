@@ -39,6 +39,7 @@ namespace
 		snapshot.marketGrowthSpend.reason = "allowed";
 		snapshot.hasCompletedPalace = true;
 		snapshot.totalSupplyStashes = 10;
+		snapshot.localSupplyEstablished = true;
 		snapshot.totalBarracks = 4;
 		snapshot.totalArmsDealers = 4;
 		snapshot.totalPalaces = 1;
@@ -80,6 +81,40 @@ int main()
 		expect(plan.telemetry.preferRemoteSupplyExpansion, "Macro build telemetry should expose remote expansion preference");
 		expect(plan.telemetry.expansionMode == std::string("urgent"), "Macro build telemetry should expose expansion mode");
 		expect(plan.telemetry.expansionReason == std::string("coverage_gap_high_cash"), "Macro build telemetry should expose expansion reason");
+		expect(plan.telemetry.remoteSupplyStage == std::string("full_map"), "Mature sprawl should allow full-map remote expansion");
+		expect(plan.telemetry.remoteSupplyAllowed, "Remote expansion should be allowed after local supply is established");
+		expect(plan.telemetry.remoteSupplyMaxDistance == 0.0f, "Full-map remote expansion should not cap max distance");
+	}
+
+	{
+		AIControlAdapterMacroBuildSnapshot snapshot = makeBaseSnapshot();
+		snapshot.totalSupplyStashes = 1;
+		snapshot.localSupplyEstablished = false;
+		const AIControlAdapterMacroBuildPlan plan = manager.BuildPlan(snapshot);
+		expect(plan.telemetry.preferRemoteSupplyExpansion, "Urgent coverage should still prefer remote expansion");
+		expect(!plan.telemetry.remoteSupplyAllowed, "Local bootstrap should block remote supply arguments");
+		expect(plan.telemetry.remoteSupplyStage == std::string("local_bootstrap"), "Bootstrap stage should be explicit");
+		expect(plan.telemetry.remoteSupplyReason == std::string("local_bootstrap"), "Bootstrap blocker should be explicit");
+	}
+
+	{
+		AIControlAdapterMacroBuildSnapshot snapshot = makeBaseSnapshot();
+		snapshot.stashZoneCount = 3;
+		snapshot.developedZoneCount = 1;
+		const AIControlAdapterMacroBuildPlan plan = manager.BuildPlan(snapshot);
+		expect(plan.telemetry.remoteSupplyAllowed, "Near ring should allow remote supply selection");
+		expect(plan.telemetry.remoteSupplyStage == std::string("near_ring"), "Early staged expansion should use near ring");
+		expect(plan.telemetry.remoteSupplyMaxDistance == 2200.0f, "Near ring should cap remote selection distance");
+	}
+
+	{
+		AIControlAdapterMacroBuildSnapshot snapshot = makeBaseSnapshot();
+		snapshot.stashZoneCount = 6;
+		snapshot.developedZoneCount = 3;
+		const AIControlAdapterMacroBuildPlan plan = manager.BuildPlan(snapshot);
+		expect(plan.telemetry.remoteSupplyAllowed, "Mid ring should allow remote supply selection");
+		expect(plan.telemetry.remoteSupplyStage == std::string("mid_ring"), "Mid staged expansion should use mid ring");
+		expect(plan.telemetry.remoteSupplyMaxDistance == 3400.0f, "Mid ring should cap remote selection distance");
 	}
 
 	{

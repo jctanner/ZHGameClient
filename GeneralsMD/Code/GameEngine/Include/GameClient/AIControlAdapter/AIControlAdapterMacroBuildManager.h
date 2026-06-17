@@ -39,6 +39,15 @@ struct AIControlAdapterMacroBuildIntent
 	const char* taskName = nullptr;
 };
 
+struct AIControlAdapterRemoteSupplyStageDecision
+{
+	const char* stage = "local_bootstrap";
+	float minDistance = 0.0f;
+	float maxDistance = 0.0f;
+	bool allowRemote = false;
+	const char* reason = "local_bootstrap";
+};
+
 struct AIControlAdapterMacroBuildSnapshot
 {
 	bool isSprawlStyle = false;
@@ -57,6 +66,7 @@ struct AIControlAdapterMacroBuildSnapshot
 	unsigned int expansionHighCashFloatThreshold = 10000u;
 	float supplyFootprintRadius = 0.0f;
 	int remoteSupplyZoneCount = 0;
+	bool localSupplyEstablished = false;
 	bool remoteZoneHasStash = false;
 	bool remoteZoneNeedsFollowup = false;
 	bool allowExpansionBeforeFullRemoteFollowup = false;
@@ -129,6 +139,7 @@ struct AIControlAdapterMacroBuildPolicyDecisions
 {
 	AIControlAdapterMacroExpansionDecision macroExpansion;
 	AIControlAdapterZoneExpansionArbitrationResult expansionDecision;
+	AIControlAdapterRemoteSupplyStageDecision remoteSupplyStage;
 	AIControlAdapterZoneSeedPackageDecision zoneSeedDecision;
 	bool remoteZoneNeedsFollowup = false;
 	int sprawlDesiredMarketCount = 1;
@@ -152,6 +163,11 @@ struct AIControlAdapterMacroBuildTelemetry
 	int desiredRemoteSupplyZones = 0;
 	bool coverageExpansionUrgent = false;
 	bool preferRemoteSupplyExpansion = false;
+	const char* remoteSupplyStage = "local_bootstrap";
+	float remoteSupplyMinDistance = 0.0f;
+	float remoteSupplyMaxDistance = 0.0f;
+	bool remoteSupplyAllowed = false;
+	const char* remoteSupplyReason = "local_bootstrap";
 	const char* expansionMode = "hold";
 	const char* expansionReason = "target_reached";
 	const char* expansionCommand = nullptr;
@@ -313,6 +329,9 @@ class AIControlAdapterMacroBuildManager
 public:
 	AIControlAdapterMacroBuildPolicyDecisions ResolvePolicyDecisions(const AIControlAdapterMacroBuildSnapshot& snapshot) const;
 	AIControlAdapterMacroBuildPlan BuildPlan(const AIControlAdapterMacroBuildSnapshot& snapshot) const;
+	AIControlAdapterRemoteSupplyStageDecision ResolveRemoteSupplyStage(
+		const AIControlAdapterMacroBuildSnapshot& snapshot,
+		bool preferRemoteSupplyExpansion) const;
 	AIControlAdapterNonSupplyFootholdDecision EvaluateNonSupplyFoothold(
 		const AIControlAdapterNonSupplyFootholdInput& input) const;
 	AIControlAdapterOpeningBuildDecision EvaluateOpeningBuild(

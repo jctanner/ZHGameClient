@@ -53,6 +53,7 @@ AIControlAdapterMacroBuildSnapshot AIControlAdapterMacroBuildSnapshotBuilder::Bu
 	snapshot.expansionHighCashFloatThreshold = policy.expansionHighCashFloatThreshold;
 	snapshot.supplyFootprintRadius = input.supplyFootprintRadius;
 	snapshot.remoteSupplyZoneCount = input.remoteSupplyZoneCount;
+	snapshot.localSupplyEstablished = input.totalSupplyStashes >= 2;
 	snapshot.remoteZoneHasStash = remoteZoneHasStash;
 	snapshot.allowExpansionBeforeFullRemoteFollowup = policy.allowExpansionBeforeFullRemoteFollowup;
 	snapshot.shouldThrottleExtraStashGrowth = shouldThrottleExtraStashGrowth;

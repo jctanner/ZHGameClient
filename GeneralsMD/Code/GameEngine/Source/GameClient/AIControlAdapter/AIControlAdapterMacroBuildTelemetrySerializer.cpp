@@ -67,6 +67,11 @@ nlohmann::json AIControlAdapterMacroBuildTelemetrySerializer::BuildDefaultTeleme
 			{"urgent", false},
 			{"coverage_urgent", false},
 			{"prefer_remote", false},
+			{"remote_stage", "local_bootstrap"},
+			{"remote_min_distance", 0.0f},
+			{"remote_max_distance", 0.0f},
+			{"remote_allowed", false},
+			{"remote_reason", "local_bootstrap"},
 			{"remote_supply", 0},
 			{"desired_remote_supply", 0},
 			{"footprint", 0.0f}
@@ -121,6 +126,11 @@ nlohmann::json AIControlAdapterMacroBuildTelemetrySerializer::BuildTelemetry(
 			{"concurrency_reason", safeString(macroTelemetry.expansionConcurrencyReason, "profile_cap")},
 			{"coverage_urgent", macroTelemetry.coverageExpansionUrgent},
 			{"prefer_remote", macroTelemetry.preferRemoteSupplyExpansion},
+			{"remote_stage", safeString(macroTelemetry.remoteSupplyStage, "local_bootstrap")},
+			{"remote_min_distance", macroTelemetry.remoteSupplyMinDistance},
+			{"remote_max_distance", macroTelemetry.remoteSupplyMaxDistance},
+			{"remote_allowed", macroTelemetry.remoteSupplyAllowed},
+			{"remote_reason", safeString(macroTelemetry.remoteSupplyReason, "local_bootstrap")},
 			{"remote_supply", macroTelemetry.remoteSupplyZoneCount},
 			{"desired_remote_supply", macroTelemetry.desiredRemoteSupplyZones},
 			{"footprint", macroTelemetry.supplyFootprintRadius}
@@ -220,7 +230,7 @@ std::vector<std::string> AIControlAdapterMacroBuildTelemetrySerializer::BuildExp
 		telemetry.shouldThrottleExtraStashGrowth ? 1 : 0,
 		telemetry.expansionIsUrgent ? 1 : 0));
 	lines.push_back(formatLine(
-		"sprawl_expansion_throughput current=%d desired=%d gap=%d in_progress=%d max_in_progress=%d concurrency_reason=%s reserve=%lu cash_float=%lu footprint=%.1f remote_supply=%d desired_remote=%d prefer_remote=%d action=%s reason=%s",
+		"sprawl_expansion_throughput current=%d desired=%d gap=%d in_progress=%d max_in_progress=%d concurrency_reason=%s reserve=%lu cash_float=%lu footprint=%.1f remote_supply=%d desired_remote=%d prefer_remote=%d remote_stage=%s remote_allowed=%d remote_min=%.1f remote_max=%.1f action=%s reason=%s",
 		telemetry.stashZoneCount,
 		telemetry.desiredZoneCount,
 		telemetry.zoneGap,
@@ -233,6 +243,10 @@ std::vector<std::string> AIControlAdapterMacroBuildTelemetrySerializer::BuildExp
 		telemetry.remoteSupplyZoneCount,
 		telemetry.desiredRemoteSupplyZones,
 		telemetry.preferRemoteSupplyExpansion ? 1 : 0,
+		safeString(telemetry.remoteSupplyStage, "local_bootstrap"),
+		telemetry.remoteSupplyAllowed ? 1 : 0,
+		telemetry.remoteSupplyMinDistance,
+		telemetry.remoteSupplyMaxDistance,
 		safeString(telemetry.expansionCommand, "none"),
 		safeString(telemetry.expansionDecisionReason, "target_reached")));
 
