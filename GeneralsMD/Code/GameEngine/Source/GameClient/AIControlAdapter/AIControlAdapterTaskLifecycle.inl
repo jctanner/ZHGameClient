@@ -666,6 +666,9 @@ void attemptAbandonedFoundationRecovery(Player* player)
 				strategicState->lastProgressTick = now;
 			}
 			strategicState->templateName = task->expectedTemplate;
+			strategicState->x = foundationPos->x;
+			strategicState->y = foundationPos->y;
+			strategicState->z = foundationPos->z;
 			strategicState->lastSeenTick = now;
 			const Real currentHealth = getObjectHealthForStrategicFoundation(foundation);
 			if (strategicState->lastHealth < 0.0f || currentHealth > strategicState->lastHealth + 1.0f)

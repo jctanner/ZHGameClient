@@ -15,9 +15,11 @@
 #include "GameClient/AIControlAdapter/AIControlAdapterMacroBuildTelemetrySerializer.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterProfilePolicyManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterScheduler.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterStrategicFoundationSurvivalManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterStrategicSpendManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterStrategicSpendSnapshotBuilder.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterStrategicSpendTelemetrySerializer.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterSurvivalPolicyManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterTaskReservation.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterWMDTarget.h"
 
@@ -526,6 +528,9 @@ namespace
 	{
 		std::string templateName;
 		Real lastHealth = -1.0f;
+		Real x = 0.0f;
+		Real y = 0.0f;
+		Real z = 0.0f;
 		DWORD firstSeenTick = 0u;
 		DWORD lastSeenTick = 0u;
 		DWORD lastProgressTick = 0u;
@@ -657,6 +662,7 @@ namespace
 		nlohmann::json counterbatteryTelemetry;
 		nlohmann::json brutalPressureTelemetry;
 		nlohmann::json emergencySurvivalTelemetry;
+		nlohmann::json survivalPolicyTelemetry;
 		nlohmann::json strategicSpendTelemetry;
 		nlohmann::json macroBuildTelemetry;
 		nlohmann::json mainBaseCriticalOverrideTelemetry;
@@ -889,6 +895,7 @@ namespace
 			m_autonomy.state.counterbatteryTelemetry = nlohmann::json::object();
 			m_autonomy.state.brutalPressureTelemetry = nlohmann::json::object();
 			m_autonomy.state.emergencySurvivalTelemetry = nlohmann::json::object();
+			m_autonomy.state.survivalPolicyTelemetry = nlohmann::json::object();
 			m_autonomy.state.strategicSpendTelemetry =
 				AIControlAdapterStrategicSpendTelemetrySerializer().BuildDefaultTelemetry();
 			m_autonomy.state.macroBuildTelemetry =
@@ -3833,7 +3840,6 @@ namespace
 				const bool reserveProtected = macroExpansion.reserveProtected;
 				const unsigned int cashAboveReserve = macroExpansion.cashAboveReserve;
 				const bool allowUrgentExpansionDespiteReserve = macroExpansion.allowUrgentExpansionDespiteReserve;
-				const bool preferRemoteSupplyExpansion = macroExpansion.preferRemoteSupplyExpansion;
 				const bool zoneExpansionIsUrgent = macroExpansion.zoneExpansionUrgent;
 				AIControlAdapterStrategicSpendEconomyFacts macroSpendEconomy;
 				macroSpendEconomy.money = money;
@@ -3861,9 +3867,13 @@ namespace
 				auto trySupplyExpansionBuild = [&](std::string& outReason) -> bool
 				{
 					nlohmann::json args = nlohmann::json::object();
-					if (preferRemoteSupplyExpansion && hasMainZoneForFootprint)
+					const AIControlAdapterRemoteSupplyStageDecision& remoteSupplyStage = macroBuildPolicyDecisions.remoteSupplyStage;
+					if (remoteSupplyStage.allowRemote && hasMainZoneForFootprint)
 					{
 						args["prefer_remote"] = true;
+						args["remote_stage"] = remoteSupplyStage.stage;
+						args["remote_min_distance"] = remoteSupplyStage.minDistance;
+						args["remote_max_distance"] = remoteSupplyStage.maxDistance;
 						args["remote_origin"] = nlohmann::json::object({
 							{"x", mainZoneCenter.x},
 							{"y", mainZoneCenter.y}
@@ -4107,6 +4117,68 @@ namespace
 				macroTelemetryInput.spendPlan = &macroSpendPlan;
 				m_autonomy.state.macroBuildTelemetry =
 					macroTelemetrySerializer.BuildTelemetry(macroTelemetryInput);
+				int criticalZoneCount = 0;
+				for (const auto& threatPair : m_autonomy.state.zoneThreats)
+				{
+					const AutonomyZoneThreatState& threat = threatPair.second;
+					if ((now - threat.lastSeenTick) <= 45000u && threat.level == "critical")
+					{
+						++criticalZoneCount;
+					}
+				}
+				int defenseReserveDeficits = 0;
+				for (const auto& reservePair : m_autonomy.state.zoneDefenseReserves)
+				{
+					if (reservePair.second.deficit > 0)
+					{
+						++defenseReserveDeficits;
+					}
+					}
+					const int activeCombatTaskCount = m_autonomy.combatTaskManager.getActiveTaskCount();
+					const int enemyWmdTargetCount = static_cast<int>(m_autonomy.wmdTargetTracker.getAllTargets().size());
+					const int readyScudStormCount = countReadyScudStorms(player);
+					AIControlAdapterSurvivalPolicyInput survivalInput;
+					survivalInput.criticalZoneCount = criticalZoneCount;
+					survivalInput.defenseReserveDeficits = defenseReserveDeficits;
+					survivalInput.activeCombatTasks = activeCombatTaskCount;
+					survivalInput.readyScudStorms = readyScudStormCount;
+					survivalInput.enemyWmdTargets = enemyWmdTargetCount;
+					survivalInput.readyBarracks = counts.barracks;
+					survivalInput.readyArmsDealers = counts.armsDealers;
+					survivalInput.money = static_cast<unsigned int>(money);
+					survivalInput.reserveCash = static_cast<unsigned int>(reserveCash);
+					const AIControlAdapterSurvivalPolicyResult survivalPolicy =
+						AIControlAdapterSurvivalPolicyManager().Evaluate(survivalInput);
+					m_autonomy.state.survivalPolicyTelemetry = nlohmann::json::object({
+						{"state", survivalPolicy.state},
+						{"priority", survivalPolicy.priority},
+						{"reason", survivalPolicy.reason},
+						{"critical_zones", criticalZoneCount},
+						{"defense_reserve_deficits", defenseReserveDeficits},
+						{"active_combat_tasks", activeCombatTaskCount},
+						{"ready_scuds", readyScudStormCount},
+						{"enemy_wmd_targets", enemyWmdTargetCount},
+						{"ready_barracks", counts.barracks},
+						{"ready_arms_dealers", counts.armsDealers},
+					{"money", money},
+					{"reserve", reserveCash},
+					{"cash_float", cashAboveReserve},
+					{"block_exposed_wmd_foundations", survivalPolicy.blockExposedWmdFoundations}
+				});
+				adapterLog(
+					"survival_policy state=%s priority=%s reason=%s critical_zones=%d defense_deficits=%d active_tasks=%d ready_scuds=%d enemy_wmd=%d producers=%d/%d money=%lu reserve=%lu",
+					survivalPolicy.state,
+					survivalPolicy.priority,
+					survivalPolicy.reason,
+						criticalZoneCount,
+						defenseReserveDeficits,
+						activeCombatTaskCount,
+						readyScudStormCount,
+						enemyWmdTargetCount,
+					counts.barracks,
+					counts.armsDealers,
+					static_cast<unsigned long>(money),
+					static_cast<unsigned long>(reserveCash));
 				int garrisonGap = 0;
 				if (m_autonomy.state.garrisonTelemetry.is_array())
 				{
@@ -7930,6 +8002,24 @@ namespace
 					{"reason", "not_evaluated"}
 				});
 			result["mobile_siege_counterbattery"] = result["counterbattery"];
+			result["survival_policy"] = m_autonomy.state.survivalPolicyTelemetry.is_object()
+				? m_autonomy.state.survivalPolicyTelemetry
+				: nlohmann::json::object({
+					{"state", "stable"},
+					{"priority", "normal_macro"},
+					{"reason", "not_evaluated"},
+					{"critical_zones", 0},
+					{"defense_reserve_deficits", 0},
+					{"active_combat_tasks", 0},
+					{"ready_scuds", 0},
+					{"enemy_wmd_targets", 0},
+					{"ready_barracks", 0},
+					{"ready_arms_dealers", 0},
+					{"money", 0},
+					{"reserve", 0},
+					{"cash_float", 0},
+					{"block_exposed_wmd_foundations", false}
+				});
 			result["brutal_pressure"] = m_autonomy.state.brutalPressureTelemetry.is_object()
 				? m_autonomy.state.brutalPressureTelemetry
 				: nlohmann::json::object({
@@ -8432,18 +8522,48 @@ namespace
 				})}
 			});
 			nlohmann::json strategicFoundations = nlohmann::json::array();
+			const AIControlAdapterStrategicFoundationSurvivalManager foundationSurvivalManager;
 			for (const auto& pair : m_autonomy.state.strategicFoundationHealth)
 			{
 				const AutonomyStrategicFoundationState& state = pair.second;
+				AIControlAdapterStrategicFoundationFact fact;
+				fact.foundationId = pair.first;
+				fact.templateName = state.templateName;
+				fact.x = state.x;
+				fact.y = state.y;
+				fact.lastHealth = state.lastHealth;
+				fact.nowTick = telemetryNow;
+				fact.firstSeenTick = state.firstSeenTick;
+				fact.lastSeenTick = state.lastSeenTick;
+				fact.lastProgressTick = state.lastProgressTick;
+				fact.recoveryAttempts = state.recoveryAttempts;
+				fact.stopIssued = state.stopIssued;
+				fact.reason = state.reason;
+				const AIControlAdapterStrategicFoundationClassification classification =
+					foundationSurvivalManager.Classify(fact);
+				adapterLog(
+					"strategic_foundation_survival template=%s foundation=%u state=%s reason=%s",
+					state.templateName.c_str(),
+					static_cast<unsigned int>(pair.first),
+					classification.state,
+					classification.reason);
 				strategicFoundations.push_back(nlohmann::json::object({
 					{"foundation_id", pair.first},
 					{"template", state.templateName},
 					{"last_health", state.lastHealth},
+					{"position", nlohmann::json::object({
+						{"x", state.x},
+						{"y", state.y},
+						{"z", state.z}
+					})},
 					{"last_seen_tick", state.lastSeenTick},
 					{"last_progress_tick", state.lastProgressTick},
 					{"no_progress_ms", state.lastProgressTick != 0u ? telemetryNow - state.lastProgressTick : 0u},
 					{"recovery_attempts", state.recoveryAttempts},
 					{"stop_issued", state.stopIssued},
+					{"state", classification.state},
+					{"failed", classification.failed},
+					{"rebuild_blocked", classification.rebuildBlocked},
 					{"reason", state.reason}
 				}));
 			}
@@ -13235,6 +13355,39 @@ namespace
 					return best;
 				};
 				const ScudStormPlacementChoice placement = chooseScudStormPlacement();
+				std::vector<AIControlAdapterStrategicFoundationFact> foundationFacts;
+				foundationFacts.reserve(m_autonomy.state.strategicFoundationHealth.size());
+				for (const auto& foundationPair : m_autonomy.state.strategicFoundationHealth)
+				{
+					const AutonomyStrategicFoundationState& state = foundationPair.second;
+					AIControlAdapterStrategicFoundationFact fact;
+					fact.foundationId = foundationPair.first;
+					fact.templateName = state.templateName;
+					fact.x = state.x;
+					fact.y = state.y;
+					fact.lastHealth = state.lastHealth;
+					fact.nowTick = now;
+					fact.firstSeenTick = state.firstSeenTick;
+					fact.lastSeenTick = state.lastSeenTick;
+					fact.lastProgressTick = state.lastProgressTick;
+					fact.recoveryAttempts = state.recoveryAttempts;
+					fact.stopIssued = state.stopIssued;
+					fact.reason = state.reason;
+					foundationFacts.push_back(fact);
+				}
+				const bool collapseImminent =
+					m_autonomy.state.survivalPolicyTelemetry.is_object()
+					&& m_autonomy.state.survivalPolicyTelemetry.value("state", std::string()) == "collapse_imminent";
+				const AIControlAdapterScudStormRebuildBlockResult rebuildBlock =
+					AIControlAdapterStrategicFoundationSurvivalManager().ShouldBlockScudStormRebuild({
+						static_cast<float>(placement.center.x),
+						static_cast<float>(placement.center.y),
+						static_cast<unsigned int>(now),
+						300000u,
+						650.0f,
+						collapseImminent,
+						foundationFacts
+					});
 				adapterLog(
 					"scud_storm_placement zone=%u role=%s x=%.1f y=%.1f score=%d reason=%s",
 					static_cast<unsigned int>(placement.zoneId),
@@ -13261,6 +13414,21 @@ namespace
 					placement.score,
 					placement.reason.c_str(),
 					static_cast<unsigned int>(now));
+				if (rebuildBlock.blocked)
+				{
+					s_nextScudStormBuildTick = now + 15000u;
+					adapterLog(
+						"strategic_foundation_rebuild_blocked template=GLAScudStorm foundation=%u reason=%s",
+						static_cast<unsigned int>(rebuildBlock.foundationId),
+						rebuildBlock.reason);
+					adapterLog(
+						"scud_storm_build command=Game.BuildScudStormSmart issued=0 desired=%d live=%d in_progress=%d reason=%s",
+						desiredScudStorms,
+						liveScudStorms,
+						inProgressScudStorms,
+						rebuildBlock.reason);
+					return;
+				}
 				nlohmann::json message = {
 					{"type", "SessionCommand"},
 					{"request_id", std::string("defensive_scud_storm_build")},

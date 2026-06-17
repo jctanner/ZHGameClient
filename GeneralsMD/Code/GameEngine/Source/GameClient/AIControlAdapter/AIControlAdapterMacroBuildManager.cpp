@@ -151,6 +151,9 @@ AIControlAdapterMacroBuildPolicyDecisions AIControlAdapterMacroBuildManager::Res
 		snapshot.expansionHighCashFloatThreshold
 	});
 	decisions.expansionDecision = decisions.macroExpansion.arbitration;
+	decisions.remoteSupplyStage = ResolveRemoteSupplyStage(
+		snapshot,
+		decisions.macroExpansion.preferRemoteSupplyExpansion);
 	decisions.zoneSeedDecision = AIControlAdapterChooseZoneSeedPackage({
 		snapshot.isSprawlStyle,
 		snapshot.canScaleMilitaryProduction,
@@ -214,6 +217,43 @@ AIControlAdapterMacroBuildPolicyDecisions AIControlAdapterMacroBuildManager::Res
 	return decisions;
 }
 
+AIControlAdapterRemoteSupplyStageDecision AIControlAdapterMacroBuildManager::ResolveRemoteSupplyStage(
+	const AIControlAdapterMacroBuildSnapshot& snapshot,
+	bool preferRemoteSupplyExpansion) const
+{
+	AIControlAdapterRemoteSupplyStageDecision decision;
+	if (!preferRemoteSupplyExpansion)
+	{
+		decision.reason = "remote_not_preferred";
+		return decision;
+	}
+	if (!snapshot.localSupplyEstablished)
+	{
+		decision.reason = "local_bootstrap";
+		return decision;
+	}
+
+	decision.allowRemote = true;
+	if (snapshot.stashZoneCount < 5 || snapshot.developedZoneCount < 2)
+	{
+		decision.stage = "near_ring";
+		decision.maxDistance = 2200.0f;
+		decision.reason = "near_ring";
+		return decision;
+	}
+	if (snapshot.stashZoneCount < 9 || snapshot.developedZoneCount < 4)
+	{
+		decision.stage = "mid_ring";
+		decision.maxDistance = 3400.0f;
+		decision.reason = "mid_ring";
+		return decision;
+	}
+
+	decision.stage = "full_map";
+	decision.reason = "full_map";
+	return decision;
+}
+
 AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 	const AIControlAdapterMacroBuildSnapshot& snapshot) const
 {
@@ -241,6 +281,11 @@ AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 	plan.telemetry.desiredRemoteSupplyZones = decisions.macroExpansion.desiredRemoteSupplyZones;
 	plan.telemetry.coverageExpansionUrgent = decisions.macroExpansion.coverageExpansionUrgent;
 	plan.telemetry.preferRemoteSupplyExpansion = decisions.macroExpansion.preferRemoteSupplyExpansion;
+	plan.telemetry.remoteSupplyStage = decisions.remoteSupplyStage.stage;
+	plan.telemetry.remoteSupplyMinDistance = decisions.remoteSupplyStage.minDistance;
+	plan.telemetry.remoteSupplyMaxDistance = decisions.remoteSupplyStage.maxDistance;
+	plan.telemetry.remoteSupplyAllowed = decisions.remoteSupplyStage.allowRemote;
+	plan.telemetry.remoteSupplyReason = decisions.remoteSupplyStage.reason;
 	plan.telemetry.expansionMode = decisions.macroExpansion.expansionMode != nullptr ? decisions.macroExpansion.expansionMode : "hold";
 	plan.telemetry.expansionReason = decisions.macroExpansion.expansionReason != nullptr ? decisions.macroExpansion.expansionReason : "target_reached";
 	plan.telemetry.expansionCommand = expansionDecision.command;

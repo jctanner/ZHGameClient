@@ -57,6 +57,9 @@
 			bool preferRemoteSupply = false;
 			Coord3D remoteOrigin = {};
 			bool hasRemoteOrigin = false;
+			Real remoteMinDistance = 0.0f;
+			Real remoteMaxDistance = 0.0f;
+			std::string remoteStage = "full_map";
 			const auto argsIt = message.find("args");
 			if (argsIt != message.end() && argsIt->is_object())
 			{
@@ -89,12 +92,28 @@
 						hasRemoteOrigin = true;
 					}
 				}
+				const auto remoteMinIt = argsIt->find("remote_min_distance");
+				if (remoteMinIt != argsIt->end() && remoteMinIt->is_number())
+				{
+					remoteMinDistance = std::max<Real>(0.0f, remoteMinIt->get<Real>());
+				}
+				const auto remoteMaxIt = argsIt->find("remote_max_distance");
+				if (remoteMaxIt != argsIt->end() && remoteMaxIt->is_number())
+				{
+					remoteMaxDistance = std::max<Real>(0.0f, remoteMaxIt->get<Real>());
+				}
+				const std::string parsedRemoteStage = getJsonString(*argsIt, "remote_stage");
+				if (!parsedRemoteStage.empty())
+				{
+					remoteStage = parsedRemoteStage;
+				}
 			}
 
 			// Preserve legacy auto behavior when no explicit supply source was requested.
+			// Coverage-driven sprawl requests must reach the remote source selector below.
 			std::string buildReason;
 			const std::string requestId = getRequestIdForLog(message);
-			if (requestedSupplyId <= 0)
+			if (requestedSupplyId <= 0 && !preferRemoteSupply)
 			{
 				if (executeGameBuildSupplyStashAuto(message, buildReason))
 				{
@@ -114,6 +133,10 @@
 					return false;
 				}
 				adapterLog("supply_stash_smart_auto_fallback request_id=%s reason=%s", requestId.c_str(), buildReason.c_str());
+			}
+			else if (requestedSupplyId <= 0 && preferRemoteSupply)
+			{
+				adapterLog("supply_stash_smart_auto_skipped request_id=%s reason=prefer_remote", requestId.c_str());
 			}
 
 			if (TheThingFactory == nullptr || TheGameLogic == nullptr)
@@ -185,7 +208,7 @@
 			{
 				if (preferRemoteSupply && hasRemoteOrigin)
 				{
-					selectedSupply = chooseRemoteSupplySource(sources, &remoteOrigin, player, true, avoidSupplyId);
+					selectedSupply = chooseRemoteSupplySource(sources, &remoteOrigin, player, true, avoidSupplyId, remoteMinDistance, remoteMaxDistance);
 				}
 				if (selectedSupply == nullptr)
 				{
@@ -229,14 +252,21 @@
 					angle);
 				if (preferRemoteSupply)
 				{
+					const Real selectedDist = supplyPos != nullptr
+						? std::sqrt(distanceSq2D(supplyPos, &remoteOrigin))
+						: 0.0f;
 					adapterLog(
-						"supply_stash_remote_selection request_id=%s selected_supply=%d origin=(%.1f,%.1f) supply_pos=(%.1f,%.1f) reason=coverage_footprint",
+						"supply_stash_remote_selection request_id=%s selected_supply=%d origin=(%.1f,%.1f) supply_pos=(%.1f,%.1f) distance=%.1f min=%.1f max=%.1f stage=%s reason=coverage_footprint",
 						requestId.c_str(),
 						static_cast<int>(selectedSupply->getID()),
 						remoteOrigin.x,
 						remoteOrigin.y,
 						supplyPos != nullptr ? supplyPos->x : 0.0f,
-						supplyPos != nullptr ? supplyPos->y : 0.0f);
+						supplyPos != nullptr ? supplyPos->y : 0.0f,
+						selectedDist,
+						remoteMinDistance,
+						remoteMaxDistance,
+						remoteStage.c_str());
 				}
 				if (requestId.rfind("auto_", 0) == 0)
 				{

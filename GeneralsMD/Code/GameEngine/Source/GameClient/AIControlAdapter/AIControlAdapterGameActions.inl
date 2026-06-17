@@ -1160,12 +1160,17 @@
 			const Coord3D* remoteOrigin,
 			Player* player,
 			bool preferUnclaimed,
-			Int avoidSourceId = -1)
+			Int avoidSourceId = -1,
+			Real minDistance = 0.0f,
+			Real maxDistance = 0.0f)
 		{
 			Object* best = nullptr;
 			Real bestDistSq = 0.0f;
 			Object* bestUnclaimed = nullptr;
 			Real bestUnclaimedDistSq = 0.0f;
+			const Real minDistSq = std::max<Real>(0.0f, minDistance) * std::max<Real>(0.0f, minDistance);
+			const Real maxDistSq = std::max<Real>(0.0f, maxDistance) * std::max<Real>(0.0f, maxDistance);
+			const bool hasMaxDistance = maxDistance > 0.0f;
 
 			for (const SupplySourceInfo& info : sources)
 			{
@@ -1178,6 +1183,11 @@
 					continue;
 				}
 				const Real distSq = distanceSq2D(info.source->getPosition(), remoteOrigin);
+				const bool isUnclaimed = !hasNearbyOwnedSupplyDropoff(player, info.source, 430.0f);
+				if (distSq < minDistSq || (hasMaxDistance && distSq > maxDistSq))
+				{
+					continue;
+				}
 				if (best == nullptr || distSq > bestDistSq)
 				{
 					best = info.source;
@@ -1188,7 +1198,7 @@
 				{
 					continue;
 				}
-				if (hasNearbyOwnedSupplyDropoff(player, info.source, 430.0f))
+				if (!isUnclaimed)
 				{
 					continue;
 				}
@@ -1203,7 +1213,11 @@
 			{
 				return bestUnclaimed;
 			}
-			return best;
+			if (best != nullptr)
+			{
+				return best;
+			}
+			return nullptr;
 		}
 
 		bool findBuildLocationNearSupply(Player* player, Object* worker, Object* supplySource, const ThingTemplate* buildingTemplate, Coord3D& outLocation, Real& outAngle)
