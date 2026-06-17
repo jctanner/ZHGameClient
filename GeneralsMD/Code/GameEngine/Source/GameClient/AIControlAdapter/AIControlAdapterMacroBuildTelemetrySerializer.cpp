@@ -117,6 +117,8 @@ nlohmann::json AIControlAdapterMacroBuildTelemetrySerializer::BuildTelemetry(
 			{"should_attempt", macroTelemetry.expansionShouldAttempt},
 			{"decision_reason", safeString(macroTelemetry.expansionDecisionReason, "target_reached")},
 			{"urgent", macroTelemetry.expansionIsUrgent},
+			{"max_in_progress", macroTelemetry.maxConcurrentExpansionStashes},
+			{"concurrency_reason", safeString(macroTelemetry.expansionConcurrencyReason, "profile_cap")},
 			{"coverage_urgent", macroTelemetry.coverageExpansionUrgent},
 			{"prefer_remote", macroTelemetry.preferRemoteSupplyExpansion},
 			{"remote_supply", macroTelemetry.remoteSupplyZoneCount},
@@ -203,7 +205,7 @@ std::vector<std::string> AIControlAdapterMacroBuildTelemetrySerializer::BuildExp
 		telemetry.coverageExpansionUrgent ? 1 : 0,
 		safeString(telemetry.expansionReason, "target_reached")));
 	lines.push_back(formatLine(
-		"zone_expansion_request command=%s issued=%d reason=%s current=%d developed=%d desired=%d gap=%d cash_above_reserve=%lu in_progress=%d max_in_progress=%d throttled=%d is_urgent=%d",
+		"zone_expansion_request command=%s issued=%d reason=%s current=%d developed=%d desired=%d gap=%d cash_above_reserve=%lu in_progress=%d max_in_progress=%d concurrency_reason=%s throttled=%d is_urgent=%d",
 		safeString(telemetry.expansionCommand, "none"),
 		telemetry.expansionShouldAttempt ? 1 : 0,
 		safeString(telemetry.expansionDecisionReason, "target_reached"),
@@ -214,15 +216,17 @@ std::vector<std::string> AIControlAdapterMacroBuildTelemetrySerializer::BuildExp
 		static_cast<unsigned long>(telemetry.cashAboveReserve),
 		telemetry.supplyStashesInProgress,
 		telemetry.maxConcurrentExpansionStashes,
+		safeString(telemetry.expansionConcurrencyReason, "profile_cap"),
 		telemetry.shouldThrottleExtraStashGrowth ? 1 : 0,
 		telemetry.expansionIsUrgent ? 1 : 0));
 	lines.push_back(formatLine(
-		"sprawl_expansion_throughput current=%d desired=%d gap=%d in_progress=%d max_in_progress=%d reserve=%lu cash_float=%lu footprint=%.1f remote_supply=%d desired_remote=%d prefer_remote=%d action=%s reason=%s",
+		"sprawl_expansion_throughput current=%d desired=%d gap=%d in_progress=%d max_in_progress=%d concurrency_reason=%s reserve=%lu cash_float=%lu footprint=%.1f remote_supply=%d desired_remote=%d prefer_remote=%d action=%s reason=%s",
 		telemetry.stashZoneCount,
 		telemetry.desiredZoneCount,
 		telemetry.zoneGap,
 		telemetry.supplyStashesInProgress,
 		telemetry.maxConcurrentExpansionStashes,
+		safeString(telemetry.expansionConcurrencyReason, "profile_cap"),
 		static_cast<unsigned long>(input.reserveCash),
 		static_cast<unsigned long>(telemetry.cashAboveReserve),
 		telemetry.supplyFootprintRadius,

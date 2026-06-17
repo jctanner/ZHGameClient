@@ -920,6 +920,8 @@ struct AIControlAdapterMacroExpansionDecision
 	int desiredRemoteSupplyZones = 0;
 	float desiredSupplyFootprintRadius = 0.0f;
 	unsigned int cashAboveReserve = 0u;
+	int maxConcurrentExpansionStashes = 1;
+	const char* concurrencyReason = "profile_cap";
 	bool reserveProtected = false;
 	bool cashFloatHigh = false;
 	bool countExpansionUrgent = false;

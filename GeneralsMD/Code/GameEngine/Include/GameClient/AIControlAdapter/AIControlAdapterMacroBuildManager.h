@@ -160,6 +160,7 @@ struct AIControlAdapterMacroBuildTelemetry
 	bool expansionIsUrgent = false;
 	int supplyStashesInProgress = 0;
 	int maxConcurrentExpansionStashes = 1;
+	const char* expansionConcurrencyReason = "profile_cap";
 	bool shouldThrottleExtraStashGrowth = false;
 	const char* zoneSeedCommand = nullptr;
 	const char* zoneSeedPackageStage = "none";

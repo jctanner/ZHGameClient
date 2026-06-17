@@ -33,7 +33,7 @@ int main()
 		expect(config.reserveCash == 10000u, "Manager should preserve balanced reserve");
 		expect(manager.ResolveReserveCashWithFloor(config, 5000u) == 10000u, "Manager should preserve balanced reserve above floor");
 		expect(config.sprawlSupplyCap == 30, "Manager should preserve balanced supply cap");
-		expect(config.normalMaxConcurrentExpansionStashes == 3, "Manager should preserve balanced expansion concurrency");
+		expect(config.normalMaxConcurrentExpansionStashes == 3, "Manager should preserve balanced normal expansion concurrency");
 		expect(config.allowExpansionBeforeFullRemoteFollowup, "Manager should preserve balanced remote follow-up policy");
 		expect(manager.ResolveGuardCadenceMs(config) == 7000u, "Manager should preserve balanced-sprawl guard cadence");
 		expect(manager.ResolveCombatArmyCapBase(config) == 100, "Manager should preserve balanced-sprawl army cap base");
