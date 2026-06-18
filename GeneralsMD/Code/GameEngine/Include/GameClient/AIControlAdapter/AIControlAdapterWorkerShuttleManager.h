@@ -37,10 +37,37 @@ struct AIControlAdapterWorkerShuttleAssignmentStatus
 	float technicalDistance = 999999.0f;
 };
 
+struct AIControlAdapterTechnicalScoutShuttleInput
+{
+	int readyScudStorms = 0;
+	bool scudTargetRefreshNeeded = false;
+	int availableTechnicals = 0;
+	int protectedTechnicals = 0;
+	int remoteBuildGap = 0;
+	int availableWorkers = 0;
+	int availableRpg = 0;
+	int availableRebels = 0;
+	int activeScoutTasks = 0;
+};
+
+struct AIControlAdapterTechnicalScoutShuttleDecision
+{
+	bool desired = false;
+	const char* mode = "pure_scout";
+	const char* reason = "not_needed";
+	int workerPassengers = 0;
+	int rpgPassengers = 0;
+	int rebelPassengers = 0;
+	bool allowProtectedTechnicalScout = false;
+};
+
 class AIControlAdapterWorkerShuttleManager
 {
 public:
 	int ResolveProtectedTechnicalCount(const nlohmann::json& glaUsaStrategyTelemetry) const;
+
+	AIControlAdapterTechnicalScoutShuttleDecision EvaluateTechnicalScoutShuttle(
+		const AIControlAdapterTechnicalScoutShuttleInput& input) const;
 
 	std::set<unsigned int> CollectProtectedTechnicalIds(
 		const std::vector<AIControlAdapterWorkerShuttleTechnicalSnapshot>& technicals,

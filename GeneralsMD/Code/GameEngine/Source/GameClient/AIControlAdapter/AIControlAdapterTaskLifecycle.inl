@@ -61,6 +61,16 @@ Real getObjectHealthForStrategicFoundation(Object* obj)
 	return body != nullptr ? body->getHealth() : -1.0f;
 }
 
+Real getObjectMaxHealthForStrategicFoundation(Object* obj)
+{
+	if (obj == nullptr)
+	{
+		return -1.0f;
+	}
+	BodyModuleInterface* body = obj->getBodyModule();
+	return body != nullptr ? body->getMaxHealth() : -1.0f;
+}
+
 bool hasActiveBuilderForFoundation(Player* player, ObjectID foundationId)
 {
 	if (player == nullptr || TheGameLogic == nullptr || static_cast<Int>(foundationId) <= 0)
@@ -191,16 +201,89 @@ void adoptOrphanFoundations(Player* player)
 				&tombstoneAgeMs,
 				&tombstoneReason))
 			{
-				if (m_autonomy.taskReservationManager.shouldLogFoundationTombstoneSkip(static_cast<unsigned int>(foundationId), now))
+				const Real currentHealth = getObjectHealthForStrategicFoundation(obj);
+				const Real maxHealth = getObjectMaxHealthForStrategicFoundation(obj);
+				const bool activeWmdThreat = m_autonomy.wmdTargetTracker.hasActiveWMDThreat();
+				const Money* wallet = player->getMoney();
+				const UnsignedInt currentMoney = wallet != nullptr ? wallet->countMoney() : 0u;
+				const auto profilePolicyConfig = resolveAutonomyProfilePolicyConfig();
+				const bool reserveProtected = currentMoney >= profilePolicyConfig.reserveCash + 5000u;
+				AutonomyStrategicFoundationState& strategicState =
+					m_autonomy.state.strategicFoundationHealth[static_cast<UnsignedInt>(foundationId)];
+				if (strategicState.firstSeenTick == 0u)
 				{
-					adapterLog(
-						"orphan_foundation_skip foundation=%u template=%s reason=tombstoned_%s age_ms=%u",
-						static_cast<unsigned int>(foundationId),
-						templateName.c_str(),
-						tombstoneReason.c_str(),
-						tombstoneAgeMs);
+					strategicState.firstSeenTick = now;
 				}
-				continue;
+				strategicState.templateName = templateName;
+				strategicState.x = foundationPos->x;
+				strategicState.y = foundationPos->y;
+				strategicState.z = foundationPos->z;
+				strategicState.lastSeenTick = now;
+				strategicState.lastHealth = currentHealth;
+				strategicState.maxHealth = maxHealth;
+				AIControlAdapterStrategicFoundationFact fact;
+				fact.foundationId = static_cast<unsigned int>(foundationId);
+				fact.templateName = templateName;
+				fact.x = foundationPos->x;
+				fact.y = foundationPos->y;
+				fact.lastHealth = currentHealth;
+				fact.maxHealth = maxHealth;
+				fact.nowTick = now;
+				fact.firstSeenTick = strategicState.firstSeenTick;
+				fact.lastSeenTick = strategicState.lastSeenTick;
+				fact.lastProgressTick = strategicState.lastProgressTick;
+				fact.recoveryAttempts = strategicState.recoveryAttempts;
+				fact.stopIssued = strategicState.stopIssued;
+				fact.tombstoned = true;
+				fact.activeWmdThreat = activeWmdThreat;
+				fact.reason = strategicState.reason.empty() ? tombstoneReason : strategicState.reason;
+				const AIControlAdapterStrategicFoundationClassification classification =
+					AIControlAdapterStrategicFoundationSurvivalManager().Classify(fact);
+				if (classification.recoverable && reserveProtected)
+				{
+					m_autonomy.taskReservationManager.clearFoundationTombstone(static_cast<unsigned int>(foundationId));
+					strategicState.stopIssued = false;
+					strategicState.reason = "scud_wmd_recovery_override";
+					strategicState.recoveryAttempts = 0;
+					strategicState.lastProgressTick = now;
+					strategicState.lastRecoveryTick = 0u;
+					adapterLog(
+						"scud_foundation_tombstone_override foundation=%u issued=1 reason=%s age_ms=%u",
+						static_cast<unsigned int>(foundationId),
+						classification.reason,
+						tombstoneAgeMs);
+					adapterLog(
+						"scud_foundation_recovery foundation=%u action=resume reason=%s health=%.1f progress=%.2f worker=0 tombstoned=1",
+						static_cast<unsigned int>(foundationId),
+						"tombstone_override_recovery",
+						currentHealth,
+						maxHealth > 0.0f ? currentHealth / maxHealth : -1.0f);
+				}
+				else
+				{
+					const char* skipReason = !classification.recoverable ? classification.reason : "reserve_protected";
+					adapterLog(
+						"scud_foundation_tombstone_override foundation=%u issued=0 reason=%s age_ms=%u",
+						static_cast<unsigned int>(foundationId),
+						skipReason,
+						tombstoneAgeMs);
+					adapterLog(
+						"scud_foundation_recovery foundation=%u action=skip reason=%s health=%.1f progress=%.2f worker=0 tombstoned=1",
+						static_cast<unsigned int>(foundationId),
+						skipReason,
+						currentHealth,
+						maxHealth > 0.0f ? currentHealth / maxHealth : -1.0f);
+					if (m_autonomy.taskReservationManager.shouldLogFoundationTombstoneSkip(static_cast<unsigned int>(foundationId), now))
+					{
+						adapterLog(
+							"orphan_foundation_skip foundation=%u template=%s reason=tombstoned_%s age_ms=%u",
+							static_cast<unsigned int>(foundationId),
+							templateName.c_str(),
+							tombstoneReason.c_str(),
+							tombstoneAgeMs);
+					}
+					continue;
+				}
 			}
 
 			// Check if anyone is actively building it
@@ -464,6 +547,7 @@ void updateConstructionTaskLifecycle(Player* player)
 						foundationState.templateName = task->expectedTemplate;
 						foundationState.lastSeenTick = now;
 						const Real currentHealth = getObjectHealthForStrategicFoundation(foundFoundation);
+						foundationState.maxHealth = getObjectMaxHealthForStrategicFoundation(foundFoundation);
 						if (foundationState.lastHealth < 0.0f || currentHealth > foundationState.lastHealth + 1.0f)
 						{
 							foundationState.lastProgressTick = now;
@@ -671,6 +755,7 @@ void attemptAbandonedFoundationRecovery(Player* player)
 			strategicState->z = foundationPos->z;
 			strategicState->lastSeenTick = now;
 			const Real currentHealth = getObjectHealthForStrategicFoundation(foundation);
+			strategicState->maxHealth = getObjectMaxHealthForStrategicFoundation(foundation);
 			if (strategicState->lastHealth < 0.0f || currentHealth > strategicState->lastHealth + 1.0f)
 			{
 				strategicState->lastProgressTick = now;
@@ -983,6 +1068,25 @@ void attemptAbandonedFoundationRecovery(Player* player)
 					static_cast<unsigned int>(bestWorker->getID()),
 					buildCommandIssued ? 1 : 0,
 					buildCommandIssued ? "replacement_worker" : "resume_failed_move_fallback");
+				if (containsIgnoreCase(task->expectedTemplate, "scudstorm"))
+				{
+					const Real currentHealth = getObjectHealthForStrategicFoundation(foundation);
+					const Real maxHealth = getObjectMaxHealthForStrategicFoundation(foundation);
+					DWORD tombstoneAgeMs = 0u;
+					const bool tombstoned = m_autonomy.taskReservationManager.isFoundationTombstoned(
+						static_cast<unsigned int>(foundation->getID()),
+						now,
+						&tombstoneAgeMs,
+						nullptr);
+					adapterLog(
+						"scud_foundation_recovery foundation=%u action=reassign reason=%s health=%.1f progress=%.2f worker=%u tombstoned=%d",
+						static_cast<unsigned int>(foundation->getID()),
+						buildCommandIssued ? "resume_construction" : "resume_failed_move_fallback",
+						currentHealth,
+						maxHealth > 0.0f ? currentHealth / maxHealth : -1.0f,
+						static_cast<unsigned int>(bestWorker->getID()),
+						tombstoned ? 1 : 0);
+				}
 			}
 
 			// Update task: reset stalled state and update source worker
@@ -1008,6 +1112,23 @@ void attemptAbandonedFoundationRecovery(Player* player)
 						"strategic_foundation_recovery template=%s foundation=%u worker=0 issued=0 reason=no_local_worker",
 						task->expectedTemplate.c_str(),
 						static_cast<unsigned int>(foundation->getID()));
+					if (containsIgnoreCase(task->expectedTemplate, "scudstorm"))
+					{
+						const Real currentHealth = getObjectHealthForStrategicFoundation(foundation);
+						const Real maxHealth = getObjectMaxHealthForStrategicFoundation(foundation);
+						DWORD tombstoneAgeMs = 0u;
+						const bool tombstoned = m_autonomy.taskReservationManager.isFoundationTombstoned(
+							static_cast<unsigned int>(foundation->getID()),
+							now,
+							&tombstoneAgeMs,
+							nullptr);
+						adapterLog(
+							"scud_foundation_recovery foundation=%u action=skip reason=no_local_worker health=%.1f progress=%.2f worker=0 tombstoned=%d",
+							static_cast<unsigned int>(foundation->getID()),
+							currentHealth,
+							maxHealth > 0.0f ? currentHealth / maxHealth : -1.0f,
+							tombstoned ? 1 : 0);
+					}
 					continue;
 				}
 				m_autonomy.taskReservationManager.failTask(task->taskId, "recovery_timeout_no_worker");

@@ -16,12 +16,15 @@ struct AIControlAdapterStrategicFoundationFact
 	float x = 0.0f;
 	float y = 0.0f;
 	float lastHealth = -1.0f;
+	float maxHealth = -1.0f;
 	unsigned int nowTick = 0u;
 	unsigned int firstSeenTick = 0u;
 	unsigned int lastSeenTick = 0u;
 	unsigned int lastProgressTick = 0u;
 	int recoveryAttempts = 0;
 	bool stopIssued = false;
+	bool tombstoned = false;
+	bool activeWmdThreat = false;
 	std::string reason;
 };
 
@@ -31,6 +34,8 @@ struct AIControlAdapterStrategicFoundationClassification
 	const char* reason = "not_evaluated";
 	bool failed = false;
 	bool rebuildBlocked = false;
+	bool recoverable = false;
+	bool tombstoned = false;
 };
 
 struct AIControlAdapterScudStormRebuildBlockInput

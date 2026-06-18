@@ -288,6 +288,7 @@ namespace
 	{
 		std::string templateName;
 		Real lastHealth = -1.0f;
+		Real maxHealth = -1.0f;
 		Real x = 0.0f;
 		Real y = 0.0f;
 		Real z = 0.0f;
@@ -8520,6 +8521,50 @@ namespace
 			const int inProgressScudStorms = scudStormTelCtx.healthyUnderConstructionCount + scudStormBuildTasks;
 			const int desiredScudStorms = 10;
 			const int effectiveScudStorms = readyScudStorms + inProgressScudStorms;
+			const AIControlAdapterStrategicFoundationSurvivalManager foundationSurvivalManager;
+			int recoverableScudFoundations = 0;
+			int tombstonedScudFoundations = 0;
+			for (const auto& pair : m_autonomy.state.strategicFoundationHealth)
+			{
+				const AutonomyStrategicFoundationState& state = pair.second;
+				if (!containsIgnoreCase(state.templateName, "scudstorm"))
+				{
+					continue;
+				}
+				AIControlAdapterStrategicFoundationFact fact;
+				fact.foundationId = pair.first;
+				fact.templateName = state.templateName;
+				fact.x = state.x;
+				fact.y = state.y;
+				fact.lastHealth = state.lastHealth;
+				fact.maxHealth = state.maxHealth;
+				fact.nowTick = telemetryNow;
+				fact.firstSeenTick = state.firstSeenTick;
+				fact.lastSeenTick = state.lastSeenTick;
+				fact.lastProgressTick = state.lastProgressTick;
+				fact.recoveryAttempts = state.recoveryAttempts;
+				fact.stopIssued = state.stopIssued;
+				fact.tombstoned = m_autonomy.taskReservationManager.isFoundationTombstoned(
+					static_cast<unsigned int>(pair.first),
+					telemetryNow);
+				fact.activeWmdThreat = hasWMDThreat;
+				fact.reason = state.reason;
+				const AIControlAdapterStrategicFoundationClassification classification =
+					foundationSurvivalManager.Classify(fact);
+				if (classification.recoverable)
+				{
+					++recoverableScudFoundations;
+				}
+				if (classification.tombstoned)
+				{
+					++tombstonedScudFoundations;
+				}
+			}
+			if (tombstonedScudFoundations == 0)
+			{
+				tombstonedScudFoundations =
+					m_autonomy.taskReservationManager.getActiveFoundationTombstoneCount("ScudStorm", telemetryNow);
+			}
 			std::vector<AIControlAdapterScudStormStrategicTargetCandidate> scudStormStrategicCandidates;
 			for (const EnemyMemoryItem& item : m_autonomy.enemyMemory.getItems())
 			{
@@ -8579,6 +8624,8 @@ namespace
 					{"in_progress", inProgressScudStorms},
 					{"ready", readyScudStorms},
 					{"stale_stopped", scudStormTelCtx.stoppedFoundationCount},
+					{"recoverable", recoverableScudFoundations},
+					{"tombstoned", tombstonedScudFoundations},
 					{"destroyed", 0},
 					{"production_needed", effectiveScudStorms < desiredScudStorms},
 					{"strategic_target", scudStormStrategicTargetTelemetry},
@@ -8591,7 +8638,6 @@ namespace
 				})}
 			});
 			nlohmann::json strategicFoundations = nlohmann::json::array();
-			const AIControlAdapterStrategicFoundationSurvivalManager foundationSurvivalManager;
 			for (const auto& pair : m_autonomy.state.strategicFoundationHealth)
 			{
 				const AutonomyStrategicFoundationState& state = pair.second;
@@ -8601,12 +8647,17 @@ namespace
 				fact.x = state.x;
 				fact.y = state.y;
 				fact.lastHealth = state.lastHealth;
+				fact.maxHealth = state.maxHealth;
 				fact.nowTick = telemetryNow;
 				fact.firstSeenTick = state.firstSeenTick;
 				fact.lastSeenTick = state.lastSeenTick;
 				fact.lastProgressTick = state.lastProgressTick;
 				fact.recoveryAttempts = state.recoveryAttempts;
 				fact.stopIssued = state.stopIssued;
+				fact.tombstoned = m_autonomy.taskReservationManager.isFoundationTombstoned(
+					static_cast<unsigned int>(pair.first),
+					telemetryNow);
+				fact.activeWmdThreat = m_autonomy.wmdTargetTracker.hasActiveWMDThreat();
 				fact.reason = state.reason;
 				const AIControlAdapterStrategicFoundationClassification classification =
 					foundationSurvivalManager.Classify(fact);
@@ -8620,6 +8671,7 @@ namespace
 					{"foundation_id", pair.first},
 					{"template", state.templateName},
 					{"last_health", state.lastHealth},
+					{"max_health", state.maxHealth},
 					{"position", nlohmann::json::object({
 						{"x", state.x},
 						{"y", state.y},
@@ -8633,6 +8685,8 @@ namespace
 					{"state", classification.state},
 					{"failed", classification.failed},
 					{"rebuild_blocked", classification.rebuildBlocked},
+					{"recoverable", classification.recoverable},
+					{"tombstoned", classification.tombstoned},
 					{"reason", state.reason}
 				}));
 			}
@@ -11576,7 +11630,14 @@ namespace
 			}
 		}
 
-		std::vector<unsigned int> selectDedicatedScoutUnitIds(Player* player, const Coord3D& objective, bool scudTargetStarved, bool allowLateFallback, ScoutAvailabilityStats* outStats, bool relaxDefenseFloor = false)
+		std::vector<unsigned int> selectDedicatedScoutUnitIds(
+			Player* player,
+			const Coord3D& objective,
+			bool scudTargetStarved,
+			bool allowLateFallback,
+			ScoutAvailabilityStats* outStats,
+			bool relaxDefenseFloor = false,
+			bool allowWorkerShuttleTechnical = false)
 		{
 			std::vector<CombatTaskScoutCandidate> candidates;
 			std::vector<AutomationOwnedObjectSnapshot> ownedObjects;
@@ -11596,7 +11657,8 @@ namespace
 					!isGarrisonReservedUnit(unitId) &&
 					(!isUnitProtectedByZoneDefenseFloor(owned.object) || (relaxDefenseFloor && canRelaxScoutDefenseFloorForUnit(owned.object))) &&
 					!m_autonomy.combatTaskManager.isUnitReserved(unitId) &&
-					!isWorkerShuttleTechnicalProtected(player, owned))
+					(!isWorkerShuttleTechnicalProtected(player, owned)
+						|| (allowWorkerShuttleTechnical && !isTechnicalAssignedToWorkerShuttle(unitId))))
 				{
 					hasAvailableTechnical = true;
 					break;
@@ -11660,6 +11722,10 @@ namespace
 					containsIgnoreCase(owned.name, "nuke") ||
 					containsIgnoreCase(owned.name, "inferno");
 				candidate.workerShuttleReserved = owned.isTechnical && isWorkerShuttleTechnicalProtected(player, owned);
+				if (allowWorkerShuttleTechnical && candidate.workerShuttleReserved && !isTechnicalAssignedToWorkerShuttle(unitId))
+				{
+					candidate.workerShuttleReserved = false;
+				}
 				if (owned.isTechnical)
 				{
 					candidate.preference = 100;
@@ -11736,6 +11802,188 @@ namespace
 			return selected;
 		}
 
+		struct TechnicalScoutShuttlePassengerPlan
+		{
+			std::vector<unsigned int> passengerIds;
+			int workers = 0;
+			int rpg = 0;
+			int rebels = 0;
+			bool partial = false;
+			std::string reason = "not_planned";
+		};
+
+		bool isTechnicalScoutShuttleRpgPassenger(const AutomationOwnedObjectSnapshot& owned) const
+		{
+			return owned.isInfantry &&
+				(containsIgnoreCase(owned.name, "tunneldefender") ||
+				 containsIgnoreCase(owned.name, "rpg") ||
+				 containsIgnoreCase(owned.name, "rocket"));
+		}
+
+		bool isTechnicalScoutShuttleRebelPassenger(const AutomationOwnedObjectSnapshot& owned) const
+		{
+			return owned.isInfantry && containsIgnoreCase(owned.name, "rebel");
+		}
+
+		int countAvailableTechnicalScoutShuttlePassengers(
+			Player* player,
+			const Coord3D& anchor,
+			int& outWorkers,
+			int& outRpg,
+			int& outRebels)
+		{
+			outWorkers = 0;
+			outRpg = 0;
+			outRebels = 0;
+			std::vector<AutomationOwnedObjectSnapshot> ownedObjects;
+			collectOwnedAutomationObjects(player, ownedObjects);
+			for (const AutomationOwnedObjectSnapshot& owned : ownedObjects)
+			{
+				if (owned.object == nullptr || owned.isStructure || owned.underConstruction || owned.object->getContainedBy() != nullptr)
+				{
+					continue;
+				}
+				const UnsignedInt unitId = static_cast<UnsignedInt>(owned.object->getID());
+				if (m_autonomy.taskReservationManager.isObjectReserved(unitId)
+					|| m_autonomy.combatTaskManager.isUnitReserved(unitId)
+					|| isGarrisonReservedUnit(unitId)
+					|| isUnitProtectedByZoneDefenseFloor(owned.object))
+				{
+					continue;
+				}
+				const Coord3D* pos = owned.object->getPosition();
+				if (pos == nullptr)
+				{
+					continue;
+				}
+				const Real dx = pos->x - anchor.x;
+				const Real dy = pos->y - anchor.y;
+				if ((dx * dx) + (dy * dy) > 1000.0f * 1000.0f)
+				{
+					continue;
+				}
+				if (owned.isDozer && isWorkerAvailableForNewBuild(owned.object))
+				{
+					++outWorkers;
+				}
+				else if (isTechnicalScoutShuttleRpgPassenger(owned))
+				{
+					++outRpg;
+				}
+				else if (isTechnicalScoutShuttleRebelPassenger(owned))
+				{
+					++outRebels;
+				}
+			}
+			return outWorkers + outRpg + outRebels;
+		}
+
+		TechnicalScoutShuttlePassengerPlan buildTechnicalScoutShuttlePassengerPlan(
+			Player* player,
+			Object* technical,
+			const AIControlAdapterTechnicalScoutShuttleDecision& decision)
+		{
+			TechnicalScoutShuttlePassengerPlan plan;
+			if (player == nullptr || technical == nullptr || !decision.desired)
+			{
+				plan.reason = "policy_not_desired";
+				return plan;
+			}
+			const Coord3D* anchor = technical->getPosition();
+			if (anchor == nullptr)
+			{
+				plan.reason = "technical_position_missing";
+				return plan;
+			}
+			const int desiredWorkers = std::max(0, decision.workerPassengers);
+			const int desiredRpg = std::max(0, decision.rpgPassengers);
+			const int desiredRebels = std::max(0, decision.rebelPassengers);
+			std::vector<AutomationOwnedObjectSnapshot> ownedObjects;
+			collectOwnedAutomationObjects(player, ownedObjects);
+			auto tryAppend = [&](const AutomationOwnedObjectSnapshot& owned, const char* kind) -> bool
+			{
+				if (owned.object == nullptr || owned.isStructure || owned.underConstruction || owned.object->getContainedBy() != nullptr)
+				{
+					return false;
+				}
+				const UnsignedInt unitId = static_cast<UnsignedInt>(owned.object->getID());
+				if (m_autonomy.taskReservationManager.isObjectReserved(unitId)
+					|| m_autonomy.combatTaskManager.isUnitReserved(unitId)
+					|| isGarrisonReservedUnit(unitId)
+					|| isUnitProtectedByZoneDefenseFloor(owned.object))
+				{
+					return false;
+				}
+				const Coord3D* pos = owned.object->getPosition();
+				if (pos == nullptr)
+				{
+					return false;
+				}
+				const Real dx = pos->x - anchor->x;
+				const Real dy = pos->y - anchor->y;
+				if ((dx * dx) + (dy * dy) > 1000.0f * 1000.0f)
+				{
+					return false;
+				}
+				if (TheActionManager != nullptr
+					&& !TheActionManager->canEnterObject(owned.object, technical, CMD_FROM_PLAYER, CHECK_CAPACITY))
+				{
+					return false;
+				}
+				plan.passengerIds.push_back(static_cast<unsigned int>(unitId));
+				if (std::string(kind) == "worker")
+				{
+					++plan.workers;
+				}
+				else if (std::string(kind) == "rpg")
+				{
+					++plan.rpg;
+				}
+				else
+				{
+					++plan.rebels;
+				}
+				return true;
+			};
+			for (const AutomationOwnedObjectSnapshot& owned : ownedObjects)
+			{
+				if (plan.workers >= desiredWorkers)
+				{
+					break;
+				}
+				if (owned.isDozer && isWorkerAvailableForNewBuild(owned.object))
+				{
+					tryAppend(owned, "worker");
+				}
+			}
+			for (const AutomationOwnedObjectSnapshot& owned : ownedObjects)
+			{
+				if (plan.rpg >= desiredRpg)
+				{
+					break;
+				}
+				if (isTechnicalScoutShuttleRpgPassenger(owned))
+				{
+					tryAppend(owned, "rpg");
+				}
+			}
+			for (const AutomationOwnedObjectSnapshot& owned : ownedObjects)
+			{
+				if (plan.rebels >= desiredRebels)
+				{
+					break;
+				}
+				if (isTechnicalScoutShuttleRebelPassenger(owned))
+				{
+					tryAppend(owned, "rebel");
+				}
+			}
+			const int desiredTotal = desiredWorkers + desiredRpg + desiredRebels;
+			plan.partial = static_cast<int>(plan.passengerIds.size()) < desiredTotal;
+			plan.reason = plan.passengerIds.empty() ? "no_passengers_loaded" : (plan.partial ? "partial_loadout" : "planned_loadout");
+			return plan;
+		}
+
 		bool issueScoutWaypointCommand(Player* player, CombatTask& task, const std::string& reason)
 		{
 			if (player == nullptr || task.assignedUnitIds.empty() || task.waypoints.empty())
@@ -11744,6 +11992,84 @@ namespace
 			}
 			const int waypointIndex = std::max(0, std::min(task.currentWaypointIndex, static_cast<int>(task.waypoints.size()) - 1));
 			const CombatTaskWaypoint& waypoint = task.waypoints[static_cast<std::size_t>(waypointIndex)];
+			const DWORD now = ::GetTickCount();
+			if (task.scoutShuttle && !task.scoutShuttleLoadIssued)
+			{
+				int issued = 0;
+				for (unsigned int passengerId : task.scoutShuttlePassengerIds)
+				{
+					Object* passenger = TheGameLogic != nullptr ? TheGameLogic->findObjectByID(static_cast<ObjectID>(passengerId)) : nullptr;
+					Object* technical = TheGameLogic != nullptr && !task.assignedUnitIds.empty()
+						? TheGameLogic->findObjectByID(static_cast<ObjectID>(task.assignedUnitIds[0]))
+						: nullptr;
+					std::string enterReason;
+					const bool ok = issueWorkerEnterTechnical(player, passenger, technical, enterReason);
+					if (ok)
+					{
+						++issued;
+					}
+					adapterLog(
+						"technical_scout_shuttle_load passenger=%u technical=%u issued=%d reason=%s",
+						passengerId,
+						technical != nullptr ? static_cast<unsigned int>(technical->getID()) : 0u,
+						ok ? 1 : 0,
+						enterReason.c_str());
+				}
+				task.scoutShuttleLoadIssued = true;
+				task.lastCommandTick = now;
+				task.currentWaypointStartTick = now;
+				m_autonomy.combatTaskManager.updateTaskCommand(task.taskId, now);
+				m_autonomy.combatTaskManager.updateTaskState(task.taskId, CombatTaskState::Forming, "scout_shuttle_loading");
+				adapterLog(
+					"technical_scout_shuttle_loadout task=%u technical=%u workers=%d rpg=%d rebels=%d partial=%d issued=%d reason=%s",
+					task.taskId,
+					!task.assignedUnitIds.empty() ? task.assignedUnitIds[0] : 0u,
+					task.scoutShuttleWorkerPassengers,
+					task.scoutShuttleRpgPassengers,
+					task.scoutShuttleRebelPassengers,
+					task.scoutShuttlePartialLoadout ? 1 : 0,
+					issued,
+					task.scoutShuttleReason.c_str());
+				return true;
+			}
+			if (task.scoutShuttle && !task.scoutShuttleEvacuateIssued && waypointIndex == 0)
+			{
+				int issued = 0;
+				std::string commandReason = "no_technical";
+				for (unsigned int unitId : task.assignedUnitIds)
+				{
+					Object* technical = TheGameLogic != nullptr ? TheGameLogic->findObjectByID(static_cast<ObjectID>(unitId)) : nullptr;
+					std::string moveReason;
+					const bool ok = issueTechnicalMoveAndEvacuate(technical, waypoint.position, moveReason);
+					commandReason = moveReason;
+					if (ok)
+					{
+						++issued;
+						adapterLog(
+							"technical_scout_shuttle_drop technical=%u passenger=0 kind=mixed x=%.1f y=%.1f reason=move_and_evacuate",
+							unitId,
+							waypoint.position.x,
+							waypoint.position.y);
+					}
+				}
+				task.scoutShuttleEvacuateIssued = issued > 0;
+				if (issued > 0)
+				{
+					m_autonomy.combatTaskManager.updateTaskCommand(task.taskId, now);
+					m_autonomy.combatTaskManager.updateTaskState(task.taskId, CombatTaskState::MovingToStage, reason);
+					task.currentWaypointStartTick = now;
+				}
+				adapterLog(
+					"scout_command task=%u action=move_and_evacuate waypoint=%d units=%d x=%.1f y=%.1f issued=%d reason=%s",
+					task.taskId,
+					waypointIndex,
+					static_cast<int>(task.assignedUnitIds.size()),
+					waypoint.position.x,
+					waypoint.position.y,
+					issued,
+					issued > 0 ? reason.c_str() : commandReason.c_str());
+				return issued > 0;
+			}
 			nlohmann::json objectIds = nlohmann::json::array();
 			for (unsigned int unitId : task.assignedUnitIds)
 			{
@@ -11766,7 +12092,6 @@ namespace
 			};
 			std::string commandReason;
 			const bool ok = executeGameMove(message, commandReason);
-			const DWORD now = ::GetTickCount();
 			if (ok)
 			{
 				m_autonomy.combatTaskManager.updateTaskCommand(task.taskId, now);
@@ -11978,6 +12303,110 @@ namespace
 				objective.objectiveId != 0u ? selectDedicatedScoutUnitIds(player, objective.position, scudTargetStarved, readyScuds >= 4, &scoutAvailability) : std::vector<unsigned int>();
 			const int activeScouts = m_autonomy.combatTaskManager.getScoutTaskCount();
 			const int maxActiveScouts = scudTargetRefreshNeeded && readyScuds >= 4 ? 2 : 1;
+			const int protectedShuttleTechnicals = resolveWorkerShuttleProtectedTechnicalCount();
+			Coord3D scoutShuttleAnchor = objective.position;
+			bool hasScoutShuttleAnchor = false;
+			if (!scoutUnits.empty() && TheGameLogic != nullptr)
+			{
+				Object* scoutUnit = TheGameLogic->findObjectByID(static_cast<ObjectID>(scoutUnits[0]));
+				const Coord3D* pos = scoutUnit != nullptr ? scoutUnit->getPosition() : nullptr;
+				if (pos != nullptr)
+				{
+					scoutShuttleAnchor = *pos;
+					hasScoutShuttleAnchor = true;
+				}
+			}
+			if (!hasScoutShuttleAnchor && protectedShuttleTechnicals > 0 && TheGameLogic != nullptr)
+			{
+				const std::set<UnsignedInt> protectedIds = collectWorkerShuttleProtectedTechnicalIds(player);
+				for (UnsignedInt id : protectedIds)
+				{
+					if (isTechnicalAssignedToWorkerShuttle(id))
+					{
+						continue;
+					}
+					Object* technical = TheGameLogic->findObjectByID(static_cast<ObjectID>(id));
+					const Coord3D* pos = technical != nullptr ? technical->getPosition() : nullptr;
+					if (pos != nullptr)
+					{
+						scoutShuttleAnchor = *pos;
+						hasScoutShuttleAnchor = true;
+						break;
+					}
+				}
+			}
+			int scoutShuttleWorkers = 0;
+			int scoutShuttleRpg = 0;
+			int scoutShuttleRebels = 0;
+			if (hasScoutShuttleAnchor)
+			{
+				countAvailableTechnicalScoutShuttlePassengers(
+					player,
+					scoutShuttleAnchor,
+					scoutShuttleWorkers,
+					scoutShuttleRpg,
+					scoutShuttleRebels);
+			}
+			const int remoteBuildGap = m_autonomy.state.glaUsaStrategyTelemetry.is_object()
+				? m_autonomy.state.glaUsaStrategyTelemetry.value("worker_mobility", nlohmann::json::object()).value("remote_gap", 0)
+				: 0;
+			AIControlAdapterTechnicalScoutShuttleDecision scoutShuttleDecision =
+				m_workerShuttleManager.EvaluateTechnicalScoutShuttle({
+					readyScuds,
+					scudTargetRefreshNeeded,
+					std::max<int>(static_cast<int>(scoutUnits.size()), scoutPoolLive - activeScoutAssignments),
+					protectedShuttleTechnicals,
+					remoteBuildGap,
+					scoutShuttleWorkers,
+					scoutShuttleRpg,
+					scoutShuttleRebels,
+					activeScouts
+				});
+			TechnicalScoutShuttlePassengerPlan scoutShuttlePlan;
+			if (scoutShuttleDecision.desired && objective.objectiveId != 0u)
+			{
+				ScoutAvailabilityStats shuttleAvailability;
+				std::vector<unsigned int> shuttleScoutUnits =
+					selectDedicatedScoutUnitIds(
+						player,
+						objective.position,
+						scudTargetStarved,
+						readyScuds >= 4,
+						&shuttleAvailability,
+						false,
+						scoutShuttleDecision.allowProtectedTechnicalScout);
+				std::vector<unsigned int> technicalOnly;
+				for (unsigned int unitId : shuttleScoutUnits)
+				{
+					Object* unit = TheGameLogic != nullptr ? TheGameLogic->findObjectByID(static_cast<ObjectID>(unitId)) : nullptr;
+					const ThingTemplate* tt = unit != nullptr ? unit->getTemplate() : nullptr;
+					const std::string name = tt != nullptr ? tt->getName().str() : "";
+					if (containsIgnoreCase(name, "technical"))
+					{
+						technicalOnly.push_back(unitId);
+						break;
+					}
+				}
+				if (!technicalOnly.empty())
+				{
+					scoutUnits = technicalOnly;
+					scoutAvailability = shuttleAvailability;
+					Object* technical = TheGameLogic != nullptr ? TheGameLogic->findObjectByID(static_cast<ObjectID>(scoutUnits[0])) : nullptr;
+					scoutShuttlePlan = buildTechnicalScoutShuttlePassengerPlan(player, technical, scoutShuttleDecision);
+					if (scoutShuttlePlan.passengerIds.empty())
+					{
+						scoutShuttleDecision.desired = false;
+						scoutShuttleDecision.mode = "pure_scout";
+						scoutShuttleDecision.reason = "passenger_plan_empty";
+					}
+				}
+				else
+				{
+					scoutShuttleDecision.desired = false;
+					scoutShuttleDecision.mode = "pure_scout";
+					scoutShuttleDecision.reason = "no_technical_for_shuttle";
+				}
+			}
 			CombatTaskScoutPolicyDecision decision = evaluateCombatTaskScoutPolicy({
 				readyScuds,
 				freshTargets,
@@ -12049,6 +12478,21 @@ namespace
 				{"active_scout_tasks", activeScouts},
 				{"scout_units_assigned", 0},
 				{"available_scout_candidates", static_cast<int>(scoutUnits.size())},
+				{"scout_shuttle_desired", scoutShuttleDecision.desired},
+				{"scout_shuttle_mode", scoutShuttleDecision.mode},
+				{"scout_shuttle_reason", scoutShuttleDecision.reason},
+				{"scout_shuttle_candidates", scoutPoolLive},
+				{"scout_shuttle_reserved", protectedShuttleTechnicals},
+				{"scout_shuttle_passenger_intent", nlohmann::json::object({
+					{"workers", scoutShuttleDecision.workerPassengers},
+					{"rpg", scoutShuttleDecision.rpgPassengers},
+					{"rebels", scoutShuttleDecision.rebelPassengers},
+					{"planned_workers", scoutShuttlePlan.workers},
+					{"planned_rpg", scoutShuttlePlan.rpg},
+					{"planned_rebels", scoutShuttlePlan.rebels},
+					{"partial", scoutShuttlePlan.partial},
+					{"reason", scoutShuttlePlan.reason}
+				})},
 				{"scout_objective_count", static_cast<int>(objectives.size())},
 				{"scout_pool_desired", scoutPoolDecision.desiredTechnicals},
 				{"scout_pool_live", scoutPoolLive},
@@ -12088,6 +12532,14 @@ namespace
 				freshTargets,
 				staleTargets,
 				static_cast<int>(scoutUnits.size()));
+			adapterLog(
+				"technical_scout_shuttle_policy desired=%d mode=%s reason=%s ready_scuds=%d available_technicals=%d protected_technicals=%d",
+				scoutShuttleDecision.desired ? 1 : 0,
+				scoutShuttleDecision.mode,
+				scoutShuttleDecision.reason,
+				readyScuds,
+				scoutPoolLive,
+				protectedShuttleTechnicals);
 			adapterLog(
 				"scud_target_refresh mode=%s ready_scuds=%d fresh_targets=%d stale_targets=%d likely_regions=%d reason=%s",
 				decision.mode,
@@ -12176,6 +12628,17 @@ namespace
 			task->currentWaypointIndex = 0;
 			task->minimumViableCount = 1;
 			task->state = CombatTaskState::Forming;
+			if (scoutShuttleDecision.desired && !scoutShuttlePlan.passengerIds.empty())
+			{
+				task->scoutShuttle = true;
+				task->scoutShuttlePassengerIds = scoutShuttlePlan.passengerIds;
+				task->scoutShuttlePartialLoadout = scoutShuttlePlan.partial;
+				task->scoutShuttleMode = scoutShuttleDecision.mode;
+				task->scoutShuttleReason = scoutShuttleDecision.reason;
+				task->scoutShuttleWorkerPassengers = scoutShuttlePlan.workers;
+				task->scoutShuttleRpgPassengers = scoutShuttlePlan.rpg;
+				task->scoutShuttleRebelPassengers = scoutShuttlePlan.rebels;
+			}
 			if (objective.randomReveal)
 			{
 				m_autonomy.state.lastScoutRandomObjectiveId = objective.objectiveId;
@@ -12191,7 +12654,8 @@ namespace
 				{"x", objective.position.x},
 				{"y", objective.position.y},
 				{"reason", objective.reason},
-				{"random_reveal", objective.randomReveal}
+				{"random_reveal", objective.randomReveal},
+				{"scout_shuttle", task->scoutShuttle}
 			});
 			adapterLog(
 				"scout_task_created task=%u units=%d objective=%u x=%.1f y=%.1f reason=%s",
@@ -12201,6 +12665,17 @@ namespace
 				objective.position.x,
 				objective.position.y,
 				decision.reason);
+			if (task->scoutShuttle)
+			{
+				adapterLog(
+					"technical_scout_shuttle_loadout technical=%u workers=%d rpg=%d rebels=%d partial=%d reason=%s",
+					!task->assignedUnitIds.empty() ? task->assignedUnitIds[0] : 0u,
+					task->scoutShuttleWorkerPassengers,
+					task->scoutShuttleRpgPassengers,
+					task->scoutShuttleRebelPassengers,
+					task->scoutShuttlePartialLoadout ? 1 : 0,
+					task->scoutShuttleReason.c_str());
+			}
 			issueScoutWaypointCommand(player, *task, "scout_start");
 		}
 
@@ -13131,10 +13606,60 @@ namespace
 			const std::string policyReason =
 				scudSpendAllowed && !buildPolicy.highCashOverride ? reason :
 					(buildPolicy.spendAllowed ? centralScudSpend.reason : buildPolicy.reason);
+			int recoverableScudFoundations = 0;
+			int staleScudFoundations = 0;
+			int tombstonedScudFoundations = 0;
+			const AIControlAdapterStrategicFoundationSurvivalManager foundationSurvivalManager;
+			for (const auto& foundationPair : m_autonomy.state.strategicFoundationHealth)
+			{
+				const AutonomyStrategicFoundationState& state = foundationPair.second;
+				if (!containsIgnoreCase(state.templateName, "scudstorm"))
+				{
+					continue;
+				}
+				AIControlAdapterStrategicFoundationFact fact;
+				fact.foundationId = foundationPair.first;
+				fact.templateName = state.templateName;
+				fact.x = state.x;
+				fact.y = state.y;
+				fact.lastHealth = state.lastHealth;
+				fact.maxHealth = state.maxHealth;
+				fact.nowTick = now;
+				fact.firstSeenTick = state.firstSeenTick;
+				fact.lastSeenTick = state.lastSeenTick;
+				fact.lastProgressTick = state.lastProgressTick;
+				fact.recoveryAttempts = state.recoveryAttempts;
+				fact.stopIssued = state.stopIssued;
+				fact.tombstoned = m_autonomy.taskReservationManager.isFoundationTombstoned(
+					static_cast<unsigned int>(foundationPair.first),
+					now);
+				fact.activeWmdThreat = hasWMDThreat;
+				fact.reason = state.reason;
+				const AIControlAdapterStrategicFoundationClassification classification =
+					foundationSurvivalManager.Classify(fact);
+				if (classification.recoverable)
+				{
+					++recoverableScudFoundations;
+				}
+				if (classification.failed || std::string(classification.state) == "stale" || std::string(classification.state) == "stopped")
+				{
+					++staleScudFoundations;
+				}
+				if (classification.tombstoned)
+				{
+					++tombstonedScudFoundations;
+				}
+			}
+			if (tombstonedScudFoundations == 0)
+			{
+				tombstonedScudFoundations =
+					m_autonomy.taskReservationManager.getActiveFoundationTombstoneCount("ScudStorm", now);
+			}
 
 			adapterLog(
 				"scud_storm_policy desired=%d live=%d in_progress=%d ready=%d production_needed=%d "
-				"money=%u reserve=%u cash_float=%u zone_gap=%d max_in_progress=%d spend_allowed=%d reason=%s",
+				"money=%u reserve=%u cash_float=%u zone_gap=%d max_in_progress=%d spend_allowed=%d "
+				"recoverable_foundations=%d stale_foundations=%d tombstoned_foundations=%d recovery_allowed=%d replacement_allowed=%d foundation_reason=%s reason=%s",
 				desiredScudStorms,
 				liveScudStorms,
 				inProgressScudStorms,
@@ -13146,6 +13671,14 @@ namespace
 				buildPolicy.zoneGap,
 				buildPolicy.maxInProgress,
 				scudSpendAllowed ? 1 : 0,
+				recoverableScudFoundations,
+				staleScudFoundations,
+				tombstonedScudFoundations,
+				(recoverableScudFoundations > 0 && scudSpendAllowed) ? 1 : 0,
+				(productionNeeded && scudSpendAllowed && recoverableScudFoundations == 0) ? 1 : 0,
+				recoverableScudFoundations > 0 ? "recoverable_scud_foundation" :
+					(tombstonedScudFoundations > 0 ? "tombstoned_scud_foundation" :
+						(staleScudFoundations > 0 ? "stale_scud_foundation" : "none")),
 				policyReason.c_str());
 			const StrategicSpendCategory scudSpendCategory =
 				hasWMDThreat ? StrategicSpendCategory::DefensiveWmd : StrategicSpendCategory::LuxuryBaseline;
@@ -13352,6 +13885,10 @@ namespace
 							desiredScudStorms,
 							liveScudStorms,
 							inProgressScudStorms);
+						adapterLog(
+							"scud_foundation_replacement issued=0 reason=no_safe_placement blocked_foundation=0 money=%u reserve=%u",
+							static_cast<unsigned int>(currentMoney),
+							static_cast<unsigned int>(reserveCash));
 						return;
 					}
 					std::vector<AIControlAdapterStrategicFoundationFact> foundationFacts;
@@ -13365,12 +13902,17 @@ namespace
 					fact.x = state.x;
 					fact.y = state.y;
 					fact.lastHealth = state.lastHealth;
+					fact.maxHealth = state.maxHealth;
 					fact.nowTick = now;
 					fact.firstSeenTick = state.firstSeenTick;
 					fact.lastSeenTick = state.lastSeenTick;
 					fact.lastProgressTick = state.lastProgressTick;
 					fact.recoveryAttempts = state.recoveryAttempts;
 					fact.stopIssued = state.stopIssued;
+					fact.tombstoned = m_autonomy.taskReservationManager.isFoundationTombstoned(
+						static_cast<unsigned int>(foundationPair.first),
+						now);
+					fact.activeWmdThreat = hasWMDThreat;
 					fact.reason = state.reason;
 					foundationFacts.push_back(fact);
 				}
@@ -13436,6 +13978,12 @@ namespace
 						liveScudStorms,
 						inProgressScudStorms,
 						rebuildBlock.reason);
+					adapterLog(
+						"scud_foundation_replacement issued=0 reason=%s blocked_foundation=%u money=%u reserve=%u",
+						rebuildBlock.reason,
+						static_cast<unsigned int>(rebuildBlock.foundationId),
+						static_cast<unsigned int>(currentMoney),
+						static_cast<unsigned int>(reserveCash));
 					return;
 				}
 				nlohmann::json message = {
@@ -13469,6 +14017,12 @@ namespace
 					liveScudStorms,
 						inProgressScudStorms,
 						buildIssued ? policyReason.c_str() : buildReason.c_str());
+					adapterLog(
+						"scud_foundation_replacement issued=%d reason=%s blocked_foundation=0 money=%u reserve=%u",
+						buildIssued ? 1 : 0,
+						buildIssued ? policyReason.c_str() : buildReason.c_str(),
+						static_cast<unsigned int>(currentMoney),
+						static_cast<unsigned int>(reserveCash));
 					if (hasWMDThreat && !buildIssued)
 					{
 						adapterLog(
