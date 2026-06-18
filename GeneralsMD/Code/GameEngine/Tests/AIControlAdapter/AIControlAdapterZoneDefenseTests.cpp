@@ -500,6 +500,107 @@ void testDefenseDisabledByProfile()
 	std::cout << "PASS: testDefenseDisabledByProfile\n";
 }
 
+void testDebugOverlayZoneSelectionFiltersEligibleAnchors()
+{
+	std::vector<DebugZoneAnchorCandidate> candidates;
+
+	DebugZoneAnchorCandidate stash;
+	stash.anchorId = 100;
+	stash.x = 100.0f;
+	stash.y = 100.0f;
+	stash.name = "GLASupplyStash";
+	stash.isStructure = true;
+	stash.isSupplyStructure = true;
+	candidates.push_back(stash);
+
+	DebugZoneAnchorCandidate barracks;
+	barracks.anchorId = 200;
+	barracks.x = 600.0f;
+	barracks.y = 100.0f;
+	barracks.name = "GLABarracks";
+	barracks.isStructure = true;
+	candidates.push_back(barracks);
+
+	DebugZoneAnchorCandidate worker;
+	worker.anchorId = 300;
+	worker.x = 900.0f;
+	worker.y = 100.0f;
+	worker.name = "GLAInfantryWorker";
+	worker.isStructure = false;
+	candidates.push_back(worker);
+
+	const std::vector<DebugZoneAnchor> zones =
+		AIControlAdapterZoneManager::BuildDebugOverlayZones(candidates, 200.0f);
+
+	expectEq(static_cast<int>(zones.size()), 2, "Debug overlay should retain only eligible structure anchors");
+	expectEq(static_cast<int>(zones[0].anchorId), 100, "First debug zone should be supply stash");
+	expect(zones[0].isMainBase, "First debug zone should preserve main-base marker behavior");
+	expect(zones[0].anchorType == ZoneAnchorType::SupplyStash, "Supply candidate should become supply anchor");
+	expectEq(static_cast<int>(zones[1].anchorId), 200, "Second debug zone should be barracks");
+	expect(!zones[1].isMainBase, "Only first debug zone should be main base");
+	expect(zones[1].anchorType == ZoneAnchorType::MainBase, "Non-supply eligible candidate should use historical main-base anchor type");
+
+	std::cout << "PASS: testDebugOverlayZoneSelectionFiltersEligibleAnchors\n";
+}
+
+void testDebugOverlayZoneSelectionCollapsesNearbyAnchors()
+{
+	std::vector<DebugZoneAnchorCandidate> candidates;
+
+	DebugZoneAnchorCandidate first;
+	first.anchorId = 100;
+	first.x = 0.0f;
+	first.y = 0.0f;
+	first.name = "GLASupplyStash";
+	first.isStructure = true;
+	first.isSupplyStructure = true;
+	candidates.push_back(first);
+
+	DebugZoneAnchorCandidate nearby;
+	nearby.anchorId = 101;
+	nearby.x = 100.0f;
+	nearby.y = 0.0f;
+	nearby.name = "GLAArmsDealer";
+	nearby.isStructure = true;
+	candidates.push_back(nearby);
+
+	DebugZoneAnchorCandidate far;
+	far.anchorId = 102;
+	far.x = 250.0f;
+	far.y = 0.0f;
+	far.name = "GLAArmsDealer";
+	far.isStructure = true;
+	candidates.push_back(far);
+
+	const std::vector<DebugZoneAnchor> zones =
+		AIControlAdapterZoneManager::BuildDebugOverlayZones(candidates, 200.0f);
+
+	expectEq(static_cast<int>(zones.size()), 2, "Debug overlay should collapse materially overlapping anchors");
+	expectEq(static_cast<int>(zones[0].anchorId), 100, "First spaced debug zone should be retained");
+	expectEq(static_cast<int>(zones[1].anchorId), 102, "Far debug zone should be retained");
+
+	std::cout << "PASS: testDebugOverlayZoneSelectionCollapsesNearbyAnchors\n";
+}
+
+void testDebugOverlayZoneSelectionSkipsUnderConstruction()
+{
+	DebugZoneAnchorCandidate underConstruction;
+	underConstruction.anchorId = 100;
+	underConstruction.x = 0.0f;
+	underConstruction.y = 0.0f;
+	underConstruction.name = "GLASupplyStash";
+	underConstruction.isStructure = true;
+	underConstruction.underConstruction = true;
+	underConstruction.isSupplyStructure = true;
+
+	const std::vector<DebugZoneAnchor> zones =
+		AIControlAdapterZoneManager::BuildDebugOverlayZones({ underConstruction }, 200.0f);
+
+	expect(zones.empty(), "Debug overlay should skip under-construction anchors");
+
+	std::cout << "PASS: testDebugOverlayZoneSelectionSkipsUnderConstruction\n";
+}
+
 // ========================================
 // Phase 7.1: Zone Defense Response Tests
 // ========================================
@@ -1162,6 +1263,43 @@ namespace Phase78
 		std::cout << "PASS: testMissingDefendersTriggerReinforcement\n";
 	}
 
+	void testThreatSeverityAndFreshnessHelpers()
+	{
+		expectEq(AIControlAdapterDefenseManager::ThreatSeverityForLevel("critical"), 4, "Critical severity should map to 4");
+		expectEq(AIControlAdapterDefenseManager::ThreatSeverityForLevel("high"), 3, "High severity should map to 3");
+		expectEq(AIControlAdapterDefenseManager::ThreatSeverityForLevel("medium"), 2, "Medium severity should map to 2");
+		expectEq(AIControlAdapterDefenseManager::ThreatSeverityForLevel("low"), 1, "Low severity should map to 1");
+		expectEq(AIControlAdapterDefenseManager::ThreatSeverityForLevel("unknown"), 0, "Unknown severity should map to 0");
+		expect(AIControlAdapterDefenseManager::IsZoneThreatFresh(20000u, 15000u, 10000u), "Recent threat should be fresh");
+		expect(!AIControlAdapterDefenseManager::IsZoneThreatFresh(26000u, 15000u, 10000u), "Old threat should be stale");
+
+		std::cout << "PASS: testThreatSeverityAndFreshnessHelpers\n";
+	}
+
+	void testTransientStrikeReleaseReason()
+	{
+		expectEq(
+			std::string(AIControlAdapterDefenseManager::TransientStrikeReleaseReason("wmd_strike", 0, 0)),
+			std::string("wmd_strike_no_local_enemy"),
+			"WMD-only strike should release defenders when no local enemy remains");
+		expectEq(
+			std::string(AIControlAdapterDefenseManager::TransientStrikeReleaseReason("special_power_strike", 0, 0)),
+			std::string("special_power_no_local_enemy"),
+			"Special-power-only strike should release defenders when no local enemy remains");
+		expectEq(
+			std::string(AIControlAdapterDefenseManager::TransientStrikeReleaseReason("unknown_damage", 0, 0)),
+			std::string("unknown_damage_no_local_enemy"),
+			"Unknown damage should release defenders when no local enemy remains");
+		expect(
+			AIControlAdapterDefenseManager::TransientStrikeReleaseReason("wmd_strike", 1, 0) == nullptr,
+			"Local enemies should keep WMD-triggered defense allocation active");
+		expect(
+			AIControlAdapterDefenseManager::TransientStrikeReleaseReason("unit_attack", 0, 0) == nullptr,
+			"Unit attacks should not use transient strike release reasons");
+
+		std::cout << "PASS: testTransientStrikeReleaseReason\n";
+	}
+
 	void runAllPhase78Tests()
 	{
 		std::cout << "\nRunning Phase 7.8 Multi-Front Defense Allocation tests...\n";
@@ -1173,6 +1311,8 @@ namespace Phase78
 		testLocalReservesPreserved();
 		testReinforcementAddsOnlyDelta();
 		testMissingDefendersTriggerReinforcement();
+		testThreatSeverityAndFreshnessHelpers();
+		testTransientStrikeReleaseReason();
 
 		std::cout << "All Phase 7.8 Multi-Front Defense Allocation tests passed!\n";
 	}
@@ -2341,6 +2481,98 @@ namespace Phase7879Reserves
 		std::cout << "PASS: Phase7879Reserves::testProductionSignalForContestedDeficit\n";
 	}
 
+	void testDefenseFloorResolverProtectsMainBase()
+	{
+		std::vector<AIControlAdapterDefenseZoneSnapshot> zones;
+		AIControlAdapterDefenseZoneSnapshot main;
+		main.anchorId = 100u;
+		main.centerX = 100.0f;
+		main.centerY = 100.0f;
+		main.isMainBase = true;
+		zones.push_back(main);
+		std::vector<AIControlAdapterZoneDefenseReserveSnapshot> reserves;
+		AIControlAdapterZoneDefenseReserveSnapshot reserve;
+		reserve.zoneId = 100u;
+		reserve.surplus = 5;
+		reserve.deficit = 0;
+		reserve.activeThreat = false;
+		reserves.push_back(reserve);
+		const AIControlAdapterZoneDefenseFloorDecision decision =
+			AIControlAdapterDefenseManager::ResolveZoneDefenseFloor(120.0f, 120.0f, 300.0f, zones, reserves);
+		expect(decision.hasZone, "Defense floor resolver should find nearby main base zone");
+		expect(decision.protectedByFloor, "Main base units should remain protected even with surplus");
+		expect(!decision.canRelaxForScout, "Main base defense floor should not relax for scout borrowing");
+		std::cout << "PASS: Phase7879Reserves::testDefenseFloorResolverProtectsMainBase\n";
+	}
+
+	void testDefenseFloorResolverAllowsQuietExpansionScoutRelaxation()
+	{
+		std::vector<AIControlAdapterDefenseZoneSnapshot> zones;
+		AIControlAdapterDefenseZoneSnapshot expansion;
+		expansion.anchorId = 200u;
+		expansion.centerX = 500.0f;
+		expansion.centerY = 500.0f;
+		expansion.isMainBase = false;
+		zones.push_back(expansion);
+		std::vector<AIControlAdapterZoneDefenseReserveSnapshot> reserves;
+		AIControlAdapterZoneDefenseReserveSnapshot reserve;
+		reserve.zoneId = 200u;
+		reserve.surplus = 2;
+		reserve.deficit = 0;
+		reserve.activeThreat = false;
+		reserves.push_back(reserve);
+		const AIControlAdapterZoneDefenseFloorDecision decision =
+			AIControlAdapterDefenseManager::ResolveZoneDefenseFloor(520.0f, 510.0f, 300.0f, zones, reserves);
+		expect(decision.hasZone, "Defense floor resolver should find nearby expansion zone");
+		expect(!decision.protectedByFloor, "Quiet surplus expansion units should not be protected by floor");
+		expect(decision.canRelaxForScout, "Quiet non-main zone should allow scout defense-floor relaxation");
+		std::cout << "PASS: Phase7879Reserves::testDefenseFloorResolverAllowsQuietExpansionScoutRelaxation\n";
+	}
+
+	void testDefenseFloorResolverBlocksThreatenedExpansionRelaxation()
+	{
+		std::vector<AIControlAdapterDefenseZoneSnapshot> zones;
+		AIControlAdapterDefenseZoneSnapshot expansion;
+		expansion.anchorId = 300u;
+		expansion.centerX = 800.0f;
+		expansion.centerY = 800.0f;
+		expansion.isMainBase = false;
+		zones.push_back(expansion);
+		std::vector<AIControlAdapterZoneDefenseReserveSnapshot> reserves;
+		AIControlAdapterZoneDefenseReserveSnapshot reserve;
+		reserve.zoneId = 300u;
+		reserve.surplus = 4;
+		reserve.deficit = 0;
+		reserve.activeThreat = true;
+		reserves.push_back(reserve);
+		const AIControlAdapterZoneDefenseFloorDecision decision =
+			AIControlAdapterDefenseManager::ResolveZoneDefenseFloor(790.0f, 810.0f, 300.0f, zones, reserves);
+		expect(decision.protectedByFloor, "Active threat should protect expansion reserve units");
+		expect(!decision.canRelaxForScout, "Active threat should block scout floor relaxation");
+		std::cout << "PASS: Phase7879Reserves::testDefenseFloorResolverBlocksThreatenedExpansionRelaxation\n";
+	}
+
+	void testDefenseFloorResolverIgnoresOutOfRangeUnits()
+	{
+		std::vector<AIControlAdapterDefenseZoneSnapshot> zones;
+		AIControlAdapterDefenseZoneSnapshot zone;
+		zone.anchorId = 400u;
+		zone.centerX = 0.0f;
+		zone.centerY = 0.0f;
+		zones.push_back(zone);
+		std::vector<AIControlAdapterZoneDefenseReserveSnapshot> reserves;
+		AIControlAdapterZoneDefenseReserveSnapshot reserve;
+		reserve.zoneId = 400u;
+		reserve.surplus = 0;
+		reserve.deficit = 5;
+		reserves.push_back(reserve);
+		const AIControlAdapterZoneDefenseFloorDecision decision =
+			AIControlAdapterDefenseManager::ResolveZoneDefenseFloor(1200.0f, 1200.0f, 300.0f, zones, reserves);
+		expect(!decision.hasZone, "Out-of-range units should not bind to a zone defense floor");
+		expect(!decision.protectedByFloor, "Out-of-range units should not be floor-protected");
+		std::cout << "PASS: Phase7879Reserves::testDefenseFloorResolverIgnoresOutOfRangeUnits\n";
+	}
+
 	void runAllPhase7879ReserveTests()
 	{
 		std::cout << "\nRunning Phase 7.8/7.9 per-zone standing reserve tests...\n";
@@ -2352,6 +2584,10 @@ namespace Phase7879Reserves
 		testMainBaseCriticalOverrideCanBreakFloors();
 		testTaskOwnedUnitsExcludedFromSurplus();
 		testProductionSignalForContestedDeficit();
+		testDefenseFloorResolverProtectsMainBase();
+		testDefenseFloorResolverAllowsQuietExpansionScoutRelaxation();
+		testDefenseFloorResolverBlocksThreatenedExpansionRelaxation();
+		testDefenseFloorResolverIgnoresOutOfRangeUnits();
 		std::cout << "All Phase 7.8/7.9 per-zone standing reserve tests passed!\n";
 	}
 }
@@ -2369,6 +2605,9 @@ int main()
 	testNoDefenseRequestWhenNoThreat();
 	testDefenderMixBySeverity();
 	testDefenseDisabledByProfile();
+	testDebugOverlayZoneSelectionFiltersEligibleAnchors();
+	testDebugOverlayZoneSelectionCollapsesNearbyAnchors();
+	testDebugOverlayZoneSelectionSkipsUnderConstruction();
 
 	std::cout << "\nAll ZoneManager and DefenseManager tests passed!\n";
 

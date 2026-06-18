@@ -339,7 +339,7 @@
 			const std::string side = toLower(player->getSide().str());
 			const std::string baseSide = toLower(player->getBaseSide().str());
 			const std::string keyName = toLower(KEYNAME(player->getPlayerNameKey()).str());
-			const std::string displayName = toLower(unicodeToUtf8(const_cast<Player*>(player)->getPlayerDisplayName()));
+			const std::string displayName = toLower(AIControlAdapterUiUtils::UnicodeToUtf8(const_cast<Player*>(player)->getPlayerDisplayName()));
 
 			auto hasCivilianTag = [](const std::string& s) -> bool
 			{

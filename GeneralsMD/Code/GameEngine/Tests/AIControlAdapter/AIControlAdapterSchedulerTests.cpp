@@ -312,6 +312,74 @@ void TestIntentResultTelemetry()
 	printf("  PASSED: Intent result includes all telemetry fields\n");
 }
 
+void TestAutonomyTickScheduleAllZeroDue()
+{
+	printf("Running TestAutonomyTickScheduleAllZeroDue...\n");
+
+	AIControlAdapterAutonomyTickSchedule schedule =
+		AIControlAdapterScheduler::EvaluateAutonomyTickSchedule(1000u, 0u, 0u, 0u, 0u);
+
+	assert(schedule.macroDue == true);
+	assert(schedule.productionDue == true);
+	assert(schedule.techDue == true);
+	assert(schedule.guardDue == true);
+	assert(schedule.anyDue == true);
+	assert(schedule.guardOnly == false);
+
+	printf("  PASSED: Zero tick deadlines are due\n");
+}
+
+void TestAutonomyTickScheduleFutureTimersSkip()
+{
+	printf("Running TestAutonomyTickScheduleFutureTimersSkip...\n");
+
+	AIControlAdapterAutonomyTickSchedule schedule =
+		AIControlAdapterScheduler::EvaluateAutonomyTickSchedule(1000u, 2000u, 3000u, 4000u, 5000u);
+
+	assert(schedule.macroDue == false);
+	assert(schedule.productionDue == false);
+	assert(schedule.techDue == false);
+	assert(schedule.guardDue == false);
+	assert(schedule.anyDue == false);
+	assert(schedule.guardOnly == false);
+
+	printf("  PASSED: Future tick deadlines are not due\n");
+}
+
+void TestAutonomyTickScheduleGuardOnly()
+{
+	printf("Running TestAutonomyTickScheduleGuardOnly...\n");
+
+	AIControlAdapterAutonomyTickSchedule schedule =
+		AIControlAdapterScheduler::EvaluateAutonomyTickSchedule(5000u, 6000u, 7000u, 8000u, 4000u);
+
+	assert(schedule.macroDue == false);
+	assert(schedule.productionDue == false);
+	assert(schedule.techDue == false);
+	assert(schedule.guardDue == true);
+	assert(schedule.anyDue == true);
+	assert(schedule.guardOnly == true);
+
+	printf("  PASSED: Guard-only schedule is identified\n");
+}
+
+void TestAutonomyTickScheduleProductionBreaksGuardOnly()
+{
+	printf("Running TestAutonomyTickScheduleProductionBreaksGuardOnly...\n");
+
+	AIControlAdapterAutonomyTickSchedule schedule =
+		AIControlAdapterScheduler::EvaluateAutonomyTickSchedule(5000u, 6000u, 5000u, 8000u, 4000u);
+
+	assert(schedule.macroDue == false);
+	assert(schedule.productionDue == true);
+	assert(schedule.techDue == false);
+	assert(schedule.guardDue == true);
+	assert(schedule.anyDue == true);
+	assert(schedule.guardOnly == false);
+
+	printf("  PASSED: Production-due schedule is not guard-only\n");
+}
+
 int main()
 {
 	printf("AIControlAdapterScheduler Tests\n");
@@ -324,6 +392,10 @@ int main()
 	TestBudgetReset();
 	TestDefenseSeparateBudget();
 	TestIntentResultTelemetry();
+	TestAutonomyTickScheduleAllZeroDue();
+	TestAutonomyTickScheduleFutureTimersSkip();
+	TestAutonomyTickScheduleGuardOnly();
+	TestAutonomyTickScheduleProductionBreaksGuardOnly();
 
 	printf("\n================================\n");
 	printf("All tests passed!\n");

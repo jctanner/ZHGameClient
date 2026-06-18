@@ -1,7 +1,9 @@
 #include "PreRTS.h"
 
 #include "GameClient/AIControlAdapter/AIControlAdapter.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterCaptureManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterCombatTask.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterCounterbatteryManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterPolicy.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterTechManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterProductionManager.h"
@@ -9,20 +11,28 @@
 #include "GameClient/AIControlAdapter/AIControlAdapterDefenseManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterEconomyManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterEnemyMemory.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterGarrisonManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterGlaUsaStrategyManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterMacroBuildDispatcher.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterMacroBuildManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterMacroBuildSnapshotBuilder.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterMacroBuildTelemetrySerializer.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterProfilePolicyManager.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterRaidManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterScheduler.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterScudStormManager.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterScoutingManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterStrategicFoundationSurvivalManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterStrategicSpendManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterStrategicSpendSnapshotBuilder.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterStrategicSpendTelemetrySerializer.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterSurvivalPolicyManager.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterTaskReservation.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterTemplateInferenceService.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterTerrainMapCacheService.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterUiUtils.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterWMDTarget.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterWorkerShuttleManager.h"
 
 #include "Common/NameKeyGenerator.h"
 #include "Common/ActionManager.h"
@@ -87,7 +97,6 @@ extern void skirmishUpdateSlotList();
 #include <map>
 #include <set>
 #include <unordered_map>
-#include <fstream>
 #include <iterator>
 #include <cstdarg>
 #include <cstdio>
@@ -144,259 +153,9 @@ namespace
 		{ "black_market", "Upgrade_GLACamoNetting" }
 	};
 
-	static std::string inferAutonomyScudLauncherTemplate(const Player* player)
-	{
-		if (player == nullptr)
-		{
-			return std::string();
-		}
-
-		auto containsAsciiLower = [](std::string haystack, const char* needle) -> bool
-		{
-			if (needle == nullptr || *needle == '\0')
-			{
-				return false;
-			}
-			std::transform(haystack.begin(), haystack.end(), haystack.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-			std::string n = needle;
-			std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-			return haystack.find(n) != std::string::npos;
-		};
-
-		const std::string side = player->getSide().str();
-		const std::string baseSide = player->getBaseSide().str();
-		if (containsAsciiLower(side, "chem") || containsAsciiLower(baseSide, "chem"))
-		{
-			return "Chem_GLAVehicleScudLauncher";
-		}
-		if (containsAsciiLower(side, "stealth") || containsAsciiLower(baseSide, "stealth") || containsAsciiLower(side, "slth") || containsAsciiLower(baseSide, "slth"))
-		{
-			return "Slth_GLAVehicleScudLauncher";
-		}
-		if (containsAsciiLower(side, "demo") || containsAsciiLower(baseSide, "demo"))
-		{
-			return "Demo_GLAVehicleScudLauncher";
-		}
-		return "GLAVehicleScudLauncher";
-	}
-
-	static std::string inferQuadTemplateForProducerSnapshot(Object* producer)
-	{
-		if (producer == nullptr || TheThingFactory == nullptr || TheBuildAssistant == nullptr)
-		{
-			return std::string();
-		}
-		auto containsAsciiLower = [](std::string haystack, const char* needle) -> bool
-		{
-			if (needle == nullptr || *needle == '\0')
-			{
-				return false;
-			}
-			std::transform(haystack.begin(), haystack.end(), haystack.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-			std::string n = needle;
-			std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-			return haystack.find(n) != std::string::npos;
-		};
-		auto isPotentiallyQueueable = [&](const ThingTemplate* tt) -> bool
-		{
-			if (tt == nullptr)
-			{
-				return false;
-			}
-			const CanMakeType canMake = TheBuildAssistant->canMakeUnit(producer, tt);
-			return canMake == CANMAKE_OK ||
-				canMake == CANMAKE_NO_MONEY ||
-				canMake == CANMAKE_QUEUE_FULL ||
-				canMake == CANMAKE_PARKING_PLACES_FULL;
-		};
-
-		std::vector<std::string> candidates;
-		const Player* player = producer->getControllingPlayer();
-		const std::string side = player != nullptr ? player->getSide().str() : std::string();
-		const std::string baseSide = player != nullptr ? player->getBaseSide().str() : std::string();
-		if (containsAsciiLower(side, "gla") || containsAsciiLower(baseSide, "gla"))
-		{
-			if (containsAsciiLower(side, "slth") || containsAsciiLower(side, "stealth"))
-			{
-				candidates.push_back("GC_Slth_GLAVehicleQuadCannon");
-			}
-			if (containsAsciiLower(side, "chem") || containsAsciiLower(side, "toxin"))
-			{
-				candidates.push_back("GC_Chem_GLAVehicleQuadCannon");
-			}
-			if (containsAsciiLower(side, "demo"))
-			{
-				candidates.push_back("Demo_GLAVehicleQuadCannon");
-			}
-		}
-		candidates.push_back("GLAVehicleQuadCannon");
-		candidates.push_back("GLAVehicleQuadcannon");
-		candidates.push_back("GLAQuadCannon");
-		candidates.push_back("GLAVehicleQuad");
-		candidates.push_back("GLAQuad");
-
-		for (const std::string& name : candidates)
-		{
-			const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(name.c_str()), false);
-			if (tt != nullptr && isPotentiallyQueueable(tt))
-			{
-				return name;
-			}
-		}
-
-		for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
-		{
-			const std::string templateName = tt->getName().str();
-			if (!containsAsciiLower(templateName, "quad"))
-			{
-				continue;
-			}
-			if (!containsAsciiLower(templateName, "vehicle") && !containsAsciiLower(templateName, "cannon"))
-			{
-				continue;
-			}
-			if (isPotentiallyQueueable(tt))
-			{
-				return templateName;
-			}
-		}
-		return std::string();
-	}
-
-	static std::string inferScorpionTemplateForProducerSnapshot(Object* producer)
-	{
-		if (producer == nullptr || TheThingFactory == nullptr || TheBuildAssistant == nullptr)
-		{
-			return std::string();
-		}
-		const char* candidates[] = {
-			"GLAVehicleScorpion",
-			"GLAVehicleScorpionTank",
-			"GLATankScorpion"
-		};
-		for (const char* name : candidates)
-		{
-			const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(name), false);
-			if (tt != nullptr && TheBuildAssistant->canMakeUnit(producer, tt) == CANMAKE_OK)
-			{
-				return name;
-			}
-		}
-		return std::string();
-	}
-
-	static std::string inferRocketBuggyTemplateForProducerSnapshot(Object* producer)
-	{
-		if (producer == nullptr || TheThingFactory == nullptr || TheBuildAssistant == nullptr)
-		{
-			return std::string();
-		}
-		auto containsAsciiLower = [](std::string haystack, const char* needle) -> bool
-		{
-			if (needle == nullptr || *needle == '\0')
-			{
-				return false;
-			}
-			std::transform(haystack.begin(), haystack.end(), haystack.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-			std::string n = needle;
-			std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-			return haystack.find(n) != std::string::npos;
-		};
-		auto isPotentiallyQueueable = [&](const ThingTemplate* tt) -> bool
-		{
-			if (tt == nullptr)
-			{
-				return false;
-			}
-			const CanMakeType canMake = TheBuildAssistant->canMakeUnit(producer, tt);
-			return canMake == CANMAKE_OK ||
-				canMake == CANMAKE_NO_MONEY ||
-				canMake == CANMAKE_QUEUE_FULL ||
-				canMake == CANMAKE_PARKING_PLACES_FULL;
-		};
-		const char* candidates[] = {
-			"GLAVehicleRocketBuggy"
-		};
-		for (const char* name : candidates)
-		{
-			const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(name), false);
-			if (tt != nullptr && isPotentiallyQueueable(tt))
-			{
-				return name;
-			}
-		}
-		for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
-		{
-			const std::string templateName = tt->getName().str();
-			if (containsAsciiLower(templateName, "rocketbuggy") && isPotentiallyQueueable(tt))
-			{
-				return templateName;
-			}
-		}
-		return std::string();
-	}
-
-	static std::string inferTechnicalTemplateForProducerSnapshot(Object* producer)
-	{
-		if (producer == nullptr || TheThingFactory == nullptr || TheBuildAssistant == nullptr)
-		{
-			return std::string();
-		}
-		auto containsAsciiLower = [](std::string haystack, const char* needle) -> bool
-		{
-			if (needle == nullptr || *needle == '\0')
-			{
-				return false;
-			}
-			std::transform(haystack.begin(), haystack.end(), haystack.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-			std::string n = needle;
-			std::transform(n.begin(), n.end(), n.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-			return haystack.find(n) != std::string::npos;
-		};
-		auto isPotentiallyQueueable = [&](const ThingTemplate* tt) -> bool
-		{
-			if (tt == nullptr)
-			{
-				return false;
-			}
-			const CanMakeType canMake = TheBuildAssistant->canMakeUnit(producer, tt);
-			return canMake == CANMAKE_OK ||
-				canMake == CANMAKE_NO_MONEY ||
-				canMake == CANMAKE_QUEUE_FULL ||
-				canMake == CANMAKE_PARKING_PLACES_FULL;
-		};
-		const char* candidates[] = {
-			"GLAVehicleTechnical"
-		};
-		for (const char* name : candidates)
-		{
-			const ThingTemplate* tt = TheThingFactory->findTemplate(AsciiString(name), false);
-			if (tt != nullptr && isPotentiallyQueueable(tt))
-			{
-				return name;
-			}
-		}
-		for (const ThingTemplate* tt = TheThingFactory->firstTemplate(); tt != nullptr; tt = tt->friend_getNextTemplate())
-		{
-			const std::string templateName = tt->getName().str();
-			if (containsAsciiLower(templateName, "technical") && isPotentiallyQueueable(tt))
-			{
-				return templateName;
-			}
-		}
-		return std::string();
-	}
-
 	static Real clampUnitFloat(Real value, Real minimumValue, Real maximumValue)
 	{
 		return std::max(minimumValue, std::min(maximumValue, value));
-	}
-
-	static std::string normalizeAsciiLower(const std::string& value)
-	{
-		std::string out = value;
-		std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-		return out;
 	}
 
 	struct PendingBuildLocationReservation
@@ -771,8 +530,7 @@ namespace
 			m_cache.reset();
 			m_automation.reset();
 			resetAutonomyState();
-			m_mapFileTerrainCacheByKey.clear();
-			m_mapFileTerrainCacheLoggedKeys.clear();
+			m_terrainMapCacheService.clear();
 			m_mapFileTerrainMergeLoggedKeys.clear();
 			m_transport.resetClientConnection();
 		}
@@ -827,8 +585,8 @@ namespace
 		AdapterObjectCache m_cache;
 		AdapterAutomationState m_automation;
 		AdapterAutonomyState m_autonomy;
-		std::unordered_map<std::string, AIControlAdapterTerrainFacts> m_mapFileTerrainCacheByKey;
-		std::set<std::string> m_mapFileTerrainCacheLoggedKeys;
+		AIControlAdapterTerrainMapCacheService m_terrainMapCacheService;
+		AIControlAdapterWorkerShuttleManager m_workerShuttleManager;
 		std::set<std::string> m_mapFileTerrainMergeLoggedKeys;
 
 		void resetAutonomyState()
@@ -1122,7 +880,7 @@ namespace
 				return;
 			}
 
-			const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
+			const std::string profile = AIControlAdapterUiUtils::NormalizeAsciiLower(m_autonomy.state.profile);
 			const Real expansion = clampUnitFloat(m_autonomy.state.expansionBias, 0.0f, 1.0f);
 			const AIControlAdapterProfilePolicyConfig policyConfig = resolveAutonomyProfilePolicyConfig();
 
@@ -1284,6 +1042,13 @@ namespace
 				ownedBuildings = m_cache.buildingsTotal;
 				idleWorkers = m_cache.idleWorkersTotal;
 			}
+			const AIControlAdapterAutonomyTickSchedule tickSchedule =
+				AIControlAdapterScheduler::EvaluateAutonomyTickSchedule(
+					now,
+					m_autonomy.state.nextMacroTick,
+					m_autonomy.state.nextProductionTick,
+					m_autonomy.state.nextTechTick,
+					m_autonomy.state.nextGuardTick);
 			adapterLog(
 				"autonomy_kickoff mode=%s profile=%s player=%d now=%lu timers[macro=%lu prod=%lu tech=%lu guard=%lu] ready[macro=%d prod=%d tech=%d guard=%d] assets[units=%d buildings=%d idle_workers=%d money=%lu]",
 				m_autonomy.state.mode.c_str(),
@@ -1294,10 +1059,10 @@ namespace
 				static_cast<unsigned long>(m_autonomy.state.nextProductionTick),
 				static_cast<unsigned long>(m_autonomy.state.nextTechTick),
 				static_cast<unsigned long>(m_autonomy.state.nextGuardTick),
-				AIControlAdapterHasTickElapsed(m_autonomy.state.nextMacroTick, now) ? 1 : 0,
-				AIControlAdapterHasTickElapsed(m_autonomy.state.nextProductionTick, now) ? 1 : 0,
-				AIControlAdapterHasTickElapsed(m_autonomy.state.nextTechTick, now) ? 1 : 0,
-				AIControlAdapterHasTickElapsed(m_autonomy.state.nextGuardTick, now) ? 1 : 0,
+				tickSchedule.macroDue ? 1 : 0,
+				tickSchedule.productionDue ? 1 : 0,
+				tickSchedule.techDue ? 1 : 0,
+				tickSchedule.guardDue ? 1 : 0,
 				ownedUnits,
 				ownedBuildings,
 				idleWorkers,
@@ -1320,11 +1085,17 @@ namespace
 			}
 
 			const DWORD now = ::GetTickCount();
-			const bool macroDue = AIControlAdapterHasTickElapsed(m_autonomy.state.nextMacroTick, now);
-			const bool productionDue = AIControlAdapterHasTickElapsed(m_autonomy.state.nextProductionTick, now);
-			const bool techDue = AIControlAdapterHasTickElapsed(m_autonomy.state.nextTechTick, now);
-			const bool guardDue = AIControlAdapterHasTickElapsed(m_autonomy.state.nextGuardTick, now);
-			if (!macroDue && !productionDue && !techDue && !guardDue)
+			const AIControlAdapterAutonomyTickSchedule tickSchedule =
+				AIControlAdapterScheduler::EvaluateAutonomyTickSchedule(
+					now,
+					m_autonomy.state.nextMacroTick,
+					m_autonomy.state.nextProductionTick,
+					m_autonomy.state.nextTechTick,
+					m_autonomy.state.nextGuardTick);
+			const bool macroDue = tickSchedule.macroDue;
+			const bool productionDue = tickSchedule.productionDue;
+			const bool techDue = tickSchedule.techDue;
+			if (!tickSchedule.anyDue)
 			{
 				adapterLog(
 					"autonomy_macro_skip_not_due player=%d now=%lu timers[macro=%lu prod=%lu tech=%lu guard=%lu]",
@@ -1336,7 +1107,7 @@ namespace
 					static_cast<unsigned long>(m_autonomy.state.nextGuardTick));
 				return;
 			}
-			if (guardDue && !macroDue && !productionDue && !techDue)
+			if (tickSchedule.guardOnly)
 			{
 				struct GuardOnlyCounts
 				{
@@ -1662,7 +1433,7 @@ namespace
 
 							if (TheThingFactory != nullptr)
 							{
-								const std::string technicalTemplateName = inferTechnicalTemplateForProducerSnapshot(obj);
+								const std::string technicalTemplateName = AIControlAdapterTemplateInferenceService::InferTechnicalTemplateForProducer(obj);
 								if (!technicalTemplateName.empty())
 								{
 									const ThingTemplate* technicalTemplate = TheThingFactory->findTemplate(AsciiString(technicalTemplateName.c_str()), false);
@@ -1672,7 +1443,7 @@ namespace
 									}
 								}
 
-								const std::string quadTemplateName = inferQuadTemplateForProducerSnapshot(obj);
+								const std::string quadTemplateName = AIControlAdapterTemplateInferenceService::InferQuadTemplateForProducer(obj);
 								if (!quadTemplateName.empty())
 								{
 									const ThingTemplate* quadTemplate = TheThingFactory->findTemplate(AsciiString(quadTemplateName.c_str()), false);
@@ -1682,7 +1453,7 @@ namespace
 									}
 								}
 
-								const std::string scorpionTemplateName = inferScorpionTemplateForProducerSnapshot(obj);
+								const std::string scorpionTemplateName = AIControlAdapterTemplateInferenceService::InferScorpionTemplateForProducer(obj);
 								if (!scorpionTemplateName.empty())
 								{
 									const ThingTemplate* scorpionTemplate = TheThingFactory->findTemplate(AsciiString(scorpionTemplateName.c_str()), false);
@@ -1692,7 +1463,7 @@ namespace
 									}
 								}
 
-								const std::string buggyTemplateName = inferRocketBuggyTemplateForProducerSnapshot(obj);
+								const std::string buggyTemplateName = AIControlAdapterTemplateInferenceService::InferRocketBuggyTemplateForProducer(obj);
 								if (!buggyTemplateName.empty())
 								{
 									const ThingTemplate* buggyTemplate = TheThingFactory->findTemplate(AsciiString(buggyTemplateName.c_str()), false);
@@ -1704,7 +1475,7 @@ namespace
 
 								if (owner != nullptr)
 								{
-									const std::string scudLauncherTemplateName = inferAutonomyScudLauncherTemplate(owner);
+									const std::string scudLauncherTemplateName = AIControlAdapterTemplateInferenceService::InferScudLauncherTemplate(owner);
 									if (!scudLauncherTemplateName.empty())
 									{
 										const ThingTemplate* scudLauncherTemplate = TheThingFactory->findTemplate(AsciiString(scudLauncherTemplateName.c_str()), false);
@@ -1767,7 +1538,7 @@ namespace
 
 						if (TheThingFactory != nullptr)
 						{
-							const std::string technicalTemplateName = inferTechnicalTemplateForProducerSnapshot(obj);
+							const std::string technicalTemplateName = AIControlAdapterTemplateInferenceService::InferTechnicalTemplateForProducer(obj);
 							if (!technicalTemplateName.empty())
 							{
 								const ThingTemplate* technicalTemplate = TheThingFactory->findTemplate(AsciiString(technicalTemplateName.c_str()), false);
@@ -1777,7 +1548,7 @@ namespace
 								}
 							}
 
-							const std::string quadTemplateName = inferQuadTemplateForProducerSnapshot(obj);
+							const std::string quadTemplateName = AIControlAdapterTemplateInferenceService::InferQuadTemplateForProducer(obj);
 							if (!quadTemplateName.empty())
 							{
 								const ThingTemplate* quadTemplate = TheThingFactory->findTemplate(AsciiString(quadTemplateName.c_str()), false);
@@ -1787,7 +1558,7 @@ namespace
 								}
 							}
 
-							const std::string scorpionTemplateName = inferScorpionTemplateForProducerSnapshot(obj);
+							const std::string scorpionTemplateName = AIControlAdapterTemplateInferenceService::InferScorpionTemplateForProducer(obj);
 							if (!scorpionTemplateName.empty())
 							{
 								const ThingTemplate* scorpionTemplate = TheThingFactory->findTemplate(AsciiString(scorpionTemplateName.c_str()), false);
@@ -1797,7 +1568,7 @@ namespace
 								}
 							}
 
-							const std::string buggyTemplateName = inferRocketBuggyTemplateForProducerSnapshot(obj);
+							const std::string buggyTemplateName = AIControlAdapterTemplateInferenceService::InferRocketBuggyTemplateForProducer(obj);
 							if (!buggyTemplateName.empty())
 							{
 								const ThingTemplate* buggyTemplate = TheThingFactory->findTemplate(AsciiString(buggyTemplateName.c_str()), false);
@@ -1809,7 +1580,7 @@ namespace
 
 							if (owner != nullptr)
 							{
-								const std::string scudLauncherTemplateName = inferAutonomyScudLauncherTemplate(owner);
+								const std::string scudLauncherTemplateName = AIControlAdapterTemplateInferenceService::InferScudLauncherTemplate(owner);
 								if (!scudLauncherTemplateName.empty())
 								{
 									const ThingTemplate* scudLauncherTemplate = TheThingFactory->findTemplate(AsciiString(scudLauncherTemplateName.c_str()), false);
@@ -3340,7 +3111,7 @@ namespace
 					{
 						queuedMessage["args"] = nlohmann::json::object();
 					}
-					const std::string scudTemplate = inferAutonomyScudLauncherTemplate(player);
+					const std::string scudTemplate = AIControlAdapterTemplateInferenceService::InferScudLauncherTemplate(player);
 						adapterLog(
 							"autonomy_scud_attempt player=%d side=%s base_side=%s template=%s",
 							player != nullptr ? player->getPlayerIndex() : -1,
@@ -3743,7 +3514,7 @@ namespace
 			{
 				std::string reason;
 				bool issued = false;
-				const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
+				const std::string profile = AIControlAdapterUiUtils::NormalizeAsciiLower(m_autonomy.state.profile);
 				const AIControlAdapterProfilePolicyConfig policyConfig = resolveAutonomyProfilePolicyConfig();
 				const bool isBalancedSprawl = policyConfig.isBalancedSprawl;
 				const bool isSprawlStyle = policyConfig.isSprawlStyle;
@@ -4661,7 +4432,7 @@ namespace
 			}
 
 			// Economy policy assessment: determines income health, reserve pressure, and spending mode
-			const std::string profile = normalizeAsciiLower(m_autonomy.state.profile);
+			const std::string profile = AIControlAdapterUiUtils::NormalizeAsciiLower(m_autonomy.state.profile);
 			const AIControlAdapterProfilePolicyManager profilePolicyManager;
 			const AIControlAdapterProfilePolicyConfig profilePolicyConfig = resolveAutonomyProfilePolicyConfig();
 			const bool isBalancedSprawl = profilePolicyConfig.isBalancedSprawl;
@@ -4906,18 +4677,12 @@ namespace
 			if (!m_autonomy.state.zoneThreats.empty())
 			{
 				const DWORD threatFreshnessMs = 10000;  // 10 seconds
-				auto threatSeverity = [](const std::string& level) -> int
-				{
-					if (level == "critical") return 4;
-					if (level == "high") return 3;
-					if (level == "medium") return 2;
-					if (level == "low") return 1;
-					return 0;
-				};
 				auto isFreshThreat = [&](const AutonomyZoneThreatState& threat) -> bool
 				{
-					const DWORD ageCutoff = now - threatFreshnessMs;
-					return AIControlAdapterHasTickElapsed(ageCutoff, threat.lastSeenTick);
+					return AIControlAdapterDefenseManager::IsZoneThreatFresh(
+						now,
+						threat.lastSeenTick,
+						threatFreshnessMs);
 				};
 				auto findZoneByAnchor = [&](UnsignedInt anchor) -> const AutonomyZone*
 				{
@@ -5010,13 +4775,12 @@ namespace
 					if (threatStillFresh)
 					{
 						const AutonomyZoneThreatState& threat = threatIt->second;
-						if ((threat.sourceType == "wmd_strike" || threat.sourceType == "special_power_strike" || threat.sourceType == "unknown_damage")
-							&& threat.localEnemyCount <= 0
-							&& threat.enemyArtilleryCount <= 0)
+						const char* releaseReason = AIControlAdapterDefenseManager::TransientStrikeReleaseReason(
+							threat.sourceType,
+							threat.localEnemyCount,
+							threat.enemyArtilleryCount);
+						if (releaseReason != nullptr)
 						{
-							const char* releaseReason = threat.sourceType == "wmd_strike"
-								? "wmd_strike_no_local_enemy"
-								: (threat.sourceType == "special_power_strike" ? "special_power_no_local_enemy" : "unknown_damage_no_local_enemy");
 							for (std::size_t taskIdx = 0; taskIdx < allocation.taskIds.size(); ++taskIdx)
 							{
 								m_autonomy.combatTaskManager.completeTask(allocation.taskIds[taskIdx], releaseReason);
@@ -5076,7 +4840,7 @@ namespace
 						continue;
 					}
 
-					const int severity = threatSeverity(threat.level);
+					const int severity = AIControlAdapterDefenseManager::ThreatSeverityForLevel(threat.level);
 					if (severity >= 1)
 					{
 						DefenseThreatCandidate candidate;
@@ -5166,7 +4930,7 @@ namespace
 					const bool activeThreat = threatIt != m_autonomy.state.zoneThreats.end() && isFreshThreat(threatIt->second);
 					const AutonomyZoneThreatState* threat = activeThreat ? &threatIt->second : nullptr;
 					AutonomyZoneDefenseReserveState& reserveState = m_autonomy.state.zoneDefenseReserves[zoneAnchor];
-					const int severity = threat != nullptr ? threatSeverity(threat->level) : 0;
+					const int severity = threat != nullptr ? AIControlAdapterDefenseManager::ThreatSeverityForLevel(threat->level) : 0;
 					const bool pressureEvidence =
 						activeThreat &&
 						(severity >= 3 ||
@@ -6506,7 +6270,7 @@ namespace
 					{
 						if (producer.objectId == scoutPoolProducerId)
 						{
-							const std::string inferredTemplate = inferTechnicalTemplateForProducerSnapshot(producer.object);
+							const std::string inferredTemplate = AIControlAdapterTemplateInferenceService::InferTechnicalTemplateForProducer(producer.object);
 							if (!inferredTemplate.empty())
 							{
 								shuttleTechnicalTemplate = inferredTemplate;
@@ -7131,7 +6895,7 @@ namespace
 				reason = "missing_mode";
 				return false;
 			}
-			const std::string mode = normalizeAsciiLower(modeIt->get<std::string>());
+			const std::string mode = AIControlAdapterUiUtils::NormalizeAsciiLower(modeIt->get<std::string>());
 			if (mode != "manual" && mode != "hybrid" && mode != "autonomous")
 			{
 				reason = "invalid_mode";
@@ -7158,7 +6922,7 @@ namespace
 					reason = "invalid_profile";
 					return false;
 				}
-				const std::string profile = normalizeAsciiLower(profileIt->get<std::string>());
+				const std::string profile = AIControlAdapterUiUtils::NormalizeAsciiLower(profileIt->get<std::string>());
 				if (profile != "standard"
 					&& profile != "aggressive"
 					&& profile != "economic"
@@ -9022,140 +8786,11 @@ namespace
 			return result;
 		}
 
-		std::vector<std::string> buildMapFileCacheCandidatePaths(const std::string& key) const
-		{
-			std::vector<std::string> paths;
-			if (key.empty())
-			{
-				return paths;
-			}
-			const std::string filename = key + ".json";
-			paths.push_back("projects/data/map-terrain/" + filename);
-			paths.push_back("../projects/data/map-terrain/" + filename);
-			paths.push_back("../../projects/data/map-terrain/" + filename);
-			paths.push_back("../../../projects/data/map-terrain/" + filename);
-			paths.push_back("Z:\\home\\jtanner\\workspace\\github\\jctanner.personal\\zero.hour\\projects\\data\\map-terrain\\" + filename);
-			paths.push_back("/home/jtanner/workspace/github/jctanner.personal/zero.hour/projects/data/map-terrain/" + filename);
-			return paths;
-		}
-
-		bool readTextFile(const std::string& path, std::string& outText) const
-		{
-			std::ifstream in(path.c_str(), std::ios::in | std::ios::binary);
-			if (!in.good())
-			{
-				return false;
-			}
-			outText.assign(
-				(std::istreambuf_iterator<char>(in)),
-				std::istreambuf_iterator<char>());
-			return true;
-		}
-
 		AIControlAdapterTerrainFacts loadMapFileCacheFactsForMap(const std::string& mapName)
 		{
-			const std::string key = AIControlAdapterNormalizeMapFileCacheKey(mapName);
-			std::unordered_map<std::string, AIControlAdapterTerrainFacts>::const_iterator cached = m_mapFileTerrainCacheByKey.find(key);
-			if (cached != m_mapFileTerrainCacheByKey.end())
-			{
-				return cached->second;
-			}
-
-			AIControlAdapterTerrainFacts facts;
-			facts.mapName = mapName;
-			facts.source = "unavailable";
-			facts.extraction.mapName = mapName;
-			facts.extraction.selectedSource = "unavailable";
-			facts.extraction.fallbackSource = "none";
-			facts.extraction.reason = "cache_not_found";
-			facts.mapFileCacheTelemetry = nlohmann::json::object({
-				{"loaded", false},
-				{"reason", key.empty() ? "empty_map_name" : "cache_not_found"}
+			return m_terrainMapCacheService.loadFactsForMap(mapName, [this](const std::string& line) {
+				adapterLog("%s", line.c_str());
 			});
-
-			const std::vector<std::string> paths = buildMapFileCacheCandidatePaths(key);
-			std::string selectedPath;
-			std::string body;
-			for (std::size_t i = 0; i < paths.size(); ++i)
-			{
-				if (readTextFile(paths[i], body))
-				{
-					selectedPath = paths[i];
-					break;
-				}
-			}
-
-			if (selectedPath.empty())
-			{
-				if (m_mapFileTerrainCacheLoggedKeys.insert(key + ":missing").second)
-				{
-					const std::string firstPath = paths.empty() ? "" : paths.front();
-					adapterLog(
-						"map_file_cache_probe map=%s normalized=%s path=%s found=0 reason=cache_not_found",
-						mapName.empty() ? "unknown" : mapName.c_str(),
-						key.empty() ? "empty" : key.c_str(),
-						firstPath.empty() ? "none" : firstPath.c_str());
-					adapterLog(
-						"map_file_cache_unavailable map=%s reason=cache_not_found",
-						mapName.empty() ? "unknown" : mapName.c_str());
-				}
-				m_mapFileTerrainCacheByKey[key] = facts;
-				return facts;
-			}
-
-			if (m_mapFileTerrainCacheLoggedKeys.insert(key + ":probe").second)
-			{
-				adapterLog(
-					"map_file_cache_probe map=%s normalized=%s path=%s found=1 reason=matched_normalized_map_name",
-					mapName.empty() ? "unknown" : mapName.c_str(),
-					key.empty() ? "empty" : key.c_str(),
-					selectedPath.c_str());
-			}
-
-			try
-			{
-				const nlohmann::json parsed = nlohmann::json::parse(body);
-				std::string reason;
-				if (!AIControlAdapterParseMapFileCacheJson(parsed, mapName, selectedPath, facts, reason))
-				{
-					if (m_mapFileTerrainCacheLoggedKeys.insert(key + ":parse-failed").second)
-					{
-						adapterLog(
-							"map_file_cache_unavailable map=%s reason=%s",
-							mapName.empty() ? "unknown" : mapName.c_str(),
-							reason.empty() ? "parse_error" : reason.c_str());
-					}
-				}
-				else if (m_mapFileTerrainCacheLoggedKeys.insert(key + ":loaded").second)
-				{
-					adapterLog(
-						"map_file_cache_loaded map=%s path=%s waypoints=%d lanes=%d objects=%d hash=%s",
-						mapName.empty() ? "unknown" : mapName.c_str(),
-						selectedPath.c_str(),
-						facts.mapFileCacheTelemetry.value("waypoints", 0),
-						facts.mapFileCacheTelemetry.value("lanes", 0),
-						facts.mapFileCacheTelemetry.value("objects", 0),
-						facts.mapFileCacheTelemetry.value("map_hash", std::string()).c_str());
-				}
-			}
-			catch (const std::exception& ex)
-			{
-				facts.mapFileCacheTelemetry = nlohmann::json::object({
-					{"loaded", false},
-					{"source", selectedPath},
-					{"reason", "parse_error"},
-					{"error", ex.what()}
-				});
-				if (m_mapFileTerrainCacheLoggedKeys.insert(key + ":exception").second)
-				{
-					adapterLog(
-						"map_file_cache_unavailable map=%s reason=parse_error",
-						mapName.empty() ? "unknown" : mapName.c_str());
-				}
-			}
-
-			m_mapFileTerrainCacheByKey[key] = facts;
-			return facts;
 		}
 
 		AIControlAdapterTerrainFacts buildEngineTerrainFacts(
@@ -9570,119 +9205,47 @@ namespace
 			return false;
 		}
 
-		struct GarrisonDiscoveryResult
-		{
-			bool accepted = false;
-			bool palace = false;
-			bool kindFlag = false;
-			bool containGarrison = false;
-			bool uiEnterable = false;
-			bool mapCacheGarrison = false;
-			int capacity = 0;
-			std::string containName = "none";
-			std::string reason = "not_garrisonable";
-		};
+		using GarrisonDiscoveryResult = AIControlAdapterGarrisonDiscoveryResult;
 
 		bool isNearMapCacheGarrison(const std::string& templateName, Real x, Real y, Real radius) const
 		{
-			if (!m_autonomy.state.pathingTelemetry.is_object())
-			{
-				return false;
-			}
-			const auto objectsIt = m_autonomy.state.pathingTelemetry.find("strategic_objects");
-			if (objectsIt == m_autonomy.state.pathingTelemetry.end() || !objectsIt->is_array())
-			{
-				return false;
-			}
-			const Real radiusSq = radius * radius;
-			for (const auto& item : *objectsIt)
-			{
-				if (!item.is_object() || item.value("kind", std::string("")) != "garrison")
-				{
-					continue;
-				}
-				const std::string cachedTemplate = item.value("template", std::string(""));
-				if (!cachedTemplate.empty() && !templateName.empty() && cachedTemplate != templateName)
-				{
-					continue;
-				}
-				const auto positionIt = item.find("position");
-				if (positionIt == item.end() || !positionIt->is_object())
-				{
-					continue;
-				}
-				const Real fx = positionIt->value("x", 0.0f);
-				const Real fy = positionIt->value("y", 0.0f);
-				const Real dx = fx - x;
-				const Real dy = fy - y;
-				if ((dx * dx) + (dy * dy) <= radiusSq)
-				{
-					return true;
-				}
-			}
-			return false;
+			return AIControlAdapterGarrisonManager::isNearMapCacheGarrison(
+				m_autonomy.state.pathingTelemetry,
+				templateName,
+				x,
+				y,
+				radius);
 		}
 
 		GarrisonDiscoveryResult discoverGarrisonStructure(Player* player, Object* obj) const
 		{
-			GarrisonDiscoveryResult result;
 			if (obj == nullptr || obj->isEffectivelyDead() || !obj->isKindOf(KINDOF_STRUCTURE))
 			{
+				GarrisonDiscoveryResult result;
 				result.reason = "not_structure";
 				return result;
 			}
 			const ThingTemplate* tt = obj->getTemplate();
 			const std::string name = tt != nullptr ? tt->getName().str() : "";
-			result.palace = isPalaceTemplateName(name);
-			result.kindFlag = obj->isKindOf(KINDOF_GARRISONABLE_UNTIL_DESTROYED);
+			AIControlAdapterGarrisonDiscoveryFacts facts;
+			facts.templateName = name;
+			facts.palace = isPalaceTemplateName(name);
+			facts.kindFlag = obj->isKindOf(KINDOF_GARRISONABLE_UNTIL_DESTROYED);
 			ContainModuleInterface* contain = obj->getContain();
 			if (contain != nullptr)
 			{
-				result.containGarrison = contain->isGarrisonable();
-				result.capacity = contain->getContainMax();
-				result.containName = result.containGarrison ? "garrison" : "contain";
+				facts.hasContain = true;
+				facts.containGarrison = contain->isGarrisonable();
+				facts.capacity = contain->getContainMax();
 			}
 			const Coord3D* pos = obj->getPosition();
 			if (pos != nullptr)
 			{
-				result.mapCacheGarrison = isNearMapCacheGarrison(name, pos->x, pos->y, 90.0f);
+				facts.mapCacheGarrison = isNearMapCacheGarrison(name, pos->x, pos->y, 90.0f);
 			}
-			result.uiEnterable = TheActionManager != nullptr && player != nullptr
+			facts.uiEnterable = TheActionManager != nullptr && player != nullptr
 				&& TheActionManager->canPlayerGarrison(player, obj, CMD_FROM_PLAYER);
-			result.accepted = result.palace || result.kindFlag || result.containGarrison || result.uiEnterable || result.mapCacheGarrison;
-			if (result.palace)
-			{
-				result.reason = "palace";
-			}
-			else if (result.kindFlag)
-			{
-				result.reason = "kind_flag";
-			}
-			else if (result.containGarrison)
-			{
-				result.reason = "contain_garrison";
-			}
-			else if (result.uiEnterable)
-			{
-				result.reason = "ui_enterable";
-			}
-			else if (result.mapCacheGarrison)
-			{
-				result.reason = "map_cache_garrison";
-			}
-			else if (contain == nullptr)
-			{
-				result.reason = "missing_contain";
-			}
-			else if (containsIgnoreCase(name, "civilian"))
-			{
-				result.reason = "unknown_civilian";
-			}
-			else
-			{
-				result.reason = "not_garrisonable";
-			}
-			return result;
+			return AIControlAdapterGarrisonManager::evaluateDiscovery(facts);
 		}
 
 		bool isUsefulGarrisonStructure(Player* player, Object* obj) const
@@ -9698,14 +9261,7 @@ namespace
 			}
 			const ThingTemplate* tt = obj->getTemplate();
 			const std::string name = tt != nullptr ? tt->getName().str() : "";
-			const bool relevant = discovery.accepted
-				|| discovery.kindFlag
-				|| discovery.containName != "none"
-				|| discovery.mapCacheGarrison
-				|| containsIgnoreCase(name, "civilian")
-				|| containsIgnoreCase(name, "bunker")
-				|| containsIgnoreCase(name, "garrison");
-			if (!relevant)
+			if (!AIControlAdapterGarrisonManager::shouldLogDiscovery(name, discovery))
 			{
 				return false;
 			}
@@ -9737,54 +9293,12 @@ namespace
 
 		bool isNearGarrisonFeature(Real x, Real y, const char* wantedKind, Real radius) const
 		{
-			if (wantedKind == nullptr || !m_autonomy.state.pathingTelemetry.is_object())
-			{
-				return false;
-			}
-			const auto featuresIt = m_autonomy.state.pathingTelemetry.find("features");
-			if (featuresIt == m_autonomy.state.pathingTelemetry.end() || !featuresIt->is_array())
-			{
-				return false;
-			}
-			const Real radiusSq = radius * radius;
-			for (const auto& feature : *featuresIt)
-			{
-				if (!feature.is_object())
-				{
-					continue;
-				}
-				const std::string kind = feature.value("kind", std::string(""));
-				const std::string id = feature.value("id", std::string(""));
-				if (!containsIgnoreCase(kind, wantedKind) && !containsIgnoreCase(id, wantedKind))
-				{
-					continue;
-				}
-				Real fx = 0.0f;
-				Real fy = 0.0f;
-				const auto positionIt = feature.find("position");
-				if (positionIt != feature.end() && positionIt->is_object())
-				{
-					fx = positionIt->value("x", 0.0f);
-					fy = positionIt->value("y", 0.0f);
-				}
-				else
-				{
-					const auto pointsIt = feature.find("points");
-					if (pointsIt == feature.end() || !pointsIt->is_array() || pointsIt->empty() || !(*pointsIt)[0].is_object())
-					{
-						continue;
-					}
-					fx = (*pointsIt)[0].value("x", 0.0f);
-					fy = (*pointsIt)[0].value("y", 0.0f);
-				}
-				const Real dx = fx - x;
-				const Real dy = fy - y;
-				if ((dx * dx) + (dy * dy) <= radiusSq)
-				{
-					return true;
-				}
-			}
-			return false;
+			return AIControlAdapterGarrisonManager::isNearGarrisonFeature(
+				m_autonomy.state.pathingTelemetry,
+				x,
+				y,
+				wantedKind,
+				radius);
 		}
 
 		bool isNearArtilleryPlatform(Real x, Real y, Real radius) const
@@ -9873,73 +9387,38 @@ namespace
 
 		nlohmann::json garrisonAssignmentTelemetry(const AutonomyGarrisonAssignment& assignment, DWORD now) const
 		{
-			nlohmann::json unitTelemetry = nlohmann::json::array();
-			nlohmann::json ids = nlohmann::json::array();
-			nlohmann::json templates = nlohmann::json::array();
-			int entered = 0;
-			int pending = 0;
-			int outside = 0;
-			int nearby = 0;
+			AIControlAdapterGarrisonAssignmentTelemetry telemetry;
+			telemetry.structureId = assignment.structureId;
+			telemetry.zoneAnchorId = assignment.zoneAnchorId;
+			telemetry.templateName = assignment.templateName;
+			telemetry.x = assignment.x;
+			telemetry.y = assignment.y;
+			telemetry.desiredInfantry = assignment.desiredInfantry;
+			telemetry.estimatedCapacity = assignment.estimatedCapacity;
+			telemetry.infantryIds = assignment.infantryIds;
+			telemetry.lastCommandTick = assignment.lastCommandTick;
+			telemetry.lastProgressTick = assignment.lastProgressTick;
+			telemetry.state = assignment.state;
+			telemetry.reason = assignment.reason;
 			for (const AutonomyGarrisonInfantryAssignment& unit : assignment.infantry)
 			{
-				ids.push_back(unit.unitId);
-				templates.push_back(unit.templateName);
-				if (unit.entered)
-				{
-					++entered;
-				}
-				if (unit.enteredPendingVerification)
-				{
-					++pending;
-				}
-				if (unit.outside)
-				{
-					++outside;
-				}
-				if (unit.nearby)
-				{
-					++nearby;
-				}
-				unitTelemetry.push_back(nlohmann::json::object({
-					{"id", unit.unitId},
-					{"template", unit.templateName},
-					{"position", nlohmann::json::object({ {"x", unit.lastX}, {"y", unit.lastY}, {"z", 0.0f} })},
-					{"distance", unit.lastDistance},
-					{"entered", unit.entered},
-					{"entered_pending_verification", unit.enteredPendingVerification},
-					{"outside", unit.outside},
-					{"nearby", unit.nearby},
-					{"last_command_age_ms", unit.lastCommandTick != 0u ? now - unit.lastCommandTick : 0u},
-					{"last_progress_age_ms", unit.lastProgressTick != 0u ? now - unit.lastProgressTick : 0u},
-					{"state", unit.state},
-					{"reason", unit.reason}
-				}));
+				AIControlAdapterGarrisonInfantryTelemetry infantry;
+				infantry.unitId = unit.unitId;
+				infantry.templateName = unit.templateName;
+				infantry.lastX = unit.lastX;
+				infantry.lastY = unit.lastY;
+				infantry.lastDistance = unit.lastDistance;
+				infantry.entered = unit.entered;
+				infantry.enteredPendingVerification = unit.enteredPendingVerification;
+				infantry.outside = unit.outside;
+				infantry.nearby = unit.nearby;
+				infantry.lastCommandTick = unit.lastCommandTick;
+				infantry.lastProgressTick = unit.lastProgressTick;
+				infantry.state = unit.state;
+				infantry.reason = unit.reason;
+				telemetry.infantry.push_back(infantry);
 			}
-			return nlohmann::json::object({
-				{"structure_id", assignment.structureId},
-				{"template", assignment.templateName},
-				{"zone_id", assignment.zoneAnchorId},
-				{"position", nlohmann::json::object({ {"x", assignment.x}, {"y", assignment.y}, {"z", 0.0f} })},
-				{"desired_infantry", assignment.desiredInfantry},
-				{"capacity", assignment.estimatedCapacity},
-				{"assigned_infantry", static_cast<int>(assignment.infantry.size())},
-				{"assigned_infantry_ids", ids},
-				{"assigned_infantry_templates", templates},
-				{"entered", entered},
-				{"entered_infantry", entered},
-				{"entered_pending_verification", pending},
-				{"outside_infantry", outside},
-				{"nearby_infantry", nearby},
-				{"selected", true},
-				{"discovered", true},
-				{"source", "assignment"},
-				{"discovery_reason", "assignment"},
-				{"last_command_age_ms", assignment.lastCommandTick != 0u ? now - assignment.lastCommandTick : 0u},
-				{"last_progress_age_ms", assignment.lastProgressTick != 0u ? now - assignment.lastProgressTick : 0u},
-				{"units", unitTelemetry},
-				{"state", assignment.state},
-				{"reason", assignment.reason}
-			});
+			return AIControlAdapterGarrisonManager::buildAssignmentTelemetry(telemetry, now);
 		}
 
 		void evaluateGarrisonManagement(Player* player)
@@ -10842,69 +10321,38 @@ namespace
 				return;
 			}
 
-			// Rebuild zones (same logic as in evaluateAutonomyMacro)
-			struct AutonomyZone
-			{
-				Coord3D center;
-				ObjectID anchorId;
-				bool isMainBase;
-				ZoneAnchorType anchorType;
-			};
-			std::vector<AutonomyZone> zones;
-
+			// Rebuild compact debug overlay anchors from current owned structures.
 			std::vector<AutomationOwnedObjectSnapshot> ownedObjects;
 			collectOwnedAutomationObjects(player, ownedObjects);
+			std::vector<DebugZoneAnchorCandidate> zoneCandidates;
 			for (std::size_t ownedIdx = 0; ownedIdx < ownedObjects.size(); ++ownedIdx)
 			{
 				const AutomationOwnedObjectSnapshot& owned = ownedObjects[ownedIdx];
-				if (!owned.isStructure || owned.underConstruction)
-				{
-					continue;
-				}
-				if (!(owned.name == "GLASupplyStash" || owned.name == "GLABarracks" || owned.name == "GLAArmsDealer"))
-				{
-					continue;
-				}
-
 				const Coord3D* anchorPos = owned.object != nullptr ? owned.object->getPosition() : nullptr;
 				if (anchorPos == nullptr)
 				{
 					continue;
 				}
 
-				const Real minZoneDistSq = 200.0f * 200.0f;
-				bool tooClose = false;
-				for (std::size_t i = 0; i < zones.size(); ++i)
-				{
-					const Real dx = zones[i].center.x - anchorPos->x;
-					const Real dy = zones[i].center.y - anchorPos->y;
-					if ((dx * dx) + (dy * dy) < minZoneDistSq)
-					{
-						tooClose = true;
-						break;
-					}
-				}
-				if (tooClose)
-				{
-					continue;
-				}
-
-				AutonomyZone zone = {};
-				zone.center = *anchorPos;
-				zone.anchorId = owned.object->getID();
-				zone.isMainBase = false;
-				zone.anchorType = owned.isSupplyStructure ? ZoneAnchorType::SupplyStash : ZoneAnchorType::MainBase;
-				zones.push_back(zone);
+				DebugZoneAnchorCandidate candidate;
+				candidate.anchorId = owned.object->getID();
+				candidate.x = anchorPos->x;
+				candidate.y = anchorPos->y;
+				candidate.name = owned.name;
+				candidate.isStructure = owned.isStructure;
+				candidate.underConstruction = owned.underConstruction;
+				candidate.isSupplyStructure = owned.isSupplyStructure;
+				zoneCandidates.push_back(candidate);
 			}
+
+			const std::vector<DebugZoneAnchor> zones =
+				AIControlAdapterZoneManager::BuildDebugOverlayZones(zoneCandidates, 200.0f);
 
 			if (zones.empty())
 			{
 				adapterLog("debug_draw_skip reason=no_zones");
 				return;
 			}
-
-			// Mark main base
-			zones[0].isMainBase = true;
 
 			adapterLog("debug_draw zones=%d radius=%.1f", static_cast<int>(zones.size()), m_autonomy.state.zoneRadius);
 
@@ -10915,7 +10363,11 @@ namespace
 			// Draw each zone
 			for (std::size_t i = 0; i < zones.size(); ++i)
 			{
-				const AutonomyZone& zone = zones[i];
+				const DebugZoneAnchor& zone = zones[i];
+				Coord3D zoneCenter;
+				zoneCenter.x = zone.x;
+				zoneCenter.y = zone.y;
+				zoneCenter.z = 0.0f;
 
 				// Color: green for main base, cyan for expansion zones
 				Color zoneColor = zone.isMainBase
@@ -10928,11 +10380,11 @@ namespace
 					const Real angle1 = static_cast<Real>(seg) * angleStep;
 					const Real angle2 = static_cast<Real>(seg + 1) * angleStep;
 
-					Coord3D worldPos1 = zone.center;
+					Coord3D worldPos1 = zoneCenter;
 					worldPos1.x += zoneRadius * std::cos(angle1);
 					worldPos1.y += zoneRadius * std::sin(angle1);
 
-					Coord3D worldPos2 = zone.center;
+					Coord3D worldPos2 = zoneCenter;
 					worldPos2.x += zoneRadius * std::cos(angle2);
 					worldPos2.y += zoneRadius * std::sin(angle2);
 
@@ -10953,7 +10405,7 @@ namespace
 				}
 
 				// Draw center marker (crosshair)
-				Coord3D centerPos = zone.center;
+				Coord3D centerPos = zoneCenter;
 				const Real markerSize = zoneRadius * 0.15f;
 
 				Coord3D markerLeft = centerPos;
@@ -11057,40 +10509,36 @@ namespace
 			}
 
 			const Coord3D* pos = unit->getPosition();
-			const Real radius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius) * 1.25f;
-			const Real radiusSq = radius * radius;
-			UnsignedInt bestAnchor = 0u;
-			bool bestIsMainBase = false;
-			Real bestDistSq = radiusSq;
+			std::vector<AIControlAdapterDefenseZoneSnapshot> zones;
 			for (const auto& zone : m_autonomy.state.telemetryZones)
 			{
 				if (!zone.is_object())
 				{
 					continue;
 				}
-				const Real zx = zone.value("center_x", 0.0f);
-				const Real zy = zone.value("center_y", 0.0f);
-				const Real dx = pos->x - zx;
-				const Real dy = pos->y - zy;
-				const Real distSq = dx * dx + dy * dy;
-				if (distSq <= bestDistSq)
-				{
-					bestDistSq = distSq;
-					bestAnchor = zone.value("anchor_id", 0u);
-					bestIsMainBase = zone.value("is_main_base", false) || zone.value("main_base", false);
-				}
+				AIControlAdapterDefenseZoneSnapshot snapshot;
+				snapshot.anchorId = zone.value("anchor_id", 0u);
+				snapshot.centerX = zone.value("center_x", 0.0f);
+				snapshot.centerY = zone.value("center_y", 0.0f);
+				snapshot.isMainBase = zone.value("is_main_base", false) || zone.value("main_base", false);
+				zones.push_back(snapshot);
 			}
-			if (bestAnchor == 0u)
+			std::vector<AIControlAdapterZoneDefenseReserveSnapshot> reserves;
+			for (const auto& reservePair : m_autonomy.state.zoneDefenseReserves)
 			{
-				return false;
+				AIControlAdapterZoneDefenseReserveSnapshot snapshot;
+				snapshot.zoneId = reservePair.first;
+				snapshot.surplus = reservePair.second.surplus;
+				snapshot.deficit = reservePair.second.deficit;
+				snapshot.activeThreat = reservePair.second.activeThreat;
+				reserves.push_back(snapshot);
 			}
-			const auto reserveIt = m_autonomy.state.zoneDefenseReserves.find(bestAnchor);
-			if (reserveIt == m_autonomy.state.zoneDefenseReserves.end())
-			{
-				return false;
-			}
-			const AutonomyZoneDefenseReserveState& reserve = reserveIt->second;
-			return reserve.surplus <= 0 || reserve.deficit > 0 || reserve.activeThreat || bestIsMainBase;
+			return AIControlAdapterDefenseManager::ResolveZoneDefenseFloor(
+				pos->x,
+				pos->y,
+				m_autonomy.state.zoneRadius,
+				zones,
+				reserves).protectedByFloor;
 		}
 
 		bool canRelaxScoutDefenseFloorForUnit(Object* unit) const
@@ -11103,45 +10551,41 @@ namespace
 			}
 
 			const Coord3D* pos = unit->getPosition();
-			const Real radius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius) * 1.25f;
-			const Real radiusSq = radius * radius;
-			UnsignedInt bestAnchor = 0u;
-			bool bestIsMainBase = false;
-			Real bestDistSq = radiusSq;
+			std::vector<AIControlAdapterDefenseZoneSnapshot> zones;
 			for (const auto& zone : m_autonomy.state.telemetryZones)
 			{
 				if (!zone.is_object())
 				{
 					continue;
 				}
-				const Real zx = zone.value("center_x", 0.0f);
-				const Real zy = zone.value("center_y", 0.0f);
-				const Real dx = pos->x - zx;
-				const Real dy = pos->y - zy;
-				const Real distSq = dx * dx + dy * dy;
-				if (distSq <= bestDistSq)
-				{
-					bestDistSq = distSq;
-					bestAnchor = zone.value("anchor_id", 0u);
-					bestIsMainBase = zone.value("is_main_base", false) || zone.value("main_base", false);
-				}
+				AIControlAdapterDefenseZoneSnapshot snapshot;
+				snapshot.anchorId = zone.value("anchor_id", 0u);
+				snapshot.centerX = zone.value("center_x", 0.0f);
+				snapshot.centerY = zone.value("center_y", 0.0f);
+				snapshot.isMainBase = zone.value("is_main_base", false) || zone.value("main_base", false);
+				zones.push_back(snapshot);
 			}
-			if (bestAnchor == 0u || bestIsMainBase)
+			std::vector<AIControlAdapterZoneDefenseReserveSnapshot> reserves;
+			for (const auto& reservePair : m_autonomy.state.zoneDefenseReserves)
 			{
-				return false;
+				AIControlAdapterZoneDefenseReserveSnapshot snapshot;
+				snapshot.zoneId = reservePair.first;
+				snapshot.surplus = reservePair.second.surplus;
+				snapshot.deficit = reservePair.second.deficit;
+				snapshot.activeThreat = reservePair.second.activeThreat;
+				reserves.push_back(snapshot);
 			}
-			const auto reserveIt = m_autonomy.state.zoneDefenseReserves.find(bestAnchor);
-			if (reserveIt == m_autonomy.state.zoneDefenseReserves.end())
-			{
-				return false;
-			}
-			const AutonomyZoneDefenseReserveState& reserve = reserveIt->second;
-			return !reserve.activeThreat && reserve.deficit <= 0;
+			return AIControlAdapterDefenseManager::ResolveZoneDefenseFloor(
+				pos->x,
+				pos->y,
+				m_autonomy.state.zoneRadius,
+				zones,
+				reserves).canRelaxForScout;
 		}
 
 		std::vector<unsigned int> selectRaidProbeUnitIds(const CombatTask& task, const CombatTaskWaypoint& waypoint)
 		{
-			std::vector<CombatTaskProbeCandidate> candidates;
+			std::vector<AIControlAdapterRaidProbeUnitSnapshot> units;
 			for (unsigned int unitId : task.assignedUnitIds)
 			{
 				Object* unit = TheGameLogic != nullptr ? TheGameLogic->findObjectByID(static_cast<ObjectID>(unitId)) : nullptr;
@@ -11151,57 +10595,36 @@ namespace
 				}
 				const Coord3D* pos = unit->getPosition();
 				const ThingTemplate* tt = unit->getTemplate();
-				const std::string name = tt != nullptr ? tt->getName().str() : "";
-				const bool vehicle = unit->isKindOf(KINDOF_VEHICLE) || unit->isKindOf(KINDOF_AIRCRAFT);
-				const bool fast =
-					containsIgnoreCase(name, "quad") ||
-					containsIgnoreCase(name, "buggy") ||
-					containsIgnoreCase(name, "technical") ||
-					containsIgnoreCase(name, "scorpion");
-				CombatTaskProbeCandidate candidate;
-				candidate.unitId = unitId;
-				candidate.alive = !unit->isEffectivelyDead();
-				candidate.fast = fast;
-				candidate.combatCapable = vehicle && unit->isAbleToAttack() && !unit->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION);
-				candidate.worker = unit->isKindOf(KINDOF_DOZER) || unit->isKindOf(KINDOF_HARVESTER);
-				candidate.captureTaskReserved = m_autonomy.taskReservationManager.isObjectReserved(unitId);
-				candidate.constructionTaskReserved = candidate.captureTaskReserved;
-				candidate.zoneDefenseFloorReserved = isUnitProtectedByZoneDefenseFloor(unit);
-				candidate.criticalBaseDefenseReserved = candidate.zoneDefenseFloorReserved;
+				AIControlAdapterRaidProbeUnitSnapshot snapshot;
+				snapshot.unitId = unitId;
+				snapshot.templateName = tt != nullptr ? tt->getName().str() : "";
+				snapshot.alive = !unit->isEffectivelyDead();
+				snapshot.vehicle = unit->isKindOf(KINDOF_VEHICLE);
+				snapshot.aircraft = unit->isKindOf(KINDOF_AIRCRAFT);
+				snapshot.ableToAttack = unit->isAbleToAttack();
+				snapshot.underConstruction = unit->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION);
+				snapshot.worker = unit->isKindOf(KINDOF_DOZER);
+				snapshot.harvester = unit->isKindOf(KINDOF_HARVESTER);
+				snapshot.taskReserved = m_autonomy.taskReservationManager.isObjectReserved(unitId);
+				snapshot.zoneDefenseFloorReserved = isUnitProtectedByZoneDefenseFloor(unit);
 				if (pos != nullptr)
 				{
-					const Real dx = pos->x - waypoint.position.x;
-					const Real dy = pos->y - waypoint.position.y;
-					candidate.distanceFromAnchor = std::sqrt(dx * dx + dy * dy);
+					snapshot.x = pos->x;
+					snapshot.y = pos->y;
+					snapshot.hasPosition = true;
 				}
-				else
-				{
-					candidate.distanceFromAnchor = 999999.0f;
-				}
-				candidates.push_back(candidate);
+				units.push_back(snapshot);
 			}
-			return selectCombatTaskProbeUnits(candidates, 3, 1200.0f);
+			return AIControlAdapterRaidManager::selectProbeUnitIds(units, waypoint, 3, 1200.0f);
 		}
 
 		Coord3D computeRaidProbeTarget(const CombatTask& task, int waypointIndex)
 		{
-			const CombatTaskWaypoint& waypoint = task.waypoints[static_cast<std::size_t>(waypointIndex)];
-			const Coord3D desired = waypointIndex + 1 < static_cast<int>(task.waypoints.size())
-				? task.waypoints[static_cast<std::size_t>(waypointIndex + 1)].position
-				: task.targetPosition;
-			Coord3D target = desired;
-			const Real dx = desired.x - waypoint.position.x;
-			const Real dy = desired.y - waypoint.position.y;
-			const Real distance = std::sqrt(dx * dx + dy * dy);
-			const Real maxProbeAdvance = 1200.0f;
-			if (distance > maxProbeAdvance && distance > 1.0f)
-			{
-				const Real scale = maxProbeAdvance / distance;
-				target.x = waypoint.position.x + dx * scale;
-				target.y = waypoint.position.y + dy * scale;
-				target.z = waypoint.position.z;
-			}
-			return target;
+			return AIControlAdapterRaidManager::computeProbeTarget(
+				task.waypoints,
+				task.targetPosition,
+				waypointIndex,
+				1200.0f);
 		}
 
 		bool issueRaidProbeCommand(Player* player, CombatTask& task, const std::vector<unsigned int>& probeUnits, const Coord3D& target, const std::string& reason)
@@ -11422,153 +10845,38 @@ namespace
 			{
 				mapName = TheTerrainLogic->getSourceFilename().str();
 			}
-			unsigned int hash = 2166136261u;
-			for (char c : mapName)
-			{
-				hash ^= static_cast<unsigned char>(c);
-				hash *= 16777619u;
-			}
-			hash ^= static_cast<unsigned int>(player != nullptr ? player->getPlayerIndex() : 0);
-			hash *= 16777619u;
-			hash ^= static_cast<unsigned int>((now / 30000u) & 0xFFFFu);
-			hash *= 16777619u;
-			hash ^= static_cast<unsigned int>(m_autonomy.combatTaskManager.getScoutTaskCount() + 1);
-			return hash;
+			return AIControlAdapterScoutingManager::buildStableScoutSeed(
+				mapName,
+				player != nullptr ? player->getPlayerIndex() : 0,
+				now,
+				m_autonomy.combatTaskManager.getScoutTaskCount());
 		}
 
 		void resolveScoutMapBounds(float& outMinX, float& outMinY, float& outMaxX, float& outMaxY) const
 		{
-			outMinX = 0.0f;
-			outMinY = 0.0f;
-			outMaxX = 5000.0f;
-			outMaxY = 5000.0f;
-			if (m_autonomy.state.pathingTelemetry.is_object())
-			{
-				const nlohmann::json& extraction = m_autonomy.state.pathingTelemetry.value("terrain_extraction", nlohmann::json::object());
-				if (extraction.is_object() && extraction.contains("extent"))
-				{
-					const nlohmann::json& extent = extraction["extent"];
-					if (extent.is_object())
-					{
-						outMinX = extent.value("min_x", outMinX);
-						outMinY = extent.value("min_y", outMinY);
-						outMaxX = extent.value("max_x", outMaxX);
-						outMaxY = extent.value("max_y", outMaxY);
-					}
-				}
-			}
-			if (m_autonomy.state.telemetryZones.is_array())
-			{
-				for (const nlohmann::json& zone : m_autonomy.state.telemetryZones)
-				{
-					const float x = zone.value("center_x", 0.0f);
-					const float y = zone.value("center_y", 0.0f);
-					if (x > 0.0f || y > 0.0f)
-					{
-						outMinX = std::min(outMinX, x - 2500.0f);
-						outMinY = std::min(outMinY, y - 2500.0f);
-						outMaxX = std::max(outMaxX, x + 2500.0f);
-						outMaxY = std::max(outMaxY, y + 2500.0f);
-					}
-				}
-			}
+			const AIControlAdapterScoutMapBounds bounds = AIControlAdapterScoutingManager::resolveScoutMapBounds(
+				m_autonomy.state.pathingTelemetry,
+				m_autonomy.state.telemetryZones);
+			outMinX = bounds.minX;
+			outMinY = bounds.minY;
+			outMaxX = bounds.maxX;
+			outMaxY = bounds.maxY;
 		}
 
 		std::vector<CombatTaskScoutRandomOrigin> buildScoutRandomOrigins() const
 		{
-			std::vector<CombatTaskScoutRandomOrigin> origins;
-			if (m_autonomy.state.telemetryZones.is_array())
-			{
-				for (const nlohmann::json& zone : m_autonomy.state.telemetryZones)
-				{
-					CombatTaskScoutRandomOrigin origin;
-					origin.zoneId = zone.value("anchor_id", 0u);
-					origin.mainBase = zone.value("is_main_base", false);
-					origin.position.x = zone.value("front_point_x", zone.value("center_x", 0.0f));
-					origin.position.y = zone.value("front_point_y", zone.value("center_y", 0.0f));
-					origin.position.z = 0.0f;
-					origin.priority = zone.value("active", false) ? 10 : (zone.value("developed", false) ? 5 : 0);
-					if (origin.zoneId > 0u && (origin.position.x != 0.0f || origin.position.y != 0.0f))
-					{
-						origins.push_back(origin);
-					}
-				}
-			}
-			bool hasNonMain = false;
-			for (const CombatTaskScoutRandomOrigin& origin : origins)
-			{
-				if (!origin.mainBase)
-				{
-					hasNonMain = true;
-					break;
-				}
-			}
-			if (hasNonMain)
-			{
-				std::vector<CombatTaskScoutRandomOrigin> filtered;
-				for (const CombatTaskScoutRandomOrigin& origin : origins)
-				{
-					if (!origin.mainBase)
-					{
-						filtered.push_back(origin);
-					}
-				}
-				origins.swap(filtered);
-			}
-			if (origins.empty() && m_autonomy.state.hasLastZone)
-			{
-				CombatTaskScoutRandomOrigin origin;
-				origin.zoneId = m_autonomy.state.lastZoneAnchorId;
-				origin.mainBase = m_autonomy.state.lastZoneIsMainBase;
-				origin.position.x = m_autonomy.state.lastZoneCenterX;
-				origin.position.y = m_autonomy.state.lastZoneCenterY;
-				origin.position.z = 0.0f;
-				origins.push_back(origin);
-			}
-			return origins;
+			AIControlAdapterScoutLastZoneSnapshot lastZone;
+			lastZone.hasLastZone = m_autonomy.state.hasLastZone;
+			lastZone.anchorId = m_autonomy.state.lastZoneAnchorId;
+			lastZone.isMainBase = m_autonomy.state.lastZoneIsMainBase;
+			lastZone.centerX = m_autonomy.state.lastZoneCenterX;
+			lastZone.centerY = m_autonomy.state.lastZoneCenterY;
+			return AIControlAdapterScoutingManager::buildScoutRandomOrigins(m_autonomy.state.telemetryZones, lastZone);
 		}
 
 		std::vector<CombatTaskScoutRandomBarrier> buildScoutRandomBarriers() const
 		{
-			std::vector<CombatTaskScoutRandomBarrier> barriers;
-			if (!m_autonomy.state.pathingTelemetry.is_object())
-			{
-				return barriers;
-			}
-			const nlohmann::json& features = m_autonomy.state.pathingTelemetry.value("terrain_features", nlohmann::json::array());
-			if (!features.is_array())
-			{
-				return barriers;
-			}
-			for (const nlohmann::json& feature : features)
-			{
-				const std::string kind = feature.value("kind", "");
-				if (kind != "impassable_barrier" && kind != "blocked_area")
-				{
-					continue;
-				}
-				const nlohmann::json& points = feature.value("points", nlohmann::json::array());
-				if (!points.is_array() || points.size() < 2u)
-				{
-					continue;
-				}
-				for (std::size_t i = 1; i < points.size(); ++i)
-				{
-					const nlohmann::json& a = points[i - 1];
-					const nlohmann::json& b = points[i];
-					if (!a.is_object() || !b.is_object())
-					{
-						continue;
-					}
-					CombatTaskScoutRandomBarrier barrier;
-					barrier.ax = a.value("x", 0.0f);
-					barrier.ay = a.value("y", 0.0f);
-					barrier.bx = b.value("x", 0.0f);
-					barrier.by = b.value("y", 0.0f);
-					barriers.push_back(barrier);
-				}
-			}
-			return barriers;
+			return AIControlAdapterScoutingManager::buildScoutRandomBarriers(m_autonomy.state.pathingTelemetry);
 		}
 
 		std::vector<CombatTaskScoutObjective> buildScoutObjectives(Player* player, DWORD now, bool randomCoverageThin, ScoutObjectiveBuildStats* outStats)
@@ -11750,7 +11058,7 @@ namespace
 				{
 					continue;
 				}
-				const std::string technicalTemplateName = inferTechnicalTemplateForProducerSnapshot(owned.object);
+				const std::string technicalTemplateName = AIControlAdapterTemplateInferenceService::InferTechnicalTemplateForProducer(owned.object);
 				if (technicalTemplateName.empty())
 				{
 					continue;
@@ -11800,21 +11108,51 @@ namespace
 
 		int resolveWorkerShuttleProtectedTechnicalCount() const
 		{
-			if (!m_autonomy.state.glaUsaStrategyTelemetry.is_object()
-				|| !m_autonomy.state.glaUsaStrategyTelemetry.value("active", false))
+			return m_workerShuttleManager.ResolveProtectedTechnicalCount(m_autonomy.state.glaUsaStrategyTelemetry);
+		}
+
+		AIControlAdapterWorkerShuttleTechnicalSnapshot buildWorkerShuttleTechnicalSnapshot(
+			const AutomationOwnedObjectSnapshot& owned) const
+		{
+			AIControlAdapterWorkerShuttleTechnicalSnapshot snapshot;
+			if (owned.object != nullptr)
 			{
-				return 0;
+				snapshot.id = static_cast<unsigned int>(owned.object->getID());
+				snapshot.dead = owned.object->isEffectivelyDead();
 			}
-			const auto workerIt = m_autonomy.state.glaUsaStrategyTelemetry.find("worker_mobility");
-			if (workerIt == m_autonomy.state.glaUsaStrategyTelemetry.end() || !workerIt->is_object())
+			snapshot.isStructure = owned.isStructure;
+			snapshot.underConstruction = owned.underConstruction;
+			snapshot.isTechnical = owned.isTechnical;
+			return snapshot;
+		}
+
+		AIControlAdapterWorkerShuttleAssignmentSnapshot buildWorkerShuttleAssignmentSnapshot(
+			const AutonomyWorkerShuttleAssignment& assignment) const
+		{
+			AIControlAdapterWorkerShuttleAssignmentSnapshot snapshot;
+			snapshot.taskId = assignment.taskId;
+			snapshot.workerId = assignment.workerId;
+			snapshot.technicalId = assignment.technicalId;
+			snapshot.templateName = assignment.templateName;
+			snapshot.state = assignment.state;
+			snapshot.reason = assignment.reason;
+			snapshot.createdTick = assignment.createdTick;
+			snapshot.lastCommandTick = assignment.lastCommandTick;
+			snapshot.targetX = assignment.targetPosition.x;
+			snapshot.targetY = assignment.targetPosition.y;
+			snapshot.targetZ = assignment.targetPosition.z;
+			return snapshot;
+		}
+
+		std::vector<AIControlAdapterWorkerShuttleAssignmentSnapshot> collectWorkerShuttleAssignmentSnapshots() const
+		{
+			std::vector<AIControlAdapterWorkerShuttleAssignmentSnapshot> assignments;
+			assignments.reserve(m_autonomy.state.workerShuttleAssignments.size());
+			for (const auto& pair : m_autonomy.state.workerShuttleAssignments)
 			{
-				return 0;
+				assignments.push_back(buildWorkerShuttleAssignmentSnapshot(pair.second));
 			}
-			if (!workerIt->value("desired", false))
-			{
-				return 0;
-			}
-			return std::max(0, workerIt->value("protected_technicals", 0));
+			return assignments;
 		}
 
 		std::set<UnsignedInt> collectWorkerShuttleProtectedTechnicalIds(Player* player) const
@@ -11825,26 +11163,18 @@ namespace
 			{
 				return protectedIds;
 			}
-			std::vector<UnsignedInt> technicalIds;
+			std::vector<AIControlAdapterWorkerShuttleTechnicalSnapshot> technicals;
 			std::vector<AutomationOwnedObjectSnapshot> ownedObjects;
 			collectOwnedAutomationObjects(player, ownedObjects);
 			for (const AutomationOwnedObjectSnapshot& owned : ownedObjects)
 			{
-				if (owned.object == nullptr || owned.isStructure || owned.underConstruction || !owned.isTechnical)
-				{
-					continue;
-				}
-				if (owned.object->isEffectivelyDead())
-				{
-					continue;
-				}
-				technicalIds.push_back(static_cast<UnsignedInt>(owned.object->getID()));
+				technicals.push_back(buildWorkerShuttleTechnicalSnapshot(owned));
 			}
-			std::sort(technicalIds.begin(), technicalIds.end());
-			const int count = std::min(desiredProtected, static_cast<int>(technicalIds.size()));
-			for (int i = 0; i < count; ++i)
+			const std::set<unsigned int> selectedIds =
+				m_workerShuttleManager.CollectProtectedTechnicalIds(technicals, desiredProtected);
+			for (unsigned int id : selectedIds)
 			{
-				protectedIds.insert(technicalIds[static_cast<std::size_t>(i)]);
+				protectedIds.insert(static_cast<UnsignedInt>(id));
 			}
 			return protectedIds;
 		}
@@ -11856,7 +11186,9 @@ namespace
 				return false;
 			}
 			const std::set<UnsignedInt> protectedIds = collectWorkerShuttleProtectedTechnicalIds(player);
-			return protectedIds.find(static_cast<UnsignedInt>(owned.object->getID())) != protectedIds.end();
+			return m_workerShuttleManager.IsTechnicalProtected(
+				buildWorkerShuttleTechnicalSnapshot(owned),
+				std::set<unsigned int>(protectedIds.begin(), protectedIds.end()));
 		}
 
 		bool isWorkerInsideTechnical(Object* worker, Object* technical) const
@@ -11968,17 +11300,9 @@ namespace
 
 		bool isTechnicalAssignedToWorkerShuttle(UnsignedInt technicalId) const
 		{
-			for (const auto& pair : m_autonomy.state.workerShuttleAssignments)
-			{
-				const AutonomyWorkerShuttleAssignment& assignment = pair.second;
-				if (assignment.technicalId == technicalId
-					&& assignment.state != "released"
-					&& assignment.state != "failed")
-				{
-					return true;
-				}
-			}
-			return false;
+			return m_workerShuttleManager.IsTechnicalAssigned(
+				static_cast<unsigned int>(technicalId),
+				collectWorkerShuttleAssignmentSnapshots());
 		}
 
 		Object* chooseWorkerShuttleTechnical(Player* player, Object* worker)
@@ -12169,24 +11493,14 @@ namespace
 						reason.c_str());
 				}
 
-				telemetry.push_back(nlohmann::json::object({
-					{"task_id", assignment.taskId},
-					{"worker_id", assignment.workerId},
-					{"technical_id", assignment.technicalId},
-					{"template", assignment.templateName},
-					{"state", assignment.state},
-					{"reason", assignment.reason},
-					{"age_ms", static_cast<UnsignedInt>(now - assignment.createdTick)},
-					{"last_command_age_ms", static_cast<UnsignedInt>(now - assignment.lastCommandTick)},
-					{"worker_inside", workerInside},
-					{"worker_distance", workerTargetDist},
-					{"technical_distance", technicalTargetDist},
-					{"target", nlohmann::json::object({
-						{"x", assignment.targetPosition.x},
-						{"y", assignment.targetPosition.y},
-						{"z", assignment.targetPosition.z}
-					})}
-				}));
+				AIControlAdapterWorkerShuttleAssignmentStatus assignmentStatus;
+				assignmentStatus.workerInside = workerInside;
+				assignmentStatus.workerDistance = workerTargetDist;
+				assignmentStatus.technicalDistance = technicalTargetDist;
+				telemetry.push_back(m_workerShuttleManager.BuildAssignmentTelemetry(
+					buildWorkerShuttleAssignmentSnapshot(assignment),
+					assignmentStatus,
+					static_cast<unsigned int>(now)));
 				++it;
 			}
 
@@ -13061,46 +12375,26 @@ namespace
 
 			const bool timeout = task.currentWaypointStartTick > 0 &&
 				now - task.currentWaypointStartTick >= task.stageTimeoutMs;
-			if (task.raidMode.empty())
-			{
-				task.raidMode = (infantryLive > 0 && (vehicleLive > 0 || task.initialUnitCount > infantryLive))
-					? "mixed_local"
-					: (vehicleLive > 0 ? "vehicle" : "infantry");
-			}
-			if (task.raidMode == "vehicle" && infantryLive > 0 && vehicleLive > 0)
+			const DWORD cohesionWaitMsForMode = task.cohesionWaitStartTick > 0u ? now - task.cohesionWaitStartTick : 0u;
+			const AIControlAdapterRaidModeDecision raidModeDecision =
+				AIControlAdapterRaidManager::evaluateRaidModePolicy(
+					task.raidMode,
+					infantryLive,
+					vehicleLive,
+					task.initialUnitCount,
+					task.minimumViableCount,
+					task.cohesionWaitStartTick > 0u,
+					cohesionWaitMsForMode,
+					45000u);
+			task.raidMode = raidModeDecision.raidMode;
+			if (raidModeDecision.degradeToVehicle)
 			{
 				const int oldInfantryLive = infantryLive;
-				if (task.degradedFrom.empty())
+				if (task.degradedFrom.empty() || std::string(raidModeDecision.reason) == "infantry_timeout")
 				{
 					task.degradedFrom = "mixed_local";
-					task.degradeReason = "long_distance";
+					task.degradeReason = raidModeDecision.reason;
 				}
-				task.assignedUnitIds = vehicleUnitIds;
-				task.initialUnitCount = static_cast<int>(vehicleUnitIds.size());
-				liveAssigned = vehicleLive;
-				arrived = vehicleArrived;
-				infantryLive = 0;
-				infantryArrived = 0;
-				adapterLog(
-					"raid_cohesion_degrade task=%u from=mixed to=vehicle reason=long_distance vehicles=%d infantry=%d missing=%d dead=%d",
-					task.taskId,
-					vehicleLive,
-					oldInfantryLive,
-					std::max(0, liveAssigned - arrived),
-					std::max(0, task.initialUnitCount - static_cast<int>(retainedAssignedUnitIds.size())));
-			}
-			const DWORD cohesionWaitMsForMode = task.cohesionWaitStartTick > 0u ? now - task.cohesionWaitStartTick : 0u;
-			const bool mixedInfantryTimeout =
-				task.raidMode == "mixed_local" &&
-				infantryLive > 0 &&
-				vehicleLive >= std::max(1, task.minimumViableCount) &&
-				task.cohesionWaitStartTick > 0u &&
-				cohesionWaitMsForMode >= 45000u;
-			if (mixedInfantryTimeout)
-			{
-				const int oldInfantryLive = infantryLive;
-				task.degradedFrom = "mixed_local";
-				task.degradeReason = "infantry_timeout";
 				task.raidMode = "vehicle";
 				task.assignedUnitIds = vehicleUnitIds;
 				task.initialUnitCount = static_cast<int>(vehicleUnitIds.size());
@@ -13108,32 +12402,35 @@ namespace
 				arrived = vehicleArrived;
 				infantryLive = 0;
 				infantryArrived = 0;
-				task.cohesionWaitStartTick = 0u;
+				if (std::string(raidModeDecision.reason) == "infantry_timeout")
+				{
+					task.cohesionWaitStartTick = 0u;
+				}
 				adapterLog(
-					"raid_cohesion_degrade task=%u from=mixed to=vehicle reason=infantry_timeout vehicles=%d infantry=%d missing=%d dead=%d",
+					"raid_cohesion_degrade task=%u from=mixed to=vehicle reason=%s vehicles=%d infantry=%d missing=%d dead=%d",
 					task.taskId,
+					raidModeDecision.reason,
 					vehicleLive,
 					oldInfantryLive,
 					std::max(0, liveAssigned - arrived),
 					std::max(0, task.initialUnitCount - static_cast<int>(retainedAssignedUnitIds.size())));
 			}
-			if (task.raidMode == "mixed_local" &&
-				vehicleLive < std::max(1, task.minimumViableCount) &&
-				task.cohesionWaitStartTick > 0u &&
-				cohesionWaitMsForMode >= 45000u)
+			if (raidModeDecision.fail && std::string(raidModeDecision.reason) == "infantry_timeout_no_survivors")
 			{
-				m_autonomy.combatTaskManager.failTask(task.taskId, "infantry_timeout_no_survivors");
+				m_autonomy.combatTaskManager.failTask(task.taskId, raidModeDecision.reason);
 				adapterLog(
-					"raid_task_release task=%u reason=infantry_timeout_no_survivors",
-					task.taskId);
+					"raid_task_release task=%u reason=%s",
+					task.taskId,
+					raidModeDecision.reason);
 				return true;
 			}
-			if (task.raidMode == "vehicle" && vehicleLive < std::max(1, task.minimumViableCount))
+			if (raidModeDecision.fail && std::string(raidModeDecision.reason) == "no_viable_vehicle_group")
 			{
-				m_autonomy.combatTaskManager.failTask(task.taskId, "no_viable_vehicle_group");
+				m_autonomy.combatTaskManager.failTask(task.taskId, raidModeDecision.reason);
 				adapterLog(
-					"raid_task_release task=%u reason=no_viable_vehicle_group",
-					task.taskId);
+					"raid_task_release task=%u reason=%s",
+					task.taskId,
+					raidModeDecision.reason);
 				return true;
 			}
 			const bool requireInfantryQuorum = task.raidMode != "vehicle";
@@ -13836,22 +13133,8 @@ namespace
 			const AIControlAdapterProfilePolicyManager profilePolicyManager;
 			const AIControlAdapterProfilePolicyConfig profilePolicyConfig = resolveAutonomyProfilePolicyConfig();
 			const UnsignedInt reserveCash = profilePolicyConfig.reserveCash;
-			Int currentZoneCount = 0;
-			if (m_autonomy.state.telemetryZones.is_array())
-			{
-				for (const auto& zone : m_autonomy.state.telemetryZones)
-				{
-					if (!zone.is_object())
-					{
-						continue;
-					}
-					const Int supplyStashes = zone.value("supply_stashes", 0);
-					if (supplyStashes > 0)
-					{
-						++currentZoneCount;
-					}
-				}
-			}
+			const Int currentZoneCount =
+				AIControlAdapterScudStormManager::countSupplyZones(m_autonomy.state.telemetryZones);
 			const Int desiredZoneCount = profilePolicyManager.ResolveStrategicSpendDesiredZoneCount(
 				profilePolicyConfig,
 				currentZoneCount);
@@ -13929,24 +13212,10 @@ namespace
 				centralScudSpend);
 
 			std::vector<AIControlAdapterScudStormStrategicTargetCandidate> strategicCandidates;
-			for (const EnemyMemoryItem& item : m_autonomy.enemyMemory.getItems())
-			{
-				AIControlAdapterScudStormStrategicTargetCandidate candidate;
-				candidate.objectId = item.objectId;
-				candidate.playerIndex = item.playerIndex;
-				candidate.team = item.team;
-				candidate.targetKind = AIControlAdapterEnemyMemory::kindToString(item.kind);
-				candidate.templateName = item.templateName;
-				candidate.visible = item.visible;
-				candidate.stale = item.stale;
-				candidate.enemyOwned = true;
-				candidate.alive = true;
-				candidate.ageMs = item.lastSeenTick == 0u ? 0u : static_cast<unsigned int>(now - item.lastSeenTick);
-				candidate.x = item.position.x;
-				candidate.y = item.position.y;
-				candidate.z = item.position.z;
-				strategicCandidates.push_back(candidate);
-			}
+			const std::vector<AIControlAdapterScudStormMemorySnapshot> scudStormMemorySnapshots =
+				AIControlAdapterScudStormManager::buildMemorySnapshotsFromEnemyMemory(m_autonomy.enemyMemory.getItems());
+			strategicCandidates =
+				AIControlAdapterScudStormManager::buildStrategicTargetCandidates(scudStormMemorySnapshots, now);
 
 			const bool scudStormFireCooldownActive = AIControlAdapterIsTickInFuture(s_nextScudStormFireTick, now);
 			if (readyScudStorm == nullptr)
@@ -14100,117 +13369,20 @@ namespace
 
 			if (productionNeeded)
 			{
-				struct ScudStormPlacementChoice
+				std::vector<AIControlAdapterScudStormZoneThreatSnapshot> scudStormZoneThreats;
+				for (const auto& threatPair : m_autonomy.state.zoneThreats)
 				{
-					bool hasPlacement = false;
-					UnsignedInt zoneId = 0u;
-					std::string role = "unavailable";
-					Coord3D center;
-					Real radius = 320.0f;
-					int score = -999999;
-					std::string reason = "unavailable";
-				};
-				auto chooseScudStormPlacement = [&]() -> ScudStormPlacementChoice
-				{
-					ScudStormPlacementChoice best;
-					best.center.x = 0.0f;
-					best.center.y = 0.0f;
-					best.center.z = 0.0f;
-					if (!m_autonomy.state.telemetryZones.is_array() || m_autonomy.state.telemetryZones.empty())
-					{
-						return best;
-					}
-					for (const auto& zone : m_autonomy.state.telemetryZones)
-					{
-						if (!zone.is_object())
-						{
-							continue;
-						}
-						const UnsignedInt zoneId = zone.value("anchor_id", 0u);
-						const bool isMainBase = zone.value("is_main_base", false);
-						const bool isActive = zone.value("active", false);
-						const bool developed = zone.value("developed", false);
-						const bool needsFollowup = zone.value("needs_followup", false);
-						const auto threatIt = m_autonomy.state.zoneThreats.find(zoneId);
-						const bool recentlyAttacked = threatIt != m_autonomy.state.zoneThreats.end()
-							&& (now - threatIt->second.lastSeenTick) <= 45000u;
-						int score = 0;
-						if (isMainBase)
-						{
-							score += 220;
-						}
-						if (developed)
-						{
-							score += 140;
-						}
-						if (zone.value("black_markets", 0) > 0 || zone.value("palaces", 0) > 0)
-						{
-							score += 80;
-						}
-						if (zone.value("tunnels", 0) > 0 || zone.value("stingers", 0) > 0)
-						{
-							score += 40;
-						}
-						if (needsFollowup)
-						{
-							score -= 120;
-						}
-						if (isActive)
-						{
-							score -= 500;
-						}
-						if (recentlyAttacked)
-						{
-							score -= 450;
-						}
-						const bool terrainLimited = zone.value("terrain_limited", false);
-						const Real effectiveRadius = zone.value("effective_radius", m_autonomy.state.zoneRadius);
-						if (effectiveRadius < std::max<Real>(220.0f, m_autonomy.state.zoneRadius * 0.45f))
-						{
-							score -= 180;
-						}
-						else if (terrainLimited)
-						{
-							score -= 40;
-						}
-						if (!developed && !isMainBase)
-						{
-							score -= 150;
-						}
-						if (!best.hasPlacement || score > best.score)
-						{
-							best.hasPlacement = true;
-							best.zoneId = zoneId;
-							best.score = score;
-							best.center.x = zone.value("rear_point_x", zone.value("center_x", 0.0f));
-							best.center.y = zone.value("rear_point_y", zone.value("center_y", 0.0f));
-							best.center.z = 0.0f;
-							best.radius = std::max<Real>(180.0f, effectiveRadius * (isMainBase ? 0.35f : 0.30f));
-							if (score < 0)
-							{
-								best.role = "fallback";
-								best.reason = "emergency_override";
-							}
-							else if (terrainLimited)
-							{
-								best.role = "rear";
-								best.reason = "terrain_rear";
-							}
-							else if (isMainBase)
-							{
-								best.role = "interior";
-								best.reason = "fallback_interior";
-							}
-							else
-							{
-								best.role = "rear";
-								best.reason = "safe_rear";
-							}
-						}
-					}
-					return best;
-				};
-					const ScudStormPlacementChoice placement = chooseScudStormPlacement();
+					AIControlAdapterScudStormZoneThreatSnapshot snapshot;
+					snapshot.zoneId = threatPair.first;
+					snapshot.lastSeenTick = threatPair.second.lastSeenTick;
+					scudStormZoneThreats.push_back(snapshot);
+				}
+					const AIControlAdapterScudStormPlacementChoice placement =
+						AIControlAdapterScudStormManager::choosePlacement(
+							m_autonomy.state.telemetryZones,
+							scudStormZoneThreats,
+							now,
+							m_autonomy.state.zoneRadius);
 					if (!placement.hasPlacement)
 					{
 						s_nextScudStormBuildTick = now + 10000u;
@@ -14255,8 +13427,8 @@ namespace
 					&& m_autonomy.state.survivalPolicyTelemetry.value("state", std::string()) == "collapse_imminent";
 				const AIControlAdapterScudStormRebuildBlockResult rebuildBlock =
 					AIControlAdapterStrategicFoundationSurvivalManager().ShouldBlockScudStormRebuild({
-						static_cast<float>(placement.center.x),
-						static_cast<float>(placement.center.y),
+						static_cast<float>(placement.x),
+						static_cast<float>(placement.y),
 						static_cast<unsigned int>(now),
 						300000u,
 						650.0f,
@@ -14265,25 +13437,25 @@ namespace
 					});
 				adapterLog(
 					"scud_storm_placement zone=%u role=%s x=%.1f y=%.1f score=%d reason=%s",
-					static_cast<unsigned int>(placement.zoneId),
-					placement.role.c_str(),
-					placement.center.x,
-					placement.center.y,
+						static_cast<unsigned int>(placement.zoneId),
+						placement.role.c_str(),
+					placement.x,
+					placement.y,
 					placement.score,
 					placement.reason.c_str());
 				adapterLog(
 					"terrain_placement_choice template=GLAScudStorm zone=%u role=%s x=%.1f y=%.1f reason=%s",
 					static_cast<unsigned int>(placement.zoneId),
 					placement.role.c_str(),
-					placement.center.x,
-					placement.center.y,
+					placement.x,
+					placement.y,
 					placement.reason.c_str());
 				adapterLog(
 					"strategic_placement command=Game.BuildScudStormSmart template=GLAScudStorm role=superweapon source=%s zone_anchor=%u zone_center=(%.1f,%.1f) zone_radius=%.1f strict_zone=0 has_placement=%d score=%d reason=%s tick=%u",
 					placement.role.c_str(),
 					static_cast<unsigned int>(placement.zoneId),
-					placement.center.x,
-					placement.center.y,
+					placement.x,
+					placement.y,
 					placement.radius,
 					placement.hasPlacement ? 1 : 0,
 					placement.score,
@@ -14323,8 +13495,8 @@ namespace
 				if (placement.hasPlacement)
 				{
 					message["args"]["zone_center"] = nlohmann::json::object({
-						{"x", placement.center.x},
-						{"y", placement.center.y}
+						{"x", placement.x},
+						{"y", placement.y}
 					});
 					message["args"]["zone_radius"] = placement.radius;
 					message["args"]["strict_zone"] = false;
@@ -14379,21 +13551,6 @@ namespace
 				bool visible = true;
 			};
 			std::vector<ArtilleryThreat> threats;
-			auto shouldLogMobileSiegeDetection = [](const std::string& templateName, const AIControlAdapterMobileSiegeTemplateResult& classification) -> bool
-			{
-				if (classification.accepted)
-				{
-					return true;
-				}
-				const std::string lower = normalizeAsciiLower(templateName);
-				return lower.find("shell") != std::string::npos ||
-					lower.find("artillery") != std::string::npos ||
-					lower.find("cannon") != std::string::npos ||
-					lower.find("inferno") != std::string::npos ||
-					lower.find("scudlauncher") != std::string::npos ||
-					lower.find("tomahawk") != std::string::npos ||
-					lower.find("rocketbuggy") != std::string::npos;
-			};
 			for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
 			{
 				if (obj == nullptr || obj->isEffectivelyDead() || obj->isKindOf(KINDOF_STRUCTURE))
@@ -14418,7 +13575,7 @@ namespace
 				const std::string name = tt != nullptr ? tt->getName().str() : "";
 				const AIControlAdapterMobileSiegeTemplateResult siegeClassification =
 					AIControlAdapterClassifyMobileSiegeTemplate(name, false, true);
-				if (shouldLogMobileSiegeDetection(name, siegeClassification))
+				if (AIControlAdapterCounterbatteryManager::shouldLogMobileSiegeDetection(name, siegeClassification))
 				{
 					adapterLog(
 						"mobile_siege_detected object=%u template=%s accepted=%d reason=%s",
@@ -14457,7 +13614,7 @@ namespace
 				}
 				const AIControlAdapterMobileSiegeTemplateResult siegeClassification =
 					AIControlAdapterClassifyMobileSiegeTemplate(item.templateName, false, true);
-				if (shouldLogMobileSiegeDetection(item.templateName, siegeClassification))
+				if (AIControlAdapterCounterbatteryManager::shouldLogMobileSiegeDetection(item.templateName, siegeClassification))
 				{
 					adapterLog(
 						"mobile_siege_detected object=%u template=%s accepted=%d reason=%s",
@@ -14509,6 +13666,7 @@ namespace
 			std::vector<AutomationOwnedObjectSnapshot> ownedObjects;
 			collectOwnedAutomationObjects(player, ownedObjects);
 			std::vector<Object*> availableCounters;
+			std::vector<AIControlAdapterCounterbatteryUnitSnapshot> availableCounterSnapshots;
 			int liveMobileScuds = 0;
 			int liveRocketBuggies = 0;
 			int queuedRocketBuggies = 0;
@@ -14541,7 +13699,7 @@ namespace
 					ProductionUpdateInterface* production = owned.object->getProductionUpdateInterface();
 					if (production != nullptr && TheThingFactory != nullptr)
 					{
-						const std::string buggyTemplateName = inferRocketBuggyTemplateForProducerSnapshot(owned.object);
+						const std::string buggyTemplateName = AIControlAdapterTemplateInferenceService::InferRocketBuggyTemplateForProducer(owned.object);
 						if (!buggyTemplateName.empty())
 						{
 							const ThingTemplate* buggyTemplate = TheThingFactory->findTemplate(AsciiString(buggyTemplateName.c_str()), false);
@@ -14552,37 +13710,43 @@ namespace
 						}
 					}
 				}
-				const bool suitableCounter =
-					containsIgnoreCase(owned.name, "rocketbuggy") ||
-					containsIgnoreCase(owned.name, "jarmen") ||
-					owned.isScudLauncher;
+				AIControlAdapterCounterbatteryUnitSnapshot unitSnapshot;
+				unitSnapshot.unitId = static_cast<UnsignedInt>(owned.object->getID());
+				unitSnapshot.templateName = owned.name;
+				unitSnapshot.isScudLauncher = owned.isScudLauncher;
+				const bool suitableCounter = AIControlAdapterCounterbatteryManager::isSuitableCounterUnit(unitSnapshot);
 				if (!suitableCounter || owned.underConstruction || !owned.hasAI)
 				{
 					continue;
 				}
-				const UnsignedInt unitId = static_cast<UnsignedInt>(owned.object->getID());
-				if (m_autonomy.taskReservationManager.isObjectReserved(unitId) ||
-					m_autonomy.combatTaskManager.isUnitReserved(unitId) ||
-					isGarrisonReservedUnit(unitId))
+				if (m_autonomy.taskReservationManager.isObjectReserved(unitSnapshot.unitId) ||
+					m_autonomy.combatTaskManager.isUnitReserved(unitSnapshot.unitId) ||
+					isGarrisonReservedUnit(unitSnapshot.unitId))
 				{
 					continue;
 				}
 				availableCounters.push_back(owned.object);
+				availableCounterSnapshots.push_back(unitSnapshot);
 			}
-			std::stable_sort(availableCounters.begin(), availableCounters.end(), [](Object* a, Object* b) -> bool
+			std::vector<std::size_t> counterOrder;
+			for (std::size_t i = 0; i < availableCounters.size(); ++i)
 			{
-				const ThingTemplate* ta = a != nullptr ? a->getTemplate() : nullptr;
-				const ThingTemplate* tb = b != nullptr ? b->getTemplate() : nullptr;
-				const std::string an = ta != nullptr ? ta->getName().str() : "";
-				const std::string bn = tb != nullptr ? tb->getName().str() : "";
-				const int ap = containsIgnoreCase(an, "rocketbuggy") ? 0 :
-					(containsIgnoreCase(an, "jarmen") ? 1 :
-						(containsIgnoreCase(an, "scudlauncher") ? 2 : 3));
-				const int bp = containsIgnoreCase(bn, "rocketbuggy") ? 0 :
-					(containsIgnoreCase(bn, "jarmen") ? 1 :
-						(containsIgnoreCase(bn, "scudlauncher") ? 2 : 3));
-				return ap < bp;
+				counterOrder.push_back(i);
+			}
+			std::stable_sort(counterOrder.begin(), counterOrder.end(), [&](std::size_t a, std::size_t b) -> bool
+			{
+				return AIControlAdapterCounterbatteryManager::counterUnitPriority(availableCounterSnapshots[a]) <
+					AIControlAdapterCounterbatteryManager::counterUnitPriority(availableCounterSnapshots[b]);
 			});
+			std::vector<Object*> sortedCounters;
+			std::vector<AIControlAdapterCounterbatteryUnitSnapshot> sortedCounterSnapshots;
+			for (std::size_t idx : counterOrder)
+			{
+				sortedCounters.push_back(availableCounters[idx]);
+				sortedCounterSnapshots.push_back(availableCounterSnapshots[idx]);
+			}
+			availableCounters.swap(sortedCounters);
+			availableCounterSnapshots.swap(sortedCounterSnapshots);
 
 			const ScienceType scudLauncherScience = TheScienceStore != nullptr
 				? TheScienceStore->getScienceFromInternalName("SCIENCE_ScudLauncher")
@@ -14617,27 +13781,24 @@ namespace
 				liveMobileScuds
 			});
 
-			nlohmann::json threatTelemetry = nlohmann::json::array();
+			AIControlAdapterCounterbatteryTelemetryInput telemetryInput;
+			telemetryInput.activeTasks = activeCounterbatteryTasks;
+			telemetryInput.assignedUnits = assignedCounterbatteryUnits;
+			telemetryInput.productionNeeded = policy.productionNeeded || buggyMix.productionNeeded;
+			telemetryInput.reason = policy.reason;
 			for (const ArtilleryThreat& threat : threats)
 			{
-				threatTelemetry.push_back(nlohmann::json::object({
-					{"object_id", threat.objectId},
-					{"template", threat.templateName},
-					{"visible", threat.visible},
-					{"stale", !threat.visible},
-					{"x", threat.position.x},
-					{"y", threat.position.y},
-					{"priority", "high"}
-				}));
+				AIControlAdapterCounterbatteryThreatSnapshot threatSnapshot;
+				threatSnapshot.objectId = threat.objectId;
+				threatSnapshot.templateName = threat.templateName;
+				threatSnapshot.x = threat.position.x;
+				threatSnapshot.y = threat.position.y;
+				threatSnapshot.z = threat.position.z;
+				threatSnapshot.visible = threat.visible;
+				telemetryInput.threats.push_back(threatSnapshot);
 			}
-			m_autonomy.state.counterbatteryTelemetry = nlohmann::json::object({
-				{"artillery_threats", threatTelemetry},
-				{"mobile_siege_threats", threatTelemetry},
-				{"active_tasks", activeCounterbatteryTasks},
-				{"assigned_units", assignedCounterbatteryUnits},
-				{"production_needed", policy.productionNeeded || buggyMix.productionNeeded},
-				{"reason", policy.reason}
-			});
+			m_autonomy.state.counterbatteryTelemetry =
+				AIControlAdapterCounterbatteryManager::buildTelemetry(telemetryInput);
 
 			const ArtilleryThreat* target = threats.empty() ? nullptr : &threats.front();
 			adapterLog(
@@ -14661,7 +13822,7 @@ namespace
 			if ((policy.productionNeeded || buggyMix.productionNeeded) && !AIControlAdapterIsTickInFuture(m_autonomy.state.nextCounterbatteryProductionTick, now))
 			{
 				const bool preferBuggy = buggyMix.productionNeeded;
-				const std::string unitTemplateName = preferBuggy ? "GLAVehicleRocketBuggy" : inferAutonomyScudLauncherTemplate(player);
+				const std::string unitTemplateName = preferBuggy ? "GLAVehicleRocketBuggy" : AIControlAdapterTemplateInferenceService::InferScudLauncherTemplate(player);
 				nlohmann::json message = {
 					{"type", "SessionCommand"},
 					{"request_id", preferBuggy ? std::string("mobile_siege_rocket_buggy") : std::string("counterbattery_scud_launcher")},
@@ -14710,14 +13871,11 @@ namespace
 				return;
 			}
 
-			std::vector<unsigned int> assignedIds;
-			const int assignCount = std::min<int>(
-				policy.desiredAssignedUnits,
-				std::min<int>(4, static_cast<int>(availableCounters.size())));
-			for (int i = 0; i < assignCount; ++i)
-			{
-				assignedIds.push_back(static_cast<unsigned int>(availableCounters[static_cast<std::size_t>(i)]->getID()));
-			}
+			std::vector<unsigned int> assignedIds =
+				AIControlAdapterCounterbatteryManager::selectAssignmentIds(
+					availableCounterSnapshots,
+					policy.desiredAssignedUnits,
+					4);
 			if (assignedIds.empty())
 			{
 				return;
@@ -15268,6 +14426,8 @@ namespace
 				return;
 			}
 
+			std::vector<SpecialTaskReservation*> captureTasks =
+				const_cast<AIControlAdapterTaskReservationManager&>(m_autonomy.taskReservationManager).findCaptureTasks();
 			for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
 			{
 				if (obj->isEffectivelyDead())
@@ -15283,7 +14443,9 @@ namespace
 					continue;
 				}
 				// Phase 6.2: Skip targets that already have active capture tasks
-				if (isCaptureTargetReserved(obj))
+				if (AIControlAdapterCaptureManager::IsCaptureTargetReserved(
+					captureTasks,
+					static_cast<unsigned int>(obj->getID())))
 				{
 					continue;
 				}
@@ -15303,8 +14465,9 @@ namespace
 				return false;
 			}
 			// Phase 6.2: Check durable task reservations instead of simple pending map
-			return m_autonomy.taskReservationManager.isObjectReserved(static_cast<unsigned int>(sourceId)) ||
-				isGarrisonReservedUnit(static_cast<unsigned int>(sourceId));
+			return AIControlAdapterCaptureManager::IsCaptureSourceReserved(
+				m_autonomy.taskReservationManager.isObjectReserved(static_cast<unsigned int>(sourceId)),
+				isGarrisonReservedUnit(static_cast<unsigned int>(sourceId)));
 		}
 
 		/**
@@ -15316,26 +14479,7 @@ namespace
 		{
 			std::vector<SpecialTaskReservation*> captureTasks =
 				const_cast<AIControlAdapterTaskReservationManager&>(m_autonomy.taskReservationManager).findCaptureTasks();
-			for (const SpecialTaskReservation* task : captureTasks)
-			{
-				if (task == nullptr)
-				{
-					continue;
-				}
-				// Skip terminal states
-				if (task->state == SpecialTaskState::Complete ||
-					task->state == SpecialTaskState::Failed ||
-					task->state == SpecialTaskState::Expired)
-				{
-					continue;
-				}
-				// Check if object is source or target
-				if (task->sourceObjectId == objectId || task->targetObjectId == objectId)
-				{
-					return task;
-				}
-			}
-			return nullptr;
+			return AIControlAdapterCaptureManager::FindActiveCaptureReservationForObject(captureTasks, objectId);
 		}
 
 		bool isCaptureTargetReserved(const Object* target) const
@@ -15352,18 +14496,9 @@ namespace
 			// Phase 6.2: Check if target is already reserved by an active capture task
 			std::vector<SpecialTaskReservation*> captureTasks =
 				const_cast<AIControlAdapterTaskReservationManager&>(m_autonomy.taskReservationManager).findCaptureTasks();
-			for (const SpecialTaskReservation* task : captureTasks)
-			{
-				if (task != nullptr &&
-					task->state != SpecialTaskState::Complete &&
-					task->state != SpecialTaskState::Failed &&
-					task->state != SpecialTaskState::Expired &&
-					task->targetObjectId == static_cast<unsigned int>(targetId))
-				{
-					return true;
-				}
-			}
-			return false;
+			return AIControlAdapterCaptureManager::IsCaptureTargetReserved(
+				captureTasks,
+				static_cast<unsigned int>(targetId));
 		}
 
 		void collectCaptureSourcesForPlayer(Player* player, bool preferIdle, std::vector<Object*>& outSources)
@@ -16354,111 +15489,40 @@ namespace
 					const Real dx = targetPos->x - sourcePos->x;
 					const Real dy = targetPos->y - sourcePos->y;
 					currentDistance = std::sqrt(dx * dx + dy * dy);
-					const Real NEAR_TARGET_THRESHOLD = 200.0f;
-					const Real PROGRESS_THRESHOLD = 10.0f; // Consider 10 units improvement as progress
-					const DWORD PROGRESS_TIMEOUT_EXTENSION_MS = 60000u;
-					nearTarget = (currentDistance <= NEAR_TARGET_THRESHOLD);
-
-					// Update distance tracking
-					if (task->lastDistance < 0.0f)
+					const AIControlAdapterCaptureProgressResult progress =
+						AIControlAdapterCaptureManager::ApplyProgressMeasurement(*task, now, currentDistance);
+					nearTarget = progress.nearTarget;
+					if (progress.loggedProgress)
 					{
-						// First measurement
-						task->lastDistance = currentDistance;
-						task->bestDistance = currentDistance;
-						task->lastUpdateTick = now;
-
-						task->timeoutTick = now + PROGRESS_TIMEOUT_EXTENSION_MS;
-
 						adapterLog(
-							"capture_task_progress task=%u source=%u target=%u distance=%.1f best_distance=%.1f reason=first_measurement",
+							"capture_task_progress task=%u source=%u target=%u distance=%.1f best_distance=%.1f reason=%s",
 							task->taskId,
 							task->sourceObjectId,
 							task->targetObjectId,
 							currentDistance,
-							currentDistance);
-
-						if (nearTarget && task->state != SpecialTaskState::Executing)
-						{
-							m_autonomy.taskReservationManager.updateTaskState(
-								task->taskId, SpecialTaskState::Executing, "near_target");
-							adapterLog(
-								"capture_task_state task=%u state=Capturing reason=near_target source=%u target=%u distance=%.1f",
-								task->taskId,
-								task->sourceObjectId,
-								task->targetObjectId,
-								currentDistance);
-						}
+							task->bestDistance,
+							progress.progressReason);
 					}
-					else
+					if (progress.updateState)
 					{
-						// Check for progress
-						const bool madeProgress = (currentDistance < task->bestDistance - PROGRESS_THRESHOLD);
-						const bool enteringNearTarget =
-							nearTarget &&
-							task->state != SpecialTaskState::Executing;
-
-						if (madeProgress || enteringNearTarget)
-						{
-							// Update progress
-							task->lastUpdateTick = now;
-							if (currentDistance < task->bestDistance)
-							{
-								task->bestDistance = currentDistance;
-							}
-
-							// Phase 6.2 FIX: Extend timeout when progress is made
-							task->timeoutTick = now + PROGRESS_TIMEOUT_EXTENSION_MS;
-
-							const char* progressReason = madeProgress ? "distance_decreased" : "near_target";
-							adapterLog(
-								"capture_task_progress task=%u source=%u target=%u distance=%.1f best_distance=%.1f reason=%s",
-								task->taskId,
-								task->sourceObjectId,
-								task->targetObjectId,
-								currentDistance,
-								task->bestDistance,
-								progressReason);
-
-							// Phase 6.2 FIX: State transitions based on distance
-							if (nearTarget && task->state != SpecialTaskState::Executing)
-							{
-								m_autonomy.taskReservationManager.updateTaskState(
-									task->taskId, SpecialTaskState::Executing, "near_target");
-								adapterLog(
-									"capture_task_state task=%u state=Capturing reason=near_target source=%u target=%u distance=%.1f",
-									task->taskId,
-									task->sourceObjectId,
-									task->targetObjectId,
-									currentDistance);
-							}
-							else if (madeProgress && task->state == SpecialTaskState::Assigned)
-							{
-								m_autonomy.taskReservationManager.updateTaskState(
-									task->taskId, SpecialTaskState::Moving, "distance_progress");
-								adapterLog(
-									"capture_task_state task=%u state=Moving reason=distance_progress source=%u target=%u distance=%.1f",
-									task->taskId,
-									task->sourceObjectId,
-									task->targetObjectId,
-									currentDistance);
-							}
-						}
-
-						task->lastDistance = currentDistance;
+						m_autonomy.taskReservationManager.updateTaskState(
+							task->taskId, progress.newState, progress.stateReason);
+						adapterLog(
+							"capture_task_state task=%u state=%s reason=%s source=%u target=%u distance=%.1f",
+							task->taskId,
+							progress.stateLogName,
+							progress.stateReason,
+							task->sourceObjectId,
+							task->targetObjectId,
+							currentDistance);
 					}
 				}
 
 				// Phase 6.2: Reissue capture command for stalled but recoverable tasks
-				const DWORD REISSUE_THRESHOLD_MS = 10000u; // 10 seconds without progress
-				const DWORD NEAR_TARGET_REISSUE_MS = 8000u; // Re-click capture quickly once adjacent
-				const DWORD STALE_THRESHOLD_MS = 30000u; // 30 seconds without progress while far
-				const DWORD NEAR_TARGET_STALE_MS = 45000u; // 45 seconds adjacent without ownership flip
-				const Real FAR_FROM_TARGET = 200.0f;
-				const DWORD staleDuration = now - task->lastUpdateTick;
-				const DWORD timeSinceLastCommand = now - task->lastCommandTick;
-				const int MAX_REISSUES = 4;
+				const AIControlAdapterCaptureCommandDecision reissueDecision =
+					AIControlAdapterCaptureManager::ChooseCommandReissue(*task, now, currentDistance, nearTarget);
 
-				auto reissueCaptureCommand = [&](const char* recoveryReason) -> bool
+				auto reissueCaptureCommand = [&](const char* recoveryReason, DWORD staleDuration) -> bool
 				{
 					nlohmann::json args = nlohmann::json::object({
 						{"target_object_id", static_cast<Int>(task->targetObjectId)},
@@ -16487,9 +15551,7 @@ namespace
 					const bool ok = executeGameCaptureBuilding(message, reason);
 					if (ok)
 					{
-						task->lastCommandTick = now;
-						task->commandReissueCount++;
-						task->timeoutTick = now + 60000u;
+						AIControlAdapterCaptureManager::ApplyCommandReissueSuccess(*task, now);
 						adapterLog(
 							"capture_task_command task=%u source=%u target=%u action=reissue reason=%s reissue_count=%d distance=%.1f stale_ms=%u",
 							task->taskId,
@@ -16515,58 +15577,37 @@ namespace
 				};
 
 				// Try to reissue command if stalled but not yet expired
-				const bool canReissue =
-					task->commandReissueCount < MAX_REISSUES &&
-					currentDistance > 0.0f;
-				const bool shouldReissueNearTarget =
-					nearTarget &&
-					timeSinceLastCommand > NEAR_TARGET_REISSUE_MS &&
-					staleDuration > NEAR_TARGET_REISSUE_MS;
-				const bool shouldReissueFarTarget =
-					!nearTarget &&
-					staleDuration > REISSUE_THRESHOLD_MS &&
-					staleDuration < STALE_THRESHOLD_MS &&
-					timeSinceLastCommand > REISSUE_THRESHOLD_MS;
-				if (canReissue && shouldReissueNearTarget)
+				if (reissueDecision.shouldReissue)
 				{
-					reissueCaptureCommand("near_target_retry");
-				}
-				else if (canReissue && shouldReissueFarTarget)
-				{
-					reissueCaptureCommand("stalled_recovery");
+					reissueCaptureCommand(reissueDecision.reason, reissueDecision.staleDurationMs);
 				}
 
 				// Check for timeout with progress awareness
 				// Expire only if truly stalled:
 				// - No progress for the stale threshold AND
 				// - Overall timeout reached
-				const bool isFarStalled = (staleDuration > STALE_THRESHOLD_MS) &&
-					(currentDistance < 0.0f || currentDistance > FAR_FROM_TARGET);
-				const bool isNearStalled = nearTarget &&
-					(staleDuration > NEAR_TARGET_STALE_MS) &&
-					(task->commandReissueCount >= MAX_REISSUES);
-				const bool overallTimeout = (now >= task->timeoutTick);
+				const AIControlAdapterCaptureExpirationDecision expirationDecision =
+					AIControlAdapterCaptureManager::ChooseExpiration(*task, now, currentDistance, nearTarget);
 
-				if ((isFarStalled || isNearStalled) && overallTimeout)
+				if (expirationDecision.shouldExpire)
 				{
-					const char* expireReason = isNearStalled ? "near_target_no_capture" : "stalled_no_progress";
-					m_autonomy.taskReservationManager.expireTask(task->taskId, expireReason);
+					m_autonomy.taskReservationManager.expireTask(task->taskId, expirationDecision.reason);
 					adapterLog(
 						"capture_task_expired task=%u reason=%s source=%u target=%u age_ms=%u stale_ms=%u distance=%.1f reissues=%d",
 						task->taskId,
-						expireReason,
+						expirationDecision.reason,
 						task->sourceObjectId,
 						task->targetObjectId,
 						now - task->createdTick,
-						staleDuration,
+						expirationDecision.staleDurationMs,
 						currentDistance,
 						task->commandReissueCount);
 					adapterLog(
 						"capture_unit_released task=%u source=%u reason=%s",
 						task->taskId,
 						task->sourceObjectId,
-						expireReason);
-					recordAutonomyTelemetryEvent("capture_task_expired", expireReason, "no_movement");
+						expirationDecision.reason);
+					recordAutonomyTelemetryEvent("capture_task_expired", expirationDecision.reason, "no_movement");
 					continue;
 				}
 			}
@@ -16656,9 +15697,18 @@ namespace
 
 			// Phase 6.2: Check active capture task count instead of simple pending map
 			const Int pendingCount = m_autonomy.taskReservationManager.getCaptureTaskCount();
-			if (pendingCount >= m_automation.captureRule.maxConcurrent)
+			const AIControlAdapterCaptureAssignmentBudgetDecision assignmentBudget =
+				AIControlAdapterCaptureManager::ChooseAssignmentBudget(
+					pendingCount,
+					m_automation.captureRule.maxConcurrent);
+			if (!assignmentBudget.canAssign)
 			{
-				adapterLog("automation_capture_rule_skip player=%d reason=pending_limit pending=%d max_concurrent=%d", player->getPlayerIndex(), pendingCount, m_automation.captureRule.maxConcurrent);
+				adapterLog(
+					"automation_capture_rule_skip player=%d reason=%s pending=%d max_concurrent=%d",
+					player->getPlayerIndex(),
+					assignmentBudget.reason,
+					pendingCount,
+					m_automation.captureRule.maxConcurrent);
 				return;
 			}
 
@@ -16726,9 +15776,9 @@ namespace
 				return ((ldx * ldx) + (ldy * ldy)) < ((rdx * rdx) + (rdy * rdy));
 			});
 
-			Int assignmentsRemaining = std::max<Int>(0, m_automation.captureRule.maxConcurrent - pendingCount);
+			Int assignmentsRemaining = assignmentBudget.assignmentsRemaining;
 			Int sentOk = 0;
-			Int attemptsRemaining = std::max<Int>(assignmentsRemaining, 1) * 4;
+			Int attemptsRemaining = assignmentBudget.attemptsRemaining;
 			std::string lastReason;
 			for (Object* target : targets)
 			{
@@ -17386,16 +16436,16 @@ namespace
 			const PlayerType playerType = player->getPlayerType();
 			const bool isAi = (playerType == PLAYER_COMPUTER);
 			const Color playerColor = player->getPlayerColor();
-			const std::string displayName = unicodeToUtf8(const_cast<Player*>(player)->getPlayerDisplayName());
+			const std::string displayName = AIControlAdapterUiUtils::UnicodeToUtf8(const_cast<Player*>(player)->getPlayerDisplayName());
 			nlohmann::json local = {
 				{"player_index", player->getPlayerIndex()},
 				{"name", displayName},
 				{"player_name_key", KEYNAME(player->getPlayerNameKey()).str()},
 				{"side", player->getSide().str()},
 				{"base_side", player->getBaseSide().str()},
-				{"color", formatColorHex(playerColor)},
+				{"color", AIControlAdapterUiUtils::FormatColorHex(static_cast<unsigned int>(playerColor))},
 				{"color_argb", static_cast<Int>(playerColor)},
-				{"color_hex", formatColorHex(playerColor)},
+				{"color_hex", AIControlAdapterUiUtils::FormatColorHex(static_cast<unsigned int>(playerColor))},
 				{"rank_level", player->getRankLevel()},
 				{"player_type", static_cast<Int>(playerType)},
 				{"player_type_name", isAi ? "computer" : "human"},
@@ -17421,7 +16471,7 @@ namespace
 				local["start_position_index"] = slot->getStartPos();
 				if (displayName.empty())
 				{
-					const std::string slotName = unicodeToUtf8(slot->getName());
+					const std::string slotName = AIControlAdapterUiUtils::UnicodeToUtf8(slot->getName());
 					if (!slotName.empty())
 					{
 						local["name"] = slotName;
@@ -17463,53 +16513,6 @@ namespace
 				}
 			}
 			return nullptr;
-		}
-
-		static std::string formatColorHex(Color argb)
-		{
-			char buffer[16];
-			sprintf_s(buffer, "#%08X", static_cast<unsigned int>(argb));
-			return std::string(buffer);
-		}
-
-		static std::string unicodeToUtf8(const UnicodeString& text)
-		{
-			const WideChar* wide = text.str();
-			if (wide == nullptr || wide[0] == 0)
-			{
-				return std::string();
-			}
-
-			const int utf8LenWithNull = ::WideCharToMultiByte(
-				CP_UTF8,
-				0,
-				wide,
-				-1,
-				nullptr,
-				0,
-				nullptr,
-				nullptr);
-			if (utf8LenWithNull <= 1)
-			{
-				return std::string();
-			}
-
-			std::string out;
-			out.resize(static_cast<std::size_t>(utf8LenWithNull));
-			::WideCharToMultiByte(
-				CP_UTF8,
-				0,
-				wide,
-				-1,
-				&out[0],
-				utf8LenWithNull,
-				nullptr,
-				nullptr);
-			if (!out.empty() && out[out.size() - 1] == '\0')
-			{
-				out.resize(out.size() - 1);
-			}
-			return out;
 		}
 
 		const GameSlot* findSlotForPlayer(const Player* player) const

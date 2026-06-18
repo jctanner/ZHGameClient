@@ -25,6 +25,25 @@ ZoneSnapshot::ZoneSnapshot()
 {
 }
 
+DebugZoneAnchorCandidate::DebugZoneAnchorCandidate()
+	: anchorId(0)
+	, x(0.0f)
+	, y(0.0f)
+	, isStructure(false)
+	, underConstruction(false)
+	, isSupplyStructure(false)
+{
+}
+
+DebugZoneAnchor::DebugZoneAnchor()
+	: anchorId(0)
+	, x(0.0f)
+	, y(0.0f)
+	, isMainBase(false)
+	, anchorType(ZoneAnchorType::SupplyStash)
+{
+}
+
 AIControlAdapterZoneManager::AIControlAdapterZoneManager()
 {
 }
@@ -164,6 +183,58 @@ MostThreatenedZoneResult AIControlAdapterZoneManager::GetMostThreatenedZone(unsi
 bool AIControlAdapterZoneManager::ZoneHasEligibleProducers(const ZoneSnapshot& zone) const
 {
 	return zone.barracks > 0 || zone.armsDealers > 0;
+}
+
+std::vector<DebugZoneAnchor> AIControlAdapterZoneManager::BuildDebugOverlayZones(
+	const std::vector<DebugZoneAnchorCandidate>& candidates,
+	float minimumSpacing)
+{
+	std::vector<DebugZoneAnchor> zones;
+	const float minSpacing = std::max(0.0f, minimumSpacing);
+	const float minZoneDistSq = minSpacing * minSpacing;
+
+	for (std::size_t candidateIdx = 0; candidateIdx < candidates.size(); ++candidateIdx)
+	{
+		const DebugZoneAnchorCandidate& candidate = candidates[candidateIdx];
+		if (!candidate.isStructure || candidate.underConstruction)
+		{
+			continue;
+		}
+		if (!(candidate.name == "GLASupplyStash" || candidate.name == "GLABarracks" || candidate.name == "GLAArmsDealer"))
+		{
+			continue;
+		}
+
+		bool tooClose = false;
+		for (std::size_t zoneIdx = 0; zoneIdx < zones.size(); ++zoneIdx)
+		{
+			const float dx = zones[zoneIdx].x - candidate.x;
+			const float dy = zones[zoneIdx].y - candidate.y;
+			if ((dx * dx) + (dy * dy) < minZoneDistSq)
+			{
+				tooClose = true;
+				break;
+			}
+		}
+		if (tooClose)
+		{
+			continue;
+		}
+
+		DebugZoneAnchor zone;
+		zone.anchorId = candidate.anchorId;
+		zone.x = candidate.x;
+		zone.y = candidate.y;
+		zone.anchorType = candidate.isSupplyStructure ? ZoneAnchorType::SupplyStash : ZoneAnchorType::MainBase;
+		zones.push_back(zone);
+	}
+
+	if (!zones.empty())
+	{
+		zones[0].isMainBase = true;
+	}
+
+	return zones;
 }
 
 NearestProducerZoneResult AIControlAdapterZoneManager::FindNearestProducerZone(

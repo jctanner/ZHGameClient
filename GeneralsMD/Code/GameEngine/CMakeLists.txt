@@ -139,8 +139,11 @@ set(GAMEENGINE_SRC
 #    Include/Common/XferSave.h
     Include/GameClient/Anim2D.h
     Include/GameClient/AIControlAdapter/AIControlAdapter.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterCaptureManager.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterCounterbatteryManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterDefenseManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterEconomyManager.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterGarrisonManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterGlaUsaStrategyManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterMacroBuildDispatcher.h
     Include/GameClient/AIControlAdapter/AIControlAdapterMacroBuildManager.h
@@ -148,6 +151,9 @@ set(GAMEENGINE_SRC
     Include/GameClient/AIControlAdapter/AIControlAdapterMacroBuildTelemetrySerializer.h
     Include/GameClient/AIControlAdapter/AIControlAdapterPolicy.h
     Include/GameClient/AIControlAdapter/AIControlAdapterProfilePolicyManager.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterRaidManager.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterScoutingManager.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterScudStormManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterStrategicFoundationSurvivalManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendSnapshotBuilder.h
@@ -158,7 +164,9 @@ set(GAMEENGINE_SRC
     Include/GameClient/AIControlAdapter/AIControlAdapterScheduler.h
     Include/GameClient/AIControlAdapter/AIControlAdapterTaskReservation.h
     Include/GameClient/AIControlAdapter/AIControlAdapterTechManager.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterTerrainMapCacheService.h
     Include/GameClient/AIControlAdapter/AIControlAdapterWMDTarget.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterWorkerShuttleManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterZoneManager.h
     Include/GameClient/AnimateWindowManager.h
     Include/GameClient/CampaignManager.h
@@ -708,8 +716,11 @@ set(GAMEENGINE_SRC
 #    Source/GameClient/Color.cpp
 #    Source/GameClient/Credits.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapter.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterCaptureManager.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterCounterbatteryManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterDefenseManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterEconomyManager.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterGarrisonManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterGlaUsaStrategyManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildDispatcher.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterMacroBuildManager.cpp
@@ -718,6 +729,9 @@ set(GAMEENGINE_SRC
     Source/GameClient/AIControlAdapter/AIControlAdapterCombatTask.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterPolicy.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterProfilePolicyManager.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterRaidManager.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterScoutingManager.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterScudStormManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterStrategicFoundationSurvivalManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterStrategicSpendSnapshotBuilder.cpp
@@ -726,8 +740,13 @@ set(GAMEENGINE_SRC
     Source/GameClient/AIControlAdapter/AIControlAdapterProductionManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterScheduler.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterTaskReservation.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterTemplateInferenceEngine.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterTemplateInferenceService.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterTechManager.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterTerrainMapCacheService.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterUiUtils.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterWMDTarget.cpp
+    Source/GameClient/AIControlAdapter/AIControlAdapterWorkerShuttleManager.cpp
     Source/GameClient/AIControlAdapter/AIControlAdapterZoneManager.cpp
     Source/GameClient/Display.cpp
 #    Source/GameClient/DisplayString.cpp
@@ -1322,6 +1341,7 @@ if(BUILD_TESTING)
         target_include_directories(${target_name} PRIVATE
             Include/Precompiled
             Include/GameNetwork/GeneralsOnline/Vendor/
+            ${CMAKE_SOURCE_DIR}/Core/Libraries/Source/WWVegas/WWDebug
         )
     endfunction()
 
@@ -1379,6 +1399,45 @@ if(BUILD_TESTING)
 
     add_test(NAME z_gameengine_adapter_profilepolicy_tests COMMAND z_gameengine_adapter_profilepolicy_tests)
 
+    add_executable(z_gameengine_adapter_raidmanager_tests
+        Tests/AIControlAdapter/AIControlAdapterRaidManagerTests.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterRaidManager.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterCombatTask.cpp
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_raidmanager_tests)
+
+    add_test(NAME z_gameengine_adapter_raidmanager_tests COMMAND z_gameengine_adapter_raidmanager_tests)
+
+    add_executable(z_gameengine_adapter_counterbatterymanager_tests
+        Tests/AIControlAdapter/AIControlAdapterCounterbatteryManagerTests.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterCounterbatteryManager.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterPolicy.cpp
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_counterbatterymanager_tests)
+
+    add_test(NAME z_gameengine_adapter_counterbatterymanager_tests COMMAND z_gameengine_adapter_counterbatterymanager_tests)
+
+    add_executable(z_gameengine_adapter_scoutingmanager_tests
+        Tests/AIControlAdapter/AIControlAdapterScoutingManagerTests.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterScoutingManager.cpp
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_scoutingmanager_tests)
+
+    add_test(NAME z_gameengine_adapter_scoutingmanager_tests COMMAND z_gameengine_adapter_scoutingmanager_tests)
+
+    add_executable(z_gameengine_adapter_scudstormmanager_tests
+        Tests/AIControlAdapter/AIControlAdapterScudStormManagerTests.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterScudStormManager.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterPolicy.cpp
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_scudstormmanager_tests)
+
+    add_test(NAME z_gameengine_adapter_scudstormmanager_tests COMMAND z_gameengine_adapter_scudstormmanager_tests)
+
     add_executable(z_gameengine_adapter_strategicspend_tests
         Tests/AIControlAdapter/AIControlAdapterStrategicSpendManagerTests.cpp
         ${AI_CONTROL_ADAPTER_POLICY_SOURCES}
@@ -1424,6 +1483,24 @@ if(BUILD_TESTING)
 
     add_test(NAME z_gameengine_adapter_glausa_strategy_tests COMMAND z_gameengine_adapter_glausa_strategy_tests)
 
+    add_executable(z_gameengine_adapter_garrisonmanager_tests
+        Tests/AIControlAdapter/AIControlAdapterGarrisonManagerTests.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterGarrisonManager.cpp
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_garrisonmanager_tests)
+
+    add_test(NAME z_gameengine_adapter_garrisonmanager_tests COMMAND z_gameengine_adapter_garrisonmanager_tests)
+
+    add_executable(z_gameengine_adapter_worker_shuttle_tests
+        Tests/AIControlAdapter/AIControlAdapterWorkerShuttleManagerTests.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterWorkerShuttleManager.cpp
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_worker_shuttle_tests)
+
+    add_test(NAME z_gameengine_adapter_worker_shuttle_tests COMMAND z_gameengine_adapter_worker_shuttle_tests)
+
     add_executable(z_gameengine_adapter_techmanager_tests
         Tests/AIControlAdapter/AIControlAdapterTechManagerTests.cpp
         Source/GameClient/AIControlAdapter/AIControlAdapterTechManager.cpp
@@ -1442,6 +1519,15 @@ if(BUILD_TESTING)
     configure_ai_control_adapter_unit_test(z_gameengine_adapter_productionmanager_tests)
 
     add_test(NAME z_gameengine_adapter_productionmanager_tests COMMAND z_gameengine_adapter_productionmanager_tests)
+
+    add_executable(z_gameengine_adapter_template_inference_tests
+        Tests/AIControlAdapter/AIControlAdapterTemplateInferenceServiceTests.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterTemplateInferenceService.cpp
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_template_inference_tests)
+
+    add_test(NAME z_gameengine_adapter_template_inference_tests COMMAND z_gameengine_adapter_template_inference_tests)
 
     add_executable(z_gameengine_adapter_ui_tests
         Tests/AIControlAdapter/AIControlAdapterUITests.cpp
@@ -1492,9 +1578,19 @@ if(BUILD_TESTING)
 
     add_test(NAME z_gameengine_adapter_distributedplacement_tests COMMAND z_gameengine_adapter_distributedplacement_tests)
 
+    add_executable(z_gameengine_adapter_uiutils_tests
+        Tests/AIControlAdapter/AIControlAdapterUiUtilsTests.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterUiUtils.cpp
+    )
+
+    configure_ai_control_adapter_unit_test(z_gameengine_adapter_uiutils_tests)
+
+    add_test(NAME z_gameengine_adapter_uiutils_tests COMMAND z_gameengine_adapter_uiutils_tests)
+
     # Phase 6.2: Capture Task Lifecycle Tests
     add_executable(z_gameengine_adapter_capturetask_tests
         Tests/AIControlAdapter/AIControlAdapterCaptureTaskLifecycleTests.cpp
+        Source/GameClient/AIControlAdapter/AIControlAdapterCaptureManager.cpp
         Source/GameClient/AIControlAdapter/AIControlAdapterTaskReservation.cpp
     )
 

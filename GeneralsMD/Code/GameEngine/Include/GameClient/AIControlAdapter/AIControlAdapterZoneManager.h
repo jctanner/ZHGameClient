@@ -84,6 +84,39 @@ struct ZoneSnapshot
 };
 
 /**
+ * Engine-independent candidate for debug overlay zone rendering.
+ *
+ * The adapter collects these from live objects; ZoneManager owns the
+ * repeatable filtering and spacing rules.
+ */
+struct DebugZoneAnchorCandidate
+{
+	unsigned int anchorId;
+	float x;
+	float y;
+	std::string name;
+	bool isStructure;
+	bool underConstruction;
+	bool isSupplyStructure;
+
+	DebugZoneAnchorCandidate();
+};
+
+/**
+ * Zone anchor selected for the in-game debug overlay.
+ */
+struct DebugZoneAnchor
+{
+	unsigned int anchorId;
+	float x;
+	float y;
+	bool isMainBase;
+	ZoneAnchorType anchorType;
+
+	DebugZoneAnchor();
+};
+
+/**
  * Structure damage event for threat detection.
  *
  * Reports friendly structure damage that may indicate a zone is under attack.
@@ -225,6 +258,17 @@ public:
 	 * @return True if zone has barracks or arms dealers
 	 */
 	bool ZoneHasEligibleProducers(const ZoneSnapshot& zone) const;
+
+	/**
+	 * Build compact zone anchors for debug overlay rendering.
+	 *
+	 * Filters to completed eligible structures, collapses anchors that are
+	 * materially overlapping, and marks the first retained anchor as main base
+	 * to preserve the adapter's historical rendering behavior.
+	 */
+	static std::vector<DebugZoneAnchor> BuildDebugOverlayZones(
+		const std::vector<DebugZoneAnchorCandidate>& candidates,
+		float minimumSpacing = 200.0f);
 
 	/**
 	 * Reset zone manager state (called when starting new game).

@@ -21,6 +21,7 @@ struct Coord3D {
 };
 
 #include "GameClient/AIControlAdapter/AIControlAdapterTaskReservation.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterCaptureManager.h"
 
 #include <cstdlib>
 #include <iostream>
@@ -271,6 +272,43 @@ void testDuplicatePrevention()
 	std::cout << "  PASSED" << std::endl;
 }
 
+void testCaptureAssignmentBudget()
+{
+	std::cout << "Test: Capture assignment budget" << std::endl;
+
+	const AIControlAdapterCaptureAssignmentBudgetDecision available =
+		AIControlAdapterCaptureManager::ChooseAssignmentBudget(1, 3);
+	expect(available.canAssign, "Budget should allow assignments below concurrency cap");
+	expectEqual(available.assignmentsRemaining, 2, "Budget should return remaining concurrent slots");
+	expectEqual(available.attemptsRemaining, 8, "Budget should scale attempts by remaining slots");
+
+	const AIControlAdapterCaptureAssignmentBudgetDecision capped =
+		AIControlAdapterCaptureManager::ChooseAssignmentBudget(3, 3);
+	expect(!capped.canAssign, "Budget should block at concurrency cap");
+	expectEqual(capped.assignmentsRemaining, 0, "No assignments should remain at cap");
+	expectEqual(capped.attemptsRemaining, 0, "No attempts should remain at cap");
+
+	std::cout << "  PASSED" << std::endl;
+}
+
+void testCaptureCommandReissueSuccessBookkeeping()
+{
+	std::cout << "Test: Capture command reissue success bookkeeping" << std::endl;
+
+	AIControlAdapterTaskReservationManager manager;
+	const unsigned int taskId = manager.createCaptureReservation(443, 306, "capture_automation", 60000);
+	SpecialTaskReservation* task = manager.findReservation(taskId);
+	expect(task != nullptr, "Task should be created");
+
+	AIControlAdapterCaptureManager::ApplyCommandReissueSuccess(*task, 45000u);
+
+	expect(task->lastCommandTick == 45000u, "Last command tick should update on reissue success");
+	expectEqual(task->commandReissueCount, 1, "Command reissue count should increment");
+	expect(task->timeoutTick == 105000u, "Timeout should extend after reissue success");
+
+	std::cout << "  PASSED" << std::endl;
+}
+
 // Test: Task completes when target becomes friendly
 void testTaskCompletion()
 {
@@ -302,6 +340,8 @@ int main()
 	testStateTransitions();
 	testCaptureTaskProgressFields();
 	testDuplicatePrevention();
+	testCaptureAssignmentBudget();
+	testCaptureCommandReissueSuccessBookkeeping();
 	testTaskCompletion();
 
 	std::cout << std::endl;

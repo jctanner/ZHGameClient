@@ -10,6 +10,14 @@
 
 #include <algorithm>
 
+namespace
+{
+	bool HasTickElapsed(unsigned int deadlineTick, unsigned int now)
+	{
+		return deadlineTick == 0u || static_cast<int>(now - deadlineTick) >= 0;
+	}
+}
+
 AIControlAdapterScheduler::AIControlAdapterScheduler()
 	: m_config()
 {
@@ -98,6 +106,23 @@ void AIControlAdapterScheduler::Reset()
 {
 	m_pendingIntents.clear();
 	ResetBudgets();
+}
+
+AIControlAdapterAutonomyTickSchedule AIControlAdapterScheduler::EvaluateAutonomyTickSchedule(
+	unsigned int now,
+	unsigned int nextMacroTick,
+	unsigned int nextProductionTick,
+	unsigned int nextTechTick,
+	unsigned int nextGuardTick)
+{
+	AIControlAdapterAutonomyTickSchedule schedule;
+	schedule.macroDue = HasTickElapsed(nextMacroTick, now);
+	schedule.productionDue = HasTickElapsed(nextProductionTick, now);
+	schedule.techDue = HasTickElapsed(nextTechTick, now);
+	schedule.guardDue = HasTickElapsed(nextGuardTick, now);
+	schedule.anyDue = schedule.macroDue || schedule.productionDue || schedule.techDue || schedule.guardDue;
+	schedule.guardOnly = schedule.guardDue && !schedule.macroDue && !schedule.productionDue && !schedule.techDue;
+	return schedule;
 }
 
 CategoryBudget* AIControlAdapterScheduler::FindBudget(IntentCategory category)
