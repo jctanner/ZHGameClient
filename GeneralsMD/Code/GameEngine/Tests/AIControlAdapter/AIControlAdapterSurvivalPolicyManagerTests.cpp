@@ -175,6 +175,43 @@ int main()
 		expect(!result.blocked, "Distant failed SCUD foundation should not block rebuild");
 	}
 
+	{
+		AIControlAdapterStrategicFoundationFact fact;
+		fact.foundationId = 6343u;
+		fact.templateName = "GLAScudStorm";
+		fact.reason = "stopped_stale_no_progress";
+		fact.stopIssued = true;
+		fact.tombstoned = true;
+		fact.activeWmdThreat = true;
+		fact.lastHealth = 2800.0f;
+		fact.maxHealth = 4000.0f;
+		const AIControlAdapterStrategicFoundationClassification result =
+			AIControlAdapterStrategicFoundationSurvivalManager().Classify(fact);
+		expect(result.state == std::string("recoverable"), "High-progress tombstoned SCUD under WMD pressure should be recoverable");
+		expect(result.recoverable, "Recoverable flag should be set for high-progress SCUD");
+		expect(!result.failed, "Recoverable SCUD foundation should not be classified failed");
+		expect(!result.rebuildBlocked, "Recoverable SCUD foundation should not block its own recovery");
+		expect(result.tombstoned, "Tombstone state should be surfaced");
+	}
+
+	{
+		AIControlAdapterStrategicFoundationFact fact;
+		fact.foundationId = 6522u;
+		fact.templateName = "GLAScudStorm";
+		fact.reason = "stopped_stale_no_progress";
+		fact.stopIssued = true;
+		fact.tombstoned = true;
+		fact.activeWmdThreat = true;
+		fact.lastHealth = 60.0f;
+		fact.maxHealth = 4000.0f;
+		const AIControlAdapterStrategicFoundationClassification result =
+			AIControlAdapterStrategicFoundationSurvivalManager().Classify(fact);
+		expect(result.state == std::string("stopped"), "Low-health tombstoned SCUD should remain stopped");
+		expect(!result.recoverable, "Low-health tombstoned SCUD should not be recoverable");
+		expect(result.failed, "Low-health stopped SCUD should still be failed");
+		expect(result.rebuildBlocked, "Low-health stopped SCUD should still block nearby rebuild churn");
+	}
+
 	std::cout << "AIControlAdapterSurvivalPolicyManagerTests passed\n";
 	return 0;
 }

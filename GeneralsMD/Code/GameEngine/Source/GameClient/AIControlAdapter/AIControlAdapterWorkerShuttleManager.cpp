@@ -24,6 +24,48 @@ int AIControlAdapterWorkerShuttleManager::ResolveProtectedTechnicalCount(
 	return std::max(0, workerIt->value("protected_technicals", 0));
 }
 
+AIControlAdapterTechnicalScoutShuttleDecision AIControlAdapterWorkerShuttleManager::EvaluateTechnicalScoutShuttle(
+	const AIControlAdapterTechnicalScoutShuttleInput& input) const
+{
+	AIControlAdapterTechnicalScoutShuttleDecision decision;
+	if (input.scudTargetRefreshNeeded && input.readyScudStorms > 0)
+	{
+		decision.mode = "wmd_refresh";
+		decision.reason = "ready_scud_target_refresh";
+		return decision;
+	}
+	if (input.availableTechnicals <= 0)
+	{
+		decision.reason = "no_available_technicals";
+		return decision;
+	}
+	if (input.activeScoutTasks > 0)
+	{
+		decision.reason = "scout_task_active";
+		return decision;
+	}
+
+	const bool mapEnumeration = input.readyScudStorms <= 0;
+	const bool usefulCargo =
+		input.availableWorkers > 0 ||
+		input.availableRpg > 0 ||
+		input.availableRebels > 0;
+	if (!mapEnumeration || !usefulCargo)
+	{
+		decision.reason = mapEnumeration ? "no_useful_passengers" : "scuds_ready";
+		return decision;
+	}
+
+	decision.desired = true;
+	decision.mode = "scout_shuttle";
+	decision.reason = input.remoteBuildGap > 0 ? "early_map_enum_remote_gap" : "early_map_enum_passenger_utility";
+	decision.allowProtectedTechnicalScout = input.protectedTechnicals > 0;
+	decision.workerPassengers = (input.remoteBuildGap > 0 && input.availableWorkers > 0) ? 1 : 0;
+	decision.rpgPassengers = std::min(2, std::max(0, input.availableRpg));
+	decision.rebelPassengers = (decision.workerPassengers == 0 && input.availableRebels > 0) ? 1 : 0;
+	return decision;
+}
+
 std::set<unsigned int> AIControlAdapterWorkerShuttleManager::CollectProtectedTechnicalIds(
 	const std::vector<AIControlAdapterWorkerShuttleTechnicalSnapshot>& technicals,
 	int desiredProtected) const

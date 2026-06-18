@@ -110,5 +110,61 @@ int main()
 		expect(telemetry["target"].value("x", 0.0f) == 100.0f, "Telemetry should preserve target x");
 	}
 
+	{
+		AIControlAdapterTechnicalScoutShuttleDecision decision =
+			manager.EvaluateTechnicalScoutShuttle({
+				0,
+				false,
+				1,
+				1,
+				3,
+				4,
+				2,
+				1,
+				0
+			});
+		expect(decision.desired, "Early map enumeration with cargo should desire scout-shuttle mode");
+		expect(decision.mode == std::string("scout_shuttle"), "Early Technical scouting should become scout-shuttle");
+		expect(decision.workerPassengers == 1, "Remote build gap should request one worker passenger");
+		expect(decision.rpgPassengers == 2, "Scout-shuttle should cap RPG passengers at two");
+		expect(decision.rebelPassengers == 0, "Worker/RPG loadout should not add rebel by default");
+		expect(decision.allowProtectedTechnicalScout, "Protected Technicals may be used by scout-shuttle mode");
+	}
+
+	{
+		AIControlAdapterTechnicalScoutShuttleDecision decision =
+			manager.EvaluateTechnicalScoutShuttle({
+				2,
+				true,
+				1,
+				1,
+				3,
+				4,
+				2,
+				1,
+				0
+			});
+		expect(!decision.desired, "Ready SCUD target refresh should not wait for shuttle loadout");
+		expect(decision.mode == std::string("wmd_refresh"), "Ready SCUD target refresh should prefer pure scout mode");
+	}
+
+	{
+		AIControlAdapterTechnicalScoutShuttleDecision decision =
+			manager.EvaluateTechnicalScoutShuttle({
+				0,
+				false,
+				1,
+				0,
+				0,
+				0,
+				1,
+				0,
+				0
+			});
+		expect(decision.desired, "Partial infantry-only loadout should still be useful");
+		expect(decision.workerPassengers == 0, "No available workers should produce partial loadout");
+		expect(decision.rpgPassengers == 1, "Available RPG passenger should be selected");
+	}
+
 	return 0;
 }

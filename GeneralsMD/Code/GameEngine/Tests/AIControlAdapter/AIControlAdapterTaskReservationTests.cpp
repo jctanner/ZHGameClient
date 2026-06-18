@@ -347,6 +347,35 @@ TEST_F(AIControlAdapterTaskReservationTests, StoppedFoundationTombstone_ExpiresA
 	EXPECT_FALSE(manager.isFoundationTombstoned(2815, 202000));
 }
 
+TEST_F(AIControlAdapterTaskReservationTests, StoppedFoundationTombstone_ExposesMetadataAndActiveCount)
+{
+	manager.tombstoneStoppedFoundation(
+		2815,
+		"GLAScudStorm",
+		Coord3D{1398.5f, 4673.1f, 0.0f},
+		"stopped_stale_no_progress",
+		1000,
+		120000);
+	manager.tombstoneStoppedFoundation(
+		2816,
+		"GLABlackMarket",
+		Coord3D{1498.5f, 4773.1f, 0.0f},
+		"stopped_stale_no_progress",
+		1000,
+		120000);
+
+	StoppedFoundationTombstone tombstone;
+	DWORD ageMs = 0;
+	EXPECT_TRUE(manager.getFoundationTombstone(2815, 17000, &tombstone, &ageMs));
+	EXPECT_EQ(tombstone.foundationObjectId, 2815u);
+	EXPECT_EQ(tombstone.expectedTemplate, "GLAScudStorm");
+	EXPECT_EQ(tombstone.reason, "stopped_stale_no_progress");
+	EXPECT_EQ(ageMs, 16000u);
+	EXPECT_EQ(manager.getActiveFoundationTombstoneCount("ScudStorm", 17000), 1);
+	EXPECT_EQ(manager.getActiveFoundationTombstoneCount("", 17000), 2);
+	EXPECT_EQ(manager.getActiveFoundationTombstoneCount("ScudStorm", 121000), 0);
+}
+
 TEST_F(AIControlAdapterTaskReservationTests, FindActiveTasks_ExcludesTerminalStates)
 {
 	const unsigned int task1 = manager.createReservation(

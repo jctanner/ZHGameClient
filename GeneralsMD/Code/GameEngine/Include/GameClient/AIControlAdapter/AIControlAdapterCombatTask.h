@@ -310,6 +310,16 @@ struct CombatTask
 	std::string lastScoutLoggedReason;
 	int lastScoutLoggedWaypointIndex = -1;
 	int lastScoutLoggedFreshTargets = -1;
+	bool scoutShuttle = false;
+	bool scoutShuttleLoadIssued = false;
+	bool scoutShuttleEvacuateIssued = false;
+	bool scoutShuttlePartialLoadout = false;
+	std::vector<unsigned int> scoutShuttlePassengerIds;
+	std::string scoutShuttleMode;
+	std::string scoutShuttleReason;
+	int scoutShuttleWorkerPassengers = 0;
+	int scoutShuttleRpgPassengers = 0;
+	int scoutShuttleRebelPassengers = 0;
 
 	CombatTaskProbeState probeState = CombatTaskProbeState::Inactive;
 	std::vector<unsigned int> probeUnitIds;

@@ -139,11 +139,19 @@ public:
 		DWORD currentTick,
 		DWORD* ageMs = nullptr,
 		std::string* reason = nullptr) const;
+	bool getFoundationTombstone(
+		unsigned int foundationObjectId,
+		DWORD currentTick,
+		StoppedFoundationTombstone* tombstone,
+		DWORD* ageMs = nullptr) const;
 	bool shouldLogFoundationTombstoneSkip(
 		unsigned int foundationObjectId,
 		DWORD currentTick,
 		unsigned int throttleMs = 5000);
 	void clearFoundationTombstone(unsigned int foundationObjectId);
+	int getActiveFoundationTombstoneCount(
+		const std::string& templateFilter,
+		DWORD currentTick) const;
 
 	// Queries for specific task types
 	std::vector<SpecialTaskReservation*> findBuildTasks(const std::string& templateFilter = "");
