@@ -197,6 +197,31 @@ struct ProductionManagerInputs
 	{}
 };
 
+struct RadarVanProductionInputs
+{
+	unsigned int money = 0;
+	unsigned int reserveCash = 0;
+	int supplyStashes = 0;
+	int barracks = 0;
+	int blackMarkets = 0;
+	int armsDealers = 0;
+	int radarVans = 0;
+	int combatVehicles = 0;
+	int minRadarVans = 1;
+	int armyCap = 100;
+	bool isBalancedSprawl = false;
+	bool wasRecoveringFromReserve = false;
+	bool wasArmyCapReached = false;
+};
+
+struct RadarVanProductionDecision
+{
+	bool shouldQueue = false;
+	bool shouldPauseCombatProduction = false;
+	bool shouldHoldArmyCap = false;
+	const char* reason = "not_needed";
+};
+
 /**
  * Production manager for autonomous combat unit production.
  *
@@ -229,6 +254,8 @@ public:
 	ProductionIntent ChooseProduction(
 		const ProductionManagerInputs& inputs,
 		unsigned int currentTick);
+
+	RadarVanProductionDecision ChooseRadarVanProduction(const RadarVanProductionInputs& inputs) const;
 
 	/**
 	 * Reset production manager state (called when starting new game).

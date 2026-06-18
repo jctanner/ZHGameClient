@@ -31,6 +31,19 @@ struct AIControlAdapterRaidModeDecision
 	const char* reason = "ok";
 };
 
+struct AIControlAdapterAttackAutomationDecision
+{
+	bool shouldIssue = false;
+	const char* reason = "not_enough_units";
+};
+
+struct AIControlAdapterAttackTaskCreationDecision
+{
+	bool shouldCreateTask = false;
+	bool shouldReleaseUnits = false;
+	const char* reason = "command_failed";
+};
+
 class AIControlAdapterRaidManager
 {
 public:
@@ -57,4 +70,13 @@ public:
 		bool cohesionWaitStarted,
 		unsigned int cohesionWaitMs,
 		unsigned int mixedInfantryTimeoutMs = 45000u);
+
+	static AIControlAdapterAttackAutomationDecision evaluateAttackAutomationGate(
+		int eligibleUnits,
+		int minimumUnits);
+
+	static AIControlAdapterAttackTaskCreationDecision evaluateAttackTaskCreation(
+		bool commandIssued,
+		int assignedUnits,
+		bool hasEquivalentActiveTask);
 };

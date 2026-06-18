@@ -150,3 +150,53 @@ AIControlAdapterRaidModeDecision AIControlAdapterRaidManager::evaluateRaidModePo
 
 	return decision;
 }
+
+AIControlAdapterAttackAutomationDecision AIControlAdapterRaidManager::evaluateAttackAutomationGate(
+	int eligibleUnits,
+	int minimumUnits)
+{
+	AIControlAdapterAttackAutomationDecision decision;
+	if (minimumUnits <= 0)
+	{
+		decision.shouldIssue = true;
+		decision.reason = "minimum_disabled";
+		return decision;
+	}
+	if (eligibleUnits < minimumUnits)
+	{
+		decision.shouldIssue = false;
+		decision.reason = "not_enough_units";
+		return decision;
+	}
+	decision.shouldIssue = true;
+	decision.reason = "enough_units";
+	return decision;
+}
+
+AIControlAdapterAttackTaskCreationDecision AIControlAdapterRaidManager::evaluateAttackTaskCreation(
+	bool commandIssued,
+	int assignedUnits,
+	bool hasEquivalentActiveTask)
+{
+	AIControlAdapterAttackTaskCreationDecision decision;
+	if (!commandIssued)
+	{
+		decision.reason = "command_failed";
+		return decision;
+	}
+	if (assignedUnits <= 0)
+	{
+		decision.reason = "no_eligible_units";
+		return decision;
+	}
+	if (hasEquivalentActiveTask)
+	{
+		decision.shouldReleaseUnits = true;
+		decision.reason = "equivalent_active_task";
+		return decision;
+	}
+
+	decision.shouldCreateTask = true;
+	decision.reason = "attack_automation";
+	return decision;
+}

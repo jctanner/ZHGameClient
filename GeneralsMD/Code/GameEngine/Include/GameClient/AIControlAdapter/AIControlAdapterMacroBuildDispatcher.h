@@ -43,6 +43,24 @@ struct AIControlAdapterMacroBuildDispatchResult
 	int priority = 0;
 };
 
+struct AIControlAdapterMacroBuildCooldownSlots
+{
+	unsigned long* supply = nullptr;
+	unsigned long* barracks = nullptr;
+	unsigned long* armsDealer = nullptr;
+	unsigned long* palace = nullptr;
+	unsigned long* blackMarket = nullptr;
+	unsigned long* tunnel = nullptr;
+	unsigned long* stinger = nullptr;
+};
+
+struct AIControlAdapterMacroBuildCommandAlias
+{
+	std::string command;
+	std::string buildingTemplate;
+	bool hasBuildingTemplate = false;
+};
+
 class AIControlAdapterMacroBuildDispatcher
 {
 public:
@@ -53,4 +71,33 @@ public:
 		const AIControlAdapterMacroBuildDispatchRequest& request,
 		bool issued,
 		const std::string& executionReason) const;
+
+	static unsigned long* FindBuildCooldownTick(
+		AIControlAdapterMacroBuildCooldownSlots& slots,
+		const char* commandName);
+
+	static const unsigned long* FindBuildCooldownTick(
+		const AIControlAdapterMacroBuildCooldownSlots& slots,
+		const char* commandName);
+
+	static bool IsBuildCooldownReady(
+		const AIControlAdapterMacroBuildCooldownSlots& slots,
+		const char* commandName,
+		unsigned long now);
+
+	static bool IsBuildAttemptReady(
+		const AIControlAdapterMacroBuildCooldownSlots& slots,
+		const char* commandName,
+		int inProgressCount,
+		unsigned long now);
+
+	static void RecordBuildAttempt(
+		AIControlAdapterMacroBuildCooldownSlots& slots,
+		const char* commandName,
+		bool success,
+		const std::string& reason,
+		unsigned long now);
+
+	static AIControlAdapterMacroBuildCommandAlias ResolveCommandAlias(
+		const char* commandName);
 };

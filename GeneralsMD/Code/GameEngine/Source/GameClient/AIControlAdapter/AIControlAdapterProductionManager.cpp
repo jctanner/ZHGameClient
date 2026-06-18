@@ -258,3 +258,68 @@ ProductionIntent AIControlAdapterProductionManager::ChooseProduction(
 	intent.reason = "";
 	return intent;
 }
+
+RadarVanProductionDecision AIControlAdapterProductionManager::ChooseRadarVanProduction(
+	const RadarVanProductionInputs& inputs) const
+{
+	RadarVanProductionDecision decision;
+	const bool openingInfrastructureReady =
+		inputs.supplyStashes >= 1 && inputs.barracks >= 1 && inputs.armsDealers >= 1;
+	const bool openingEconomyReady = inputs.supplyStashes >= 2 || inputs.blackMarkets >= 1;
+
+	decision.shouldPauseCombatProduction = AIControlAdapterShouldPauseCombatProduction({
+		inputs.isBalancedSprawl,
+		openingInfrastructureReady,
+		openingEconomyReady,
+		inputs.wasRecoveringFromReserve,
+		inputs.money,
+		inputs.reserveCash,
+		0,
+		0
+	});
+	decision.shouldHoldArmyCap = AIControlAdapterShouldHoldArmyCap({
+		decision.shouldPauseCombatProduction,
+		inputs.isBalancedSprawl,
+		inputs.wasArmyCapReached,
+		inputs.combatVehicles,
+		inputs.armyCap
+	});
+	decision.shouldQueue = AIControlAdapterShouldQueueRadarVan({
+		decision.shouldPauseCombatProduction,
+		decision.shouldHoldArmyCap,
+		inputs.armsDealers,
+		inputs.radarVans,
+		inputs.combatVehicles,
+		inputs.minRadarVans
+	});
+
+	if (decision.shouldPauseCombatProduction)
+	{
+		decision.reason = "production_paused";
+	}
+	else if (decision.shouldHoldArmyCap)
+	{
+		decision.reason = "army_cap_reached";
+	}
+	else if (inputs.armsDealers <= 0)
+	{
+		decision.reason = "missing_arms_dealer";
+	}
+	else if (inputs.radarVans >= inputs.minRadarVans)
+	{
+		decision.reason = "target_met";
+	}
+	else if (inputs.combatVehicles <= 0)
+	{
+		decision.reason = "no_combat_vehicles";
+	}
+	else if (!decision.shouldQueue)
+	{
+		decision.reason = "ratio_satisfied";
+	}
+	else
+	{
+		decision.reason = "radar_van_needed";
+	}
+	return decision;
+}

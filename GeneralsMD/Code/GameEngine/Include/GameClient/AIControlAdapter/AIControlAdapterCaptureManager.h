@@ -47,6 +47,14 @@ struct AIControlAdapterCaptureAssignmentBudgetDecision
 	AIControlAdapterCaptureAssignmentBudgetDecision();
 };
 
+struct AIControlAdapterCaptureReadinessDecision
+{
+	bool canEvaluate;
+	const char* reason;
+
+	AIControlAdapterCaptureReadinessDecision();
+};
+
 class AIControlAdapterCaptureManager
 {
 public:
@@ -85,6 +93,12 @@ public:
 		int pendingCount,
 		int maxConcurrent,
 		int attemptsPerAssignment = 4);
+
+	static AIControlAdapterCaptureReadinessDecision ChooseAutomationReadiness(
+		int completedBarracks,
+		bool upgradeFound,
+		bool upgradeComplete,
+		bool upgradeInProgress);
 
 	static void ApplyCommandReissueSuccess(
 		SpecialTaskReservation& task,

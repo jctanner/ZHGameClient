@@ -13,7 +13,10 @@
 
 #pragma once
 
+#include "GameClient/AIControlAdapter/AIControlAdapterPolicy.h"
+
 #include <string>
+#include <vector>
 
 /**
  * Income health state based on smoothed net cash per minute and reserve pressure.
@@ -119,6 +122,39 @@ struct EconomyManagerInput
 	std::string profile;  // e.g., "sprawl", "sprawl_balanced", "tech"
 };
 
+struct LocalWorkerZoneInput
+{
+	bool developed = false;
+	bool active = false;
+	bool hasLocalStrategicTask = false;
+	int globalWorkers = 0;
+	int workerCap = 0;
+	unsigned int cashFloat = 0;
+	int localIdleWorkers = 0;
+	bool hasLocalProducer = false;
+};
+
+struct LocalWorkerZoneDecision
+{
+	int desiredLocalWorkers = 0;
+	AIControlAdapterLocalWorkerLiquidityResult policy;
+};
+
+struct WorkerProductionDecision
+{
+	bool shouldQueue = false;
+	int queueCount = 0;
+	const char* reason = "target_met";
+};
+
+struct StashWorkerProductionDecision
+{
+	bool shouldQueue = false;
+	int targetStashId = 0;
+	int queueCount = 0;
+	const char* reason = "target_met";
+};
+
 /**
  * EconomyManager: Owns income health assessment and emergency income recovery decisions.
  *
@@ -154,6 +190,23 @@ public:
 	 * @return EconomyRecoveryRequest with build decision
 	 */
 	EconomyRecoveryRequest ChooseRecoveryAction(const EconomyManagerInput& input, const EconomyPolicy& policy) const;
+
+	AIControlAdapterLocalWorkerLiquidityResult ChooseGlobalWorkerLiquidityPass(
+		int globalWorkers,
+		int workerCap,
+		unsigned int cashFloat) const;
+
+	LocalWorkerZoneDecision ChooseLocalWorkerLiquidityForZone(const LocalWorkerZoneInput& input) const;
+
+	WorkerProductionDecision ChooseWorkerProduction(
+		int idleWorkers,
+		int minimumIdleWorkers,
+		int requestedQueueCount) const;
+
+	StashWorkerProductionDecision ChooseStashWorkerProduction(
+		const std::vector<int>& stashIds,
+		const std::vector<int>& servicedStashIds,
+		int targetWorkersPerStash) const;
 
 private:
 	/**
