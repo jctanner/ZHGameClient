@@ -529,12 +529,12 @@
 				}
 				else
 				{
-					mapName = unicodeToUtf8(itemText);
+					mapName = AIControlAdapterUiUtils::UnicodeToUtf8(itemText);
 				}
 
 				items.push_back(nlohmann::json{
 					{"index", i},
-					{"text", unicodeToUtf8(itemText)},
+					{"text", AIControlAdapterUiUtils::UnicodeToUtf8(itemText)},
 					{"map", mapName}
 				});
 			}

@@ -1,0 +1,113 @@
+#include "PreRTS.h"
+
+#include "GameClient/AIControlAdapter/AIControlAdapterWorkerShuttleManager.h"
+
+#include <algorithm>
+
+int AIControlAdapterWorkerShuttleManager::ResolveProtectedTechnicalCount(
+	const nlohmann::json& glaUsaStrategyTelemetry) const
+{
+	if (!glaUsaStrategyTelemetry.is_object()
+		|| !glaUsaStrategyTelemetry.value("active", false))
+	{
+		return 0;
+	}
+	const auto workerIt = glaUsaStrategyTelemetry.find("worker_mobility");
+	if (workerIt == glaUsaStrategyTelemetry.end() || !workerIt->is_object())
+	{
+		return 0;
+	}
+	if (!workerIt->value("desired", false))
+	{
+		return 0;
+	}
+	return std::max(0, workerIt->value("protected_technicals", 0));
+}
+
+std::set<unsigned int> AIControlAdapterWorkerShuttleManager::CollectProtectedTechnicalIds(
+	const std::vector<AIControlAdapterWorkerShuttleTechnicalSnapshot>& technicals,
+	int desiredProtected) const
+{
+	std::set<unsigned int> protectedIds;
+	if (desiredProtected <= 0)
+	{
+		return protectedIds;
+	}
+
+	std::vector<unsigned int> technicalIds;
+	for (const AIControlAdapterWorkerShuttleTechnicalSnapshot& technical : technicals)
+	{
+		if (technical.id == 0u
+			|| technical.isStructure
+			|| technical.underConstruction
+			|| !technical.isTechnical
+			|| technical.dead)
+		{
+			continue;
+		}
+		technicalIds.push_back(technical.id);
+	}
+
+	std::sort(technicalIds.begin(), technicalIds.end());
+	const int count = std::min(desiredProtected, static_cast<int>(technicalIds.size()));
+	for (int i = 0; i < count; ++i)
+	{
+		protectedIds.insert(technicalIds[static_cast<std::size_t>(i)]);
+	}
+	return protectedIds;
+}
+
+bool AIControlAdapterWorkerShuttleManager::IsTechnicalProtected(
+	const AIControlAdapterWorkerShuttleTechnicalSnapshot& technical,
+	const std::set<unsigned int>& protectedIds) const
+{
+	if (technical.id == 0u
+		|| technical.isStructure
+		|| technical.underConstruction
+		|| !technical.isTechnical)
+	{
+		return false;
+	}
+	return protectedIds.find(technical.id) != protectedIds.end();
+}
+
+bool AIControlAdapterWorkerShuttleManager::IsTechnicalAssigned(
+	unsigned int technicalId,
+	const std::vector<AIControlAdapterWorkerShuttleAssignmentSnapshot>& assignments) const
+{
+	for (const AIControlAdapterWorkerShuttleAssignmentSnapshot& assignment : assignments)
+	{
+		if (assignment.technicalId == technicalId
+			&& assignment.state != "released"
+			&& assignment.state != "failed")
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+nlohmann::json AIControlAdapterWorkerShuttleManager::BuildAssignmentTelemetry(
+	const AIControlAdapterWorkerShuttleAssignmentSnapshot& assignment,
+	const AIControlAdapterWorkerShuttleAssignmentStatus& status,
+	unsigned int now) const
+{
+	return nlohmann::json::object({
+		{"task_id", assignment.taskId},
+		{"worker_id", assignment.workerId},
+		{"technical_id", assignment.technicalId},
+		{"template", assignment.templateName},
+		{"state", assignment.state},
+		{"reason", assignment.reason},
+		{"age_ms", now - assignment.createdTick},
+		{"last_command_age_ms", now - assignment.lastCommandTick},
+		{"worker_inside", status.workerInside},
+		{"worker_distance", status.workerDistance},
+		{"technical_distance", status.technicalDistance},
+		{"target", nlohmann::json::object({
+			{"x", assignment.targetX},
+			{"y", assignment.targetY},
+			{"z", assignment.targetZ}
+		})}
+	});
+}

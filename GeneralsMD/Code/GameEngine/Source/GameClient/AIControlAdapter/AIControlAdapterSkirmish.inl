@@ -45,7 +45,7 @@
 				{"template", slot->getPlayerTemplate()},
 				{"team", slot->getTeamNumber()},
 				{"start_position", slot->getStartPos()},
-				{"name", unicodeToUtf8(slot->getName())}
+				{"name", AIControlAdapterUiUtils::UnicodeToUtf8(slot->getName())}
 			};
 		}
 

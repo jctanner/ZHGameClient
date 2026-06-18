@@ -8,7 +8,9 @@
 
 #include "PreRTS.h"
 #include "GameClient/AIControlAdapter/AIControlAdapterDefenseManager.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterPolicy.h"
 
+#include <algorithm>
 #include <cstring>
 
 AIControlAdapterDefenseManager::AIControlAdapterDefenseManager()
@@ -199,4 +201,119 @@ DefenseRequest AIControlAdapterDefenseManager::ChooseDefenseProduction(
 	}
 
 	return request;
+}
+
+AIControlAdapterZoneDefenseFloorDecision AIControlAdapterDefenseManager::ResolveZoneDefenseFloor(
+	float unitX,
+	float unitY,
+	float zoneRadius,
+	const std::vector<AIControlAdapterDefenseZoneSnapshot>& zones,
+	const std::vector<AIControlAdapterZoneDefenseReserveSnapshot>& reserves)
+{
+	AIControlAdapterZoneDefenseFloorDecision decision;
+	if (zones.empty() || reserves.empty())
+	{
+		return decision;
+	}
+	const float radius = std::max<float>(160.0f, zoneRadius) * 1.25f;
+	const float radiusSq = radius * radius;
+	float bestDistSq = radiusSq;
+	for (const AIControlAdapterDefenseZoneSnapshot& zone : zones)
+	{
+		const float dx = unitX - zone.centerX;
+		const float dy = unitY - zone.centerY;
+		const float distSq = dx * dx + dy * dy;
+		if (distSq <= bestDistSq)
+		{
+			bestDistSq = distSq;
+			decision.hasZone = true;
+			decision.zoneId = zone.anchorId;
+			decision.isMainBase = zone.isMainBase;
+		}
+	}
+	if (!decision.hasZone || decision.zoneId == 0u)
+	{
+		decision.hasZone = false;
+		return decision;
+	}
+	const AIControlAdapterZoneDefenseReserveSnapshot* reserve = nullptr;
+	for (const AIControlAdapterZoneDefenseReserveSnapshot& candidate : reserves)
+	{
+		if (candidate.zoneId == decision.zoneId)
+		{
+			reserve = &candidate;
+			break;
+		}
+	}
+	if (reserve == nullptr)
+	{
+		decision.hasZone = false;
+		decision.zoneId = 0u;
+		decision.isMainBase = false;
+		return decision;
+	}
+	decision.protectedByFloor =
+		reserve->surplus <= 0 ||
+		reserve->deficit > 0 ||
+		reserve->activeThreat ||
+		decision.isMainBase;
+	decision.canRelaxForScout =
+		!decision.isMainBase &&
+		!reserve->activeThreat &&
+		reserve->deficit <= 0;
+	return decision;
+}
+
+int AIControlAdapterDefenseManager::ThreatSeverityForLevel(const std::string& level)
+{
+	if (level == "critical")
+	{
+		return 4;
+	}
+	if (level == "high")
+	{
+		return 3;
+	}
+	if (level == "medium")
+	{
+		return 2;
+	}
+	if (level == "low")
+	{
+		return 1;
+	}
+	return 0;
+}
+
+bool AIControlAdapterDefenseManager::IsZoneThreatFresh(
+	unsigned int now,
+	unsigned int lastSeenTick,
+	unsigned int freshnessMs)
+{
+	const unsigned int ageCutoff = now - freshnessMs;
+	return AIControlAdapterHasTickElapsed(ageCutoff, lastSeenTick);
+}
+
+const char* AIControlAdapterDefenseManager::TransientStrikeReleaseReason(
+	const std::string& sourceType,
+	int localEnemyCount,
+	int enemyArtilleryCount)
+{
+	if (localEnemyCount > 0 || enemyArtilleryCount > 0)
+	{
+		return nullptr;
+	}
+	if (sourceType == "wmd_strike")
+	{
+		return "wmd_strike_no_local_enemy";
+	}
+	if (sourceType == "special_power_strike")
+	{
+		return "special_power_no_local_enemy";
+	}
+	if (sourceType == "unknown_damage")
+	{
+		return "unknown_damage_no_local_enemy";
+	}
+	return nullptr;
 }

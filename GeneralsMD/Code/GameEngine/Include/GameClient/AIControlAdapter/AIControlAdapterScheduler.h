@@ -185,6 +185,25 @@ struct SchedulerConfig
 	}
 };
 
+struct AIControlAdapterAutonomyTickSchedule
+{
+	bool macroDue;
+	bool productionDue;
+	bool techDue;
+	bool guardDue;
+	bool anyDue;
+	bool guardOnly;
+
+	AIControlAdapterAutonomyTickSchedule()
+		: macroDue(false)
+		, productionDue(false)
+		, techDue(false)
+		, guardDue(false)
+		, anyDue(false)
+		, guardOnly(false)
+	{}
+};
+
 /**
  * Intent scheduler for autonomous behavior arbitration.
  *
@@ -241,6 +260,13 @@ public:
 	 * Clears intent queue and resets category budgets.
 	 */
 	void Reset();
+
+	static AIControlAdapterAutonomyTickSchedule EvaluateAutonomyTickSchedule(
+		unsigned int now,
+		unsigned int nextMacroTick,
+		unsigned int nextProductionTick,
+		unsigned int nextTechTick,
+		unsigned int nextGuardTick);
 
 private:
 	SchedulerConfig m_config;

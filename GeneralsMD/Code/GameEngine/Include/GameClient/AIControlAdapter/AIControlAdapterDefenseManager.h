@@ -109,6 +109,31 @@ struct DefenseManagerInputs
 	{}
 };
 
+struct AIControlAdapterDefenseZoneSnapshot
+{
+	unsigned int anchorId = 0u;
+	float centerX = 0.0f;
+	float centerY = 0.0f;
+	bool isMainBase = false;
+};
+
+struct AIControlAdapterZoneDefenseReserveSnapshot
+{
+	unsigned int zoneId = 0u;
+	int surplus = 0;
+	int deficit = 0;
+	bool activeThreat = false;
+};
+
+struct AIControlAdapterZoneDefenseFloorDecision
+{
+	bool hasZone = false;
+	unsigned int zoneId = 0u;
+	bool isMainBase = false;
+	bool protectedByFloor = false;
+	bool canRelaxForScout = false;
+};
+
 /**
  * Defense manager for threat response decisions.
  *
@@ -141,6 +166,25 @@ public:
 	DefenseRequest ChooseDefenseProduction(
 		const DefenseManagerInputs& inputs,
 		const AIControlAdapterZoneManager& zoneManager);
+
+	static AIControlAdapterZoneDefenseFloorDecision ResolveZoneDefenseFloor(
+		float unitX,
+		float unitY,
+		float zoneRadius,
+		const std::vector<AIControlAdapterDefenseZoneSnapshot>& zones,
+		const std::vector<AIControlAdapterZoneDefenseReserveSnapshot>& reserves);
+
+	static int ThreatSeverityForLevel(const std::string& level);
+
+	static bool IsZoneThreatFresh(
+		unsigned int now,
+		unsigned int lastSeenTick,
+		unsigned int freshnessMs);
+
+	static const char* TransientStrikeReleaseReason(
+		const std::string& sourceType,
+		int localEnemyCount,
+		int enemyArtilleryCount);
 
 	/**
 	 * Reset defense manager state (called when starting new game).
