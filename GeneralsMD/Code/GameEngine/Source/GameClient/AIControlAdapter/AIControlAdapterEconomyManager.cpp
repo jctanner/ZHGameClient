@@ -7,6 +7,42 @@
 #include "GameClient/AIControlAdapter/AIControlAdapterEconomyManager.h"
 #include <algorithm>
 
+namespace
+{
+	AIControlAdapterLocalWorkerLiquidityResult chooseLocalWorkerLiquidity(
+		const AIControlAdapterLocalWorkerLiquidityInputs& inputs)
+	{
+		AIControlAdapterLocalWorkerLiquidityResult result;
+		result.shouldQueue = false;
+		result.reason = "target_met";
+
+		if (inputs.workerCap > 0 && inputs.globalWorkers >= inputs.workerCap)
+		{
+			result.reason = "worker_cap_reached";
+			return result;
+		}
+		if (inputs.cashFloat < 3000u)
+		{
+			result.reason = "cash_reserved";
+			return result;
+		}
+		if (inputs.desiredLocalWorkers <= 0 || inputs.localIdleWorkers >= inputs.desiredLocalWorkers)
+		{
+			result.reason = "target_met";
+			return result;
+		}
+		if (!inputs.hasLocalProducer)
+		{
+			result.reason = "producer_missing";
+			return result;
+		}
+
+		result.shouldQueue = true;
+		result.reason = "queued_local_worker";
+		return result;
+	}
+}
+
 EconomyPolicy AIControlAdapterEconomyManager::AssessEconomyPolicy(const EconomyManagerInput& input) const
 {
 	EconomyPolicy policy;
@@ -242,6 +278,102 @@ EconomyRecoveryRequest AIControlAdapterEconomyManager::ChooseRecoveryAction(
 	}
 
 	return request;
+}
+
+AIControlAdapterLocalWorkerLiquidityResult AIControlAdapterEconomyManager::ChooseGlobalWorkerLiquidityPass(
+	int globalWorkers,
+	int workerCap,
+	unsigned int cashFloat) const
+{
+	return chooseLocalWorkerLiquidity({
+		globalWorkers,
+		workerCap,
+		cashFloat,
+		0,
+		1,
+		true
+	});
+}
+
+LocalWorkerZoneDecision AIControlAdapterEconomyManager::ChooseLocalWorkerLiquidityForZone(
+	const LocalWorkerZoneInput& input) const
+{
+	LocalWorkerZoneDecision decision;
+	if (input.hasLocalStrategicTask)
+	{
+		decision.desiredLocalWorkers = 3;
+	}
+	else if (input.active)
+	{
+		decision.desiredLocalWorkers = 2;
+	}
+	else if (input.developed)
+	{
+		decision.desiredLocalWorkers = 1;
+	}
+	else
+	{
+		decision.desiredLocalWorkers = 0;
+	}
+
+	decision.policy = chooseLocalWorkerLiquidity({
+		input.globalWorkers,
+		input.workerCap,
+		input.cashFloat,
+		input.localIdleWorkers,
+		decision.desiredLocalWorkers,
+		input.hasLocalProducer
+	});
+	return decision;
+}
+
+WorkerProductionDecision AIControlAdapterEconomyManager::ChooseWorkerProduction(
+	int idleWorkers,
+	int minimumIdleWorkers,
+	int requestedQueueCount) const
+{
+	WorkerProductionDecision decision;
+	if (minimumIdleWorkers <= 0 || idleWorkers >= minimumIdleWorkers)
+	{
+		decision.shouldQueue = false;
+		decision.queueCount = 0;
+		decision.reason = "target_met";
+		return decision;
+	}
+	decision.shouldQueue = true;
+	decision.queueCount = std::max(1, requestedQueueCount);
+	decision.reason = "idle_worker_deficit";
+	return decision;
+}
+
+StashWorkerProductionDecision AIControlAdapterEconomyManager::ChooseStashWorkerProduction(
+	const std::vector<int>& stashIds,
+	const std::vector<int>& servicedStashIds,
+	int targetWorkersPerStash) const
+{
+	StashWorkerProductionDecision decision;
+	if (stashIds.empty())
+	{
+		decision.reason = "no_stashes";
+		return decision;
+	}
+
+	for (int stashId : stashIds)
+	{
+		if (std::find(servicedStashIds.begin(), servicedStashIds.end(), stashId) != servicedStashIds.end())
+		{
+			continue;
+		}
+
+		decision.shouldQueue = true;
+		decision.targetStashId = stashId;
+		decision.queueCount = std::max(1, targetWorkersPerStash);
+		decision.reason = "unserviced_stash";
+		return decision;
+	}
+
+	decision.reason = "target_met";
+	return decision;
 }
 
 EconomyIncomeState AIControlAdapterEconomyManager::ClassifyIncomeState(

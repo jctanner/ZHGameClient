@@ -147,5 +147,57 @@ int main()
 		expect(std::string(decision.reason) == "no_viable_vehicle_group", "vehicle fail should report no viable vehicle group");
 	}
 
+	{
+		const AIControlAdapterAttackAutomationDecision decision =
+			AIControlAdapterRaidManager::evaluateAttackAutomationGate(4, 8);
+		expect(!decision.shouldIssue, "attack automation should block when eligible units are below minimum");
+		expect(std::string(decision.reason) == "not_enough_units", "attack gate should report not enough units");
+	}
+
+	{
+		const AIControlAdapterAttackAutomationDecision decision =
+			AIControlAdapterRaidManager::evaluateAttackAutomationGate(8, 8);
+		expect(decision.shouldIssue, "attack automation should allow when eligible units meet minimum");
+		expect(std::string(decision.reason) == "enough_units", "attack gate should report enough units");
+	}
+
+	{
+		const AIControlAdapterAttackAutomationDecision decision =
+			AIControlAdapterRaidManager::evaluateAttackAutomationGate(0, 0);
+		expect(decision.shouldIssue, "attack automation should allow when minimum is disabled");
+		expect(std::string(decision.reason) == "minimum_disabled", "attack gate should report disabled minimum");
+	}
+
+	{
+		const AIControlAdapterAttackTaskCreationDecision decision =
+			AIControlAdapterRaidManager::evaluateAttackTaskCreation(false, 3, false);
+		expect(!decision.shouldCreateTask, "attack task creation should block after failed command");
+		expect(!decision.shouldReleaseUnits, "failed command should not release assigned units");
+		expect(std::string(decision.reason) == "command_failed", "failed command should report command failed");
+	}
+
+	{
+		const AIControlAdapterAttackTaskCreationDecision decision =
+			AIControlAdapterRaidManager::evaluateAttackTaskCreation(true, 0, false);
+		expect(!decision.shouldCreateTask, "attack task creation should block without assigned units");
+		expect(std::string(decision.reason) == "no_eligible_units", "no units should report no eligible units");
+	}
+
+	{
+		const AIControlAdapterAttackTaskCreationDecision decision =
+			AIControlAdapterRaidManager::evaluateAttackTaskCreation(true, 3, true);
+		expect(!decision.shouldCreateTask, "attack task creation should block equivalent active task");
+		expect(decision.shouldReleaseUnits, "equivalent active task should release command-selected units");
+		expect(std::string(decision.reason) == "equivalent_active_task", "equivalent active should report equivalent task");
+	}
+
+	{
+		const AIControlAdapterAttackTaskCreationDecision decision =
+			AIControlAdapterRaidManager::evaluateAttackTaskCreation(true, 3, false);
+		expect(decision.shouldCreateTask, "attack task creation should allow assigned units without equivalent task");
+		expect(!decision.shouldReleaseUnits, "new attack task should keep assigned units");
+		expect(std::string(decision.reason) == "attack_automation", "new attack task should report attack automation");
+	}
+
 	return 0;
 }

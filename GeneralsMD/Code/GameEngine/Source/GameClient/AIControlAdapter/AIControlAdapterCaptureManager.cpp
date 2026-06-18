@@ -38,6 +38,12 @@ AIControlAdapterCaptureAssignmentBudgetDecision::AIControlAdapterCaptureAssignme
 {
 }
 
+AIControlAdapterCaptureReadinessDecision::AIControlAdapterCaptureReadinessDecision()
+	: canEvaluate(false)
+	, reason("capture_upgrade_not_ready")
+{
+}
+
 bool AIControlAdapterCaptureManager::IsTerminalState(SpecialTaskState state)
 {
 	return state == SpecialTaskState::Complete ||
@@ -211,6 +217,34 @@ AIControlAdapterCaptureAssignmentBudgetDecision AIControlAdapterCaptureManager::
 		? std::max(decision.assignmentsRemaining, 1) * std::max(1, attemptsPerAssignment)
 		: 0;
 	decision.reason = decision.canAssign ? "available" : "pending_limit";
+	return decision;
+}
+
+AIControlAdapterCaptureReadinessDecision AIControlAdapterCaptureManager::ChooseAutomationReadiness(
+	int completedBarracks,
+	bool upgradeFound,
+	bool upgradeComplete,
+	bool upgradeInProgress)
+{
+	AIControlAdapterCaptureReadinessDecision decision;
+	if (completedBarracks < 1)
+	{
+		decision.reason = "capture_barracks_not_ready";
+		return decision;
+	}
+	if (!upgradeFound)
+	{
+		decision.reason = "capture_upgrade_not_found";
+		return decision;
+	}
+	if (!upgradeComplete)
+	{
+		decision.reason = upgradeInProgress ? "capture_upgrade_in_progress" : "capture_upgrade_not_ready";
+		return decision;
+	}
+
+	decision.canEvaluate = true;
+	decision.reason = "ready";
 	return decision;
 }
 

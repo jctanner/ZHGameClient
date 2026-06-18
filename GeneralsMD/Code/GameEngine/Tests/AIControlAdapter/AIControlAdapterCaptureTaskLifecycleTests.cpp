@@ -25,6 +25,7 @@ struct Coord3D {
 
 #include <cstdlib>
 #include <iostream>
+#include <string>
 
 namespace
 {
@@ -309,6 +310,42 @@ void testCaptureCommandReissueSuccessBookkeeping()
 	std::cout << "  PASSED" << std::endl;
 }
 
+void testCaptureAutomationReadiness()
+{
+	std::cout << "Test: Capture automation readiness" << std::endl;
+
+	const AIControlAdapterCaptureReadinessDecision barracksMissing =
+		AIControlAdapterCaptureManager::ChooseAutomationReadiness(0, true, true, false);
+	expect(!barracksMissing.canEvaluate, "Readiness should block without completed barracks");
+	expect(std::string(barracksMissing.reason) == "capture_barracks_not_ready",
+		"Readiness should report missing barracks");
+
+	const AIControlAdapterCaptureReadinessDecision upgradeMissing =
+		AIControlAdapterCaptureManager::ChooseAutomationReadiness(1, false, false, false);
+	expect(!upgradeMissing.canEvaluate, "Readiness should block without upgrade template");
+	expect(std::string(upgradeMissing.reason) == "capture_upgrade_not_found",
+		"Readiness should report missing upgrade template");
+
+	const AIControlAdapterCaptureReadinessDecision upgradePending =
+		AIControlAdapterCaptureManager::ChooseAutomationReadiness(1, true, false, true);
+	expect(!upgradePending.canEvaluate, "Readiness should block while upgrade is pending");
+	expect(std::string(upgradePending.reason) == "capture_upgrade_in_progress",
+		"Readiness should report upgrade in progress");
+
+	const AIControlAdapterCaptureReadinessDecision upgradeNeeded =
+		AIControlAdapterCaptureManager::ChooseAutomationReadiness(1, true, false, false);
+	expect(!upgradeNeeded.canEvaluate, "Readiness should block before upgrade is complete");
+	expect(std::string(upgradeNeeded.reason) == "capture_upgrade_not_ready",
+		"Readiness should report upgrade not ready");
+
+	const AIControlAdapterCaptureReadinessDecision ready =
+		AIControlAdapterCaptureManager::ChooseAutomationReadiness(1, true, true, false);
+	expect(ready.canEvaluate, "Readiness should allow capture automation when prerequisites are ready");
+	expect(std::string(ready.reason) == "ready", "Readiness should report ready");
+
+	std::cout << "  PASSED" << std::endl;
+}
+
 // Test: Task completes when target becomes friendly
 void testTaskCompletion()
 {
@@ -342,6 +379,7 @@ int main()
 	testDuplicatePrevention();
 	testCaptureAssignmentBudget();
 	testCaptureCommandReissueSuccessBookkeeping();
+	testCaptureAutomationReadiness();
 	testTaskCompletion();
 
 	std::cout << std::endl;

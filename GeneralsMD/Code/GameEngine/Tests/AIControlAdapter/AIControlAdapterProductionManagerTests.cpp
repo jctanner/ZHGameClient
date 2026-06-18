@@ -406,6 +406,104 @@ void testNearestProducerSelectedInZone()
 	std::cout << "PASS: testNearestProducerSelectedInZone\n";
 }
 
+void testRadarVanProductionDecisionQueuesWhenNeeded()
+{
+	AIControlAdapterProductionManager manager;
+
+	RadarVanProductionInputs inputs;
+	inputs.money = 50000u;
+	inputs.reserveCash = 10000u;
+	inputs.supplyStashes = 2;
+	inputs.barracks = 1;
+	inputs.armsDealers = 1;
+	inputs.radarVans = 0;
+	inputs.combatVehicles = 8;
+	inputs.minRadarVans = 1;
+	inputs.armyCap = 100;
+	inputs.isBalancedSprawl = true;
+
+	const RadarVanProductionDecision decision = manager.ChooseRadarVanProduction(inputs);
+
+	expect(decision.shouldQueue, "Radar van should queue when below target and vehicles exist");
+	expectEq(std::string(decision.reason), std::string("radar_van_needed"), "Radar van reason should explain need");
+
+	std::cout << "PASS: testRadarVanProductionDecisionQueuesWhenNeeded\n";
+}
+
+void testRadarVanProductionDecisionBlocksWhenPaused()
+{
+	AIControlAdapterProductionManager manager;
+
+	RadarVanProductionInputs inputs;
+	inputs.money = 8000u;
+	inputs.reserveCash = 10000u;
+	inputs.supplyStashes = 2;
+	inputs.barracks = 1;
+	inputs.armsDealers = 1;
+	inputs.radarVans = 0;
+	inputs.combatVehicles = 8;
+	inputs.minRadarVans = 1;
+	inputs.armyCap = 100;
+	inputs.isBalancedSprawl = true;
+	inputs.wasRecoveringFromReserve = true;
+
+	const RadarVanProductionDecision decision = manager.ChooseRadarVanProduction(inputs);
+
+	expect(!decision.shouldQueue, "Radar van should not queue during reserve recovery pause");
+	expect(decision.shouldPauseCombatProduction, "Decision should expose production pause");
+	expectEq(std::string(decision.reason), std::string("production_paused"), "Pause reason should be explicit");
+
+	std::cout << "PASS: testRadarVanProductionDecisionBlocksWhenPaused\n";
+}
+
+void testRadarVanProductionDecisionBlocksWithoutVehicles()
+{
+	AIControlAdapterProductionManager manager;
+
+	RadarVanProductionInputs inputs;
+	inputs.money = 50000u;
+	inputs.reserveCash = 10000u;
+	inputs.supplyStashes = 2;
+	inputs.barracks = 1;
+	inputs.armsDealers = 1;
+	inputs.radarVans = 0;
+	inputs.combatVehicles = 0;
+	inputs.minRadarVans = 1;
+	inputs.armyCap = 100;
+	inputs.isBalancedSprawl = true;
+
+	const RadarVanProductionDecision decision = manager.ChooseRadarVanProduction(inputs);
+
+	expect(!decision.shouldQueue, "Radar van should not queue before combat vehicles exist");
+	expectEq(std::string(decision.reason), std::string("no_combat_vehicles"), "No-vehicle reason should be explicit");
+
+	std::cout << "PASS: testRadarVanProductionDecisionBlocksWithoutVehicles\n";
+}
+
+void testRadarVanProductionDecisionBlocksWhenTargetMet()
+{
+	AIControlAdapterProductionManager manager;
+
+	RadarVanProductionInputs inputs;
+	inputs.money = 50000u;
+	inputs.reserveCash = 10000u;
+	inputs.supplyStashes = 2;
+	inputs.barracks = 1;
+	inputs.armsDealers = 1;
+	inputs.radarVans = 1;
+	inputs.combatVehicles = 8;
+	inputs.minRadarVans = 1;
+	inputs.armyCap = 100;
+	inputs.isBalancedSprawl = true;
+
+	const RadarVanProductionDecision decision = manager.ChooseRadarVanProduction(inputs);
+
+	expect(!decision.shouldQueue, "Radar van should not queue when minimum is met");
+	expectEq(std::string(decision.reason), std::string("target_met"), "Target-met reason should be explicit");
+
+	std::cout << "PASS: testRadarVanProductionDecisionBlocksWhenTargetMet\n";
+}
+
 int main()
 {
 	std::cout << "Running ProductionManager tests...\n";
@@ -420,6 +518,10 @@ int main()
 	testSurplusProductionSkipsZoneSelection();
 	testUnderConstructionProducersSkipped();
 	testNearestProducerSelectedInZone();
+	testRadarVanProductionDecisionQueuesWhenNeeded();
+	testRadarVanProductionDecisionBlocksWhenPaused();
+	testRadarVanProductionDecisionBlocksWithoutVehicles();
+	testRadarVanProductionDecisionBlocksWhenTargetMet();
 
 	std::cout << "\nAll ProductionManager tests passed!\n";
 	return 0;

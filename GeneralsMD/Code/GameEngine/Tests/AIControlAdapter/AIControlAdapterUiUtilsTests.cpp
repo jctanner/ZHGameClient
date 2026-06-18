@@ -40,12 +40,26 @@ namespace
 			"Zero color should keep all eight digits");
 		std::cout << "PASS: testFormatColorHex\n";
 	}
+
+	void testFormatPlayerTickRequestId()
+	{
+		expectEq(
+			AIControlAdapterUiUtils::FormatPlayerTickRequestId("auto_worker", 7, 0x1234u),
+			"auto_worker_00000007_00001234",
+			"Request ids should include prefix, player index, and tick as uppercase hex");
+		expectEq(
+			AIControlAdapterUiUtils::FormatPlayerTickRequestId(nullptr, 2, 0u),
+			"request_00000002_00000000",
+			"Null request id prefix should use fallback");
+		std::cout << "PASS: testFormatPlayerTickRequestId\n";
+	}
 }
 
 int main()
 {
 	testNormalizeAsciiLower();
 	testFormatColorHex();
+	testFormatPlayerTickRequestId();
 	std::cout << "All AIControlAdapterUiUtils tests passed\n";
 	return EXIT_SUCCESS;
 }

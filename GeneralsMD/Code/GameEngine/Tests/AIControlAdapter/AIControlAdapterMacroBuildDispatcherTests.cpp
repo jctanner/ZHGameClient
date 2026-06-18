@@ -84,6 +84,106 @@ int main()
 		expect(result.reason == "placement_ok", "Execution reason should override selected reason");
 	}
 
+	{
+		unsigned long supply = 0u;
+		unsigned long barracks = 0u;
+		unsigned long unknown = 0u;
+		AIControlAdapterMacroBuildCooldownSlots slots;
+		slots.supply = &supply;
+		slots.barracks = &barracks;
+
+		expect(
+			AIControlAdapterMacroBuildDispatcher::FindBuildCooldownTick(slots, "Game.BuildSupplyStashSmart") == &supply,
+			"Supply build command should map to supply cooldown slot");
+		expect(
+			AIControlAdapterMacroBuildDispatcher::FindBuildCooldownTick(slots, "Game.BuildBarracksSmart") == &barracks,
+			"Barracks build command should map to barracks cooldown slot");
+		expect(
+			AIControlAdapterMacroBuildDispatcher::FindBuildCooldownTick(slots, "Game.BuildUnknown") == nullptr,
+			"Unknown build command should not map to a cooldown slot");
+		expect(
+			AIControlAdapterMacroBuildDispatcher::FindBuildCooldownTick(slots, nullptr) == nullptr,
+			"Null build command should not map to a cooldown slot");
+
+		unknown = 2000u;
+		(void)unknown;
+	}
+
+	{
+		unsigned long stinger = 12000u;
+		AIControlAdapterMacroBuildCooldownSlots slots;
+		slots.stinger = &stinger;
+
+		expect(
+			!AIControlAdapterMacroBuildDispatcher::IsBuildCooldownReady(slots, "Game.BuildStingerSite", 11000u),
+			"Future cooldown should not be ready");
+		expect(
+			AIControlAdapterMacroBuildDispatcher::IsBuildCooldownReady(slots, "Game.BuildStingerSite", 12000u),
+			"Cooldown should be ready at deadline");
+		expect(
+			AIControlAdapterMacroBuildDispatcher::IsBuildCooldownReady(slots, "Game.BuildStingerSite", 13000u),
+			"Cooldown should be ready after deadline");
+		expect(
+			AIControlAdapterMacroBuildDispatcher::IsBuildCooldownReady(slots, "Game.BuildUnknown", 11000u),
+			"Unknown cooldown command should be ready by default");
+	}
+
+	{
+		unsigned long tunnel = 0u;
+		AIControlAdapterMacroBuildCooldownSlots slots;
+		slots.tunnel = &tunnel;
+
+		expect(
+			!AIControlAdapterMacroBuildDispatcher::IsBuildAttemptReady(slots, "Game.BuildTunnelNetwork", 1, 1000u),
+			"In-progress builds should block additional attempts");
+		expect(
+			AIControlAdapterMacroBuildDispatcher::IsBuildAttemptReady(slots, "Game.BuildTunnelNetwork", 0, 1000u),
+			"Ready cooldown with no in-progress builds should allow attempt");
+	}
+
+	{
+		unsigned long supply = 0u;
+		unsigned long palace = 0u;
+		AIControlAdapterMacroBuildCooldownSlots slots;
+		slots.supply = &supply;
+		slots.palace = &palace;
+
+		AIControlAdapterMacroBuildDispatcher::RecordBuildAttempt(
+			slots,
+			"Game.BuildSupplyStashSmart",
+			false,
+			"construct_site_not_created",
+			10000u);
+		expect(supply == 12500u, "Supply construct-site failure should record aggressive retry delay");
+
+		AIControlAdapterMacroBuildDispatcher::RecordBuildAttempt(
+			slots,
+			"Game.BuildPalaceSmart",
+			true,
+			"",
+			10000u);
+		expect(palace == 22000u, "Palace success should record long retry delay");
+	}
+
+	{
+		const AIControlAdapterMacroBuildCommandAlias passthrough =
+			AIControlAdapterMacroBuildDispatcher::ResolveCommandAlias("Game.BuildBarracksSmart");
+		expect(passthrough.command == "Game.BuildBarracksSmart", "Normal command aliases should preserve command");
+		expect(!passthrough.hasBuildingTemplate, "Normal command aliases should not add building template");
+
+		const AIControlAdapterMacroBuildCommandAlias tunnel =
+			AIControlAdapterMacroBuildDispatcher::ResolveCommandAlias("Game.BuildTunnelNetwork");
+		expect(tunnel.command == "Game.BuildBarracksSmart", "Tunnel alias should execute through barracks smart build");
+		expect(tunnel.hasBuildingTemplate, "Tunnel alias should provide a building template");
+		expect(tunnel.buildingTemplate == "GLATunnelNetwork", "Tunnel alias should use tunnel template");
+
+		const AIControlAdapterMacroBuildCommandAlias stinger =
+			AIControlAdapterMacroBuildDispatcher::ResolveCommandAlias("Game.BuildStingerSite");
+		expect(stinger.command == "Game.BuildBarracksSmart", "Stinger alias should execute through barracks smart build");
+		expect(stinger.hasBuildingTemplate, "Stinger alias should provide a building template");
+		expect(stinger.buildingTemplate == "GLAStingerSite", "Stinger alias should use stinger template");
+	}
+
 	std::cout << "AIControlAdapterMacroBuildDispatcherTests passed\n";
 	return 0;
 }

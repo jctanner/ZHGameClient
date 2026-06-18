@@ -24,6 +24,18 @@ std::string AIControlAdapterUiUtils::FormatColorHex(unsigned int argb)
 	return std::string(buffer);
 }
 
+std::string AIControlAdapterUiUtils::FormatPlayerTickRequestId(const char* prefix, int playerIndex, unsigned int tick)
+{
+	char buffer[96];
+	sprintf_s(
+		buffer,
+		"%s_%08X_%08X",
+		prefix != nullptr && prefix[0] != '\0' ? prefix : "request",
+		static_cast<unsigned int>(playerIndex),
+		tick);
+	return std::string(buffer);
+}
+
 std::string AIControlAdapterUiUtils::UnicodeToUtf8(const UnicodeString& text)
 {
 	const WideChar* wide = text.str();

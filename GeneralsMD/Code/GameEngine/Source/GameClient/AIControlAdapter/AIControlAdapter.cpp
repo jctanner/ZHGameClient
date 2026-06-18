@@ -3030,16 +3030,11 @@ namespace
 
 			auto tryCommand = [&](const char* requestIdPrefix, const char* cmd, const nlohmann::json& args, std::string& outReason) -> bool
 			{
-				char requestIdBuffer[96];
-				sprintf_s(
-					requestIdBuffer,
-					"%s_%08X_%08X",
-					requestIdPrefix,
-					static_cast<unsigned int>(player->getPlayerIndex()),
-					static_cast<unsigned int>(now));
+				const std::string requestId =
+					AIControlAdapterUiUtils::FormatPlayerTickRequestId(requestIdPrefix, player->getPlayerIndex(), static_cast<unsigned int>(now));
 				nlohmann::json message = {
 					{"type", "SessionCommand"},
-					{"request_id", std::string(requestIdBuffer)},
+					{"request_id", requestId},
 					{"cmd", std::string(cmd)},
 					{"args", args}
 				};
@@ -3048,8 +3043,16 @@ namespace
 					message["args"]["player_index"] = m_autonomy.state.playerIndex;
 				}
 
+				const AIControlAdapterMacroBuildCommandAlias commandAlias =
+					AIControlAdapterMacroBuildDispatcher::ResolveCommandAlias(cmd);
+				if (commandAlias.hasBuildingTemplate)
+				{
+					message["cmd"] = commandAlias.command;
+					message["args"]["building_template"] = commandAlias.buildingTemplate;
+				}
+
 				bool ok = false;
-				const std::string cmdString = cmd;
+				const std::string cmdString = commandAlias.command;
 				if (cmdString == "Game.BuildSupplyStashSmart")
 				{
 					ok = executeGameBuildSupplyStashSmart(message, outReason);
@@ -3069,20 +3072,6 @@ namespace
 				else if (cmdString == "Game.BuildBlackMarketSmart")
 				{
 					ok = executeGameBuildBlackMarketSmart(message, outReason);
-				}
-				else if (cmdString == "Game.BuildTunnelNetwork")
-				{
-					nlohmann::json tunneledMessage = message;
-					tunneledMessage["cmd"] = "Game.BuildBarracksSmart";
-					tunneledMessage["args"]["building_template"] = "GLATunnelNetwork";
-					ok = executeGameBuildBarracksSmart(tunneledMessage, outReason);
-				}
-				else if (cmdString == "Game.BuildStingerSite")
-				{
-					nlohmann::json stingerMessage = message;
-					stingerMessage["cmd"] = "Game.BuildBarracksSmart";
-					stingerMessage["args"]["building_template"] = "GLAStingerSite";
-					ok = executeGameBuildBarracksSmart(stingerMessage, outReason);
 				}
 				else if (cmdString == "Game.QueueSoldiersAllBarracks")
 				{
@@ -3147,7 +3136,7 @@ namespace
 
 				adapterLog(
 					"autonomy_command request_id=%s cmd=%s money=%lu ok=%d reason=%s",
-					requestIdBuffer,
+					requestId.c_str(),
 					cmd,
 					static_cast<unsigned long>(money),
 					ok ? 1 : 0,
@@ -3316,6 +3305,15 @@ namespace
 				return AIControlAdapterIsSettlingSensitiveBuild(cmd);
 			};
 
+			AIControlAdapterMacroBuildCooldownSlots buildCooldowns;
+			buildCooldowns.supply = &m_autonomy.state.nextSupplyBuildTick;
+			buildCooldowns.barracks = &m_autonomy.state.nextBarracksBuildTick;
+			buildCooldowns.armsDealer = &m_autonomy.state.nextArmsBuildTick;
+			buildCooldowns.palace = &m_autonomy.state.nextPalaceBuildTick;
+			buildCooldowns.blackMarket = &m_autonomy.state.nextMarketBuildTick;
+			buildCooldowns.tunnel = &m_autonomy.state.nextTunnelBuildTick;
+			buildCooldowns.stinger = &m_autonomy.state.nextStingerBuildTick;
+
 			auto tryMacroBuildWithFallback = [&](const char* cmd, bool preferZone, std::string& outReason) -> bool
 			{
 				bool ok = preferZone
@@ -3341,65 +3339,19 @@ namespace
 				return false;
 			};
 
-			auto getBuildCooldownTick = [&](const char* cmd) -> DWORD*
-			{
-				const std::string cmdString = cmd != nullptr ? cmd : "";
-				if (cmdString == "Game.BuildSupplyStashSmart")
-				{
-					return &m_autonomy.state.nextSupplyBuildTick;
-				}
-				if (cmdString == "Game.BuildBarracksSmart")
-				{
-					return &m_autonomy.state.nextBarracksBuildTick;
-				}
-				if (cmdString == "Game.BuildArmsDealerSmart")
-				{
-					return &m_autonomy.state.nextArmsBuildTick;
-				}
-				if (cmdString == "Game.BuildPalaceSmart")
-				{
-					return &m_autonomy.state.nextPalaceBuildTick;
-				}
-				if (cmdString == "Game.BuildBlackMarketSmart")
-				{
-					return &m_autonomy.state.nextMarketBuildTick;
-				}
-				if (cmdString == "Game.BuildTunnelNetwork")
-				{
-					return &m_autonomy.state.nextTunnelBuildTick;
-				}
-				if (cmdString == "Game.BuildStingerSite")
-				{
-					return &m_autonomy.state.nextStingerBuildTick;
-				}
-				return nullptr;
-			};
-
 			auto isBuildAttemptReady = [&](const char* cmd, Int inProgressCount) -> bool
 			{
-				if (inProgressCount > 0)
-				{
-					return false;
-				}
-				DWORD* nextAllowedTick = getBuildCooldownTick(cmd);
-				return nextAllowedTick == nullptr || AIControlAdapterHasTickElapsed(*nextAllowedTick, now);
+				return AIControlAdapterMacroBuildDispatcher::IsBuildAttemptReady(buildCooldowns, cmd, inProgressCount, now);
 			};
 
 			auto isBuildCooldownReady = [&](const char* cmd) -> bool
 			{
-				DWORD* nextAllowedTick = getBuildCooldownTick(cmd);
-				return nextAllowedTick == nullptr || AIControlAdapterHasTickElapsed(*nextAllowedTick, now);
+				return AIControlAdapterMacroBuildDispatcher::IsBuildCooldownReady(buildCooldowns, cmd, now);
 			};
 
 			auto recordBuildAttempt = [&](const char* cmd, bool success, const std::string& outReason)
 			{
-				DWORD* nextAllowedTick = getBuildCooldownTick(cmd);
-				if (nextAllowedTick == nullptr)
-				{
-					return;
-				}
-				const DWORD delayMs = AIControlAdapterGetBuildRetryDelayMs(cmd, success, outReason.c_str());
-				*nextAllowedTick = now + delayMs;
+				AIControlAdapterMacroBuildDispatcher::RecordBuildAttempt(buildCooldowns, cmd, success, outReason, now);
 			};
 
 			unsigned int completedBlackMarkets = 0;
@@ -14667,13 +14619,19 @@ namespace
 
 			refreshOwnedObjectCache(player);
 			const Int idleWorkers = m_cache.idleWorkersTotal;
-			if (idleWorkers >= m_automation.workerRule.minIdleWorkers)
+			const AIControlAdapterEconomyManager economyManager;
+			const WorkerProductionDecision workerDecision =
+				economyManager.ChooseWorkerProduction(
+					idleWorkers,
+					m_automation.workerRule.minIdleWorkers,
+					m_automation.workerRule.queueCount);
+			if (!workerDecision.shouldQueue)
 			{
 				return;
 			}
 
 			nlohmann::json args = nlohmann::json::object();
-			args["count"] = m_automation.workerRule.queueCount;
+			args["count"] = workerDecision.queueCount;
 			if (m_automation.workerRule.hasExplicitProducerKind && !m_automation.workerRule.producerKind.empty())
 			{
 				args["producer_kind"] = m_automation.workerRule.producerKind;
@@ -14683,16 +14641,12 @@ namespace
 				args["player_index"] = m_automation.workerRule.playerIndex;
 			}
 
-			char requestIdBuffer[64];
-			sprintf_s(
-				requestIdBuffer,
-				"auto_worker_%08X_%08X",
-				static_cast<unsigned int>(player->getPlayerIndex()),
-				static_cast<unsigned int>(now));
+			const std::string requestId =
+				AIControlAdapterUiUtils::FormatPlayerTickRequestId("auto_worker", player->getPlayerIndex(), static_cast<unsigned int>(now));
 
 			nlohmann::json message = {
 				{"type", "SessionCommand"},
-				{"request_id", std::string(requestIdBuffer)},
+				{"request_id", requestId},
 				{"cmd", "Game.BuildWorker"},
 				{"args", args}
 			};
@@ -14702,11 +14656,11 @@ namespace
 			m_automation.workerRule.nextAllowedTick = now + m_automation.workerRule.cooldownMs;
 			adapterLog(
 				"automation_worker_rule request_id=%s player=%d idle_workers=%d min_idle_workers=%d queue_count=%d producer_kind=%s ok=%d reason=%s",
-				requestIdBuffer,
+				requestId.c_str(),
 				player->getPlayerIndex(),
 				idleWorkers,
 				m_automation.workerRule.minIdleWorkers,
-				m_automation.workerRule.queueCount,
+				workerDecision.queueCount,
 				m_automation.workerRule.hasExplicitProducerKind ? m_automation.workerRule.producerKind.c_str() : "default",
 				ok ? 1 : 0,
 				ok ? "" : reason.c_str());
@@ -14789,14 +14743,9 @@ namespace
 				strategicTasks,
 				cashFloat >= 3000u ? "cash_healthy" : "cash_reserved");
 
-			const AIControlAdapterLocalWorkerLiquidityResult globalWorkerPolicy = AIControlAdapterChooseLocalWorkerLiquidity({
-				globalWorkers,
-				workerCap,
-				cashFloat,
-				0,
-				1,
-				true
-			});
+			const AIControlAdapterEconomyManager economyManager;
+			const AIControlAdapterLocalWorkerLiquidityResult globalWorkerPolicy =
+				economyManager.ChooseGlobalWorkerLiquidityPass(globalWorkers, workerCap, cashFloat);
 			if (std::string(globalWorkerPolicy.reason) == "cash_reserved" ||
 				std::string(globalWorkerPolicy.reason) == "worker_cap_reached")
 			{
@@ -14818,8 +14767,16 @@ namespace
 				const bool active = zone.value("active", false);
 				const bool hasLocalStrategicTask = strategicTasks > 0 &&
 					(zone.value("palaces", 0) > 0 || zone.value("supply_stashes", 0) > 0 || active);
-				const int desired = hasLocalStrategicTask ? 3 : (active ? 2 : (developed ? 1 : 0));
-				if (desired <= 0)
+				LocalWorkerZoneInput workerInput;
+				workerInput.developed = developed;
+				workerInput.active = active;
+				workerInput.hasLocalStrategicTask = hasLocalStrategicTask;
+				workerInput.globalWorkers = globalWorkers;
+				workerInput.workerCap = workerCap;
+				workerInput.cashFloat = cashFloat;
+				const LocalWorkerZoneDecision workerDecision =
+					economyManager.ChooseLocalWorkerLiquidityForZone(workerInput);
+				if (workerDecision.desiredLocalWorkers <= 0)
 				{
 					continue;
 				}
@@ -14856,21 +14813,18 @@ namespace
 					}
 				}
 
-				const AIControlAdapterLocalWorkerLiquidityResult workerPolicy = AIControlAdapterChooseLocalWorkerLiquidity({
-					globalWorkers,
-					workerCap,
-					cashFloat,
-					localIdle,
-					desired,
-					!localProducers.empty()
-				});
+				workerInput.localIdleWorkers = localIdle;
+				workerInput.hasLocalProducer = !localProducers.empty();
+				const LocalWorkerZoneDecision localWorkerDecision =
+					economyManager.ChooseLocalWorkerLiquidityForZone(workerInput);
+				const AIControlAdapterLocalWorkerLiquidityResult& workerPolicy = localWorkerDecision.policy;
 				if (!workerPolicy.shouldQueue)
 				{
 					adapterLog(
 						"local_worker_policy zone=%u idle=%d desired=%d producers=%u queued=0 reason=%s",
 						zoneId,
 						localIdle,
-						desired,
+						localWorkerDecision.desiredLocalWorkers,
 						static_cast<unsigned int>(localProducers.size()),
 						workerPolicy.reason);
 					continue;
@@ -14898,7 +14852,7 @@ namespace
 					"local_worker_policy zone=%u idle=%d desired=%d producers=%u queued=%d reason=%s",
 					zoneId,
 					localIdle,
-					desired,
+					localWorkerDecision.desiredLocalWorkers,
 					static_cast<unsigned int>(localProducers.size()),
 					ok ? 1 : 0,
 					ok ? "queued_local_worker" : reason.c_str());
@@ -14939,6 +14893,7 @@ namespace
 			}
 
 			std::vector<Object*> stashes;
+			std::vector<int> stashIds;
 			std::vector<AutomationOwnedObjectSnapshot> ownedObjects;
 			collectOwnedAutomationObjects(player, ownedObjects);
 			for (std::size_t i = 0; i < ownedObjects.size(); ++i)
@@ -14947,10 +14902,25 @@ namespace
 				if (!owned.underConstruction && owned.isSupplyStructure && owned.object != nullptr)
 				{
 					stashes.push_back(owned.object);
+					stashIds.push_back(static_cast<int>(owned.object->getID()));
 				}
 			}
 
-			if (stashes.empty())
+			std::vector<int> servicedStashIds;
+			servicedStashIds.reserve(m_automation.stashWorkerRule.servicedStashIds.size());
+			for (Int stashId : m_automation.stashWorkerRule.servicedStashIds)
+			{
+				servicedStashIds.push_back(static_cast<int>(stashId));
+			}
+
+			const AIControlAdapterEconomyManager economyManager;
+			const StashWorkerProductionDecision stashWorkerDecision =
+				economyManager.ChooseStashWorkerProduction(
+					stashIds,
+					servicedStashIds,
+					m_automation.stashWorkerRule.targetWorkersPerStash);
+
+			if (std::strcmp(stashWorkerDecision.reason, "no_stashes") == 0)
 			{
 				m_automation.stashWorkerRule.nextAllowedTick = now + m_automation.stashWorkerRule.cooldownMs;
 				adapterLog("automation_stash_worker_rule_skip player=%d reason=no_stashes", player->getPlayerIndex());
@@ -14965,28 +14935,23 @@ namespace
 					continue;
 				}
 				const Int stashId = static_cast<Int>(stash->getID());
-				if (m_automation.stashWorkerRule.servicedStashIds.find(stashId) != m_automation.stashWorkerRule.servicedStashIds.end())
+				if (static_cast<int>(stashId) == stashWorkerDecision.targetStashId)
 				{
-					continue;
+					targetStash = stash;
+					break;
 				}
-				targetStash = stash;
-				break;
 			}
 
-			if (targetStash == nullptr)
+			if (!stashWorkerDecision.shouldQueue || targetStash == nullptr)
 			{
 				return;
 			}
 
-			char requestIdBuffer[64];
-			sprintf_s(
-				requestIdBuffer,
-				"auto_stash_worker_%08X_%08X",
-				static_cast<unsigned int>(player->getPlayerIndex()),
-				static_cast<unsigned int>(now));
+			const std::string requestId =
+				AIControlAdapterUiUtils::FormatPlayerTickRequestId("auto_stash_worker", player->getPlayerIndex(), static_cast<unsigned int>(now));
 
 			nlohmann::json args = {
-				{"count", m_automation.stashWorkerRule.targetWorkersPerStash},
+				{"count", stashWorkerDecision.queueCount},
 				{"producer_kind", "supply_stash"},
 				{"producer_object_id", static_cast<Int>(targetStash->getID())}
 			};
@@ -14997,7 +14962,7 @@ namespace
 
 			nlohmann::json message = {
 				{"type", "SessionCommand"},
-				{"request_id", std::string(requestIdBuffer)},
+				{"request_id", requestId},
 				{"cmd", "Game.BuildWorker"},
 				{"args", args}
 			};
@@ -15011,10 +14976,10 @@ namespace
 			}
 			adapterLog(
 				"automation_stash_worker_rule request_id=%s player=%d stash_id=%d target_workers=%d serviced=%d ok=%d reason=%s",
-				requestIdBuffer,
+				requestId.c_str(),
 				player->getPlayerIndex(),
 				static_cast<Int>(targetStash->getID()),
-				m_automation.stashWorkerRule.targetWorkersPerStash,
+				stashWorkerDecision.queueCount,
 				ok ? 1 : 0,
 				ok ? 1 : 0,
 				ok ? "" : reason.c_str());
@@ -15053,7 +15018,9 @@ namespace
 			std::vector<Object*> combatUnits;
 			collectCombatUnitsForRaid(player, combatUnits, false, "vehicle");
 			const Int combatUnitCount = static_cast<Int>(combatUnits.size());
-			if (combatUnitCount < m_automation.attackRule.minUnits)
+			const AIControlAdapterAttackAutomationDecision initialAttackGate =
+				AIControlAdapterRaidManager::evaluateAttackAutomationGate(combatUnitCount, m_automation.attackRule.minUnits);
+			if (!initialAttackGate.shouldIssue)
 			{
 				return;
 			}
@@ -15073,7 +15040,11 @@ namespace
 			// Phase 9.0: Check for equivalent active attack task before issuing
 			std::vector<Object*> tempCombatUnits;
 			collectCombatUnitsForRaid(player, tempCombatUnits, false, "vehicle");
-			if (static_cast<Int>(tempCombatUnits.size()) < m_automation.attackRule.minUnits)
+			const AIControlAdapterAttackAutomationDecision reservedAwareAttackGate =
+				AIControlAdapterRaidManager::evaluateAttackAutomationGate(
+					static_cast<Int>(tempCombatUnits.size()),
+					m_automation.attackRule.minUnits);
+			if (!reservedAwareAttackGate.shouldIssue)
 			{
 				// Not enough units after filtering combat-reserved
 				adapterLog(
@@ -15083,16 +15054,12 @@ namespace
 				return;
 			}
 
-			char requestIdBuffer[64];
-			sprintf_s(
-				requestIdBuffer,
-				"auto_attack_%08X_%08X",
-				static_cast<unsigned int>(player->getPlayerIndex()),
-				static_cast<unsigned int>(now));
+			const std::string requestId =
+				AIControlAdapterUiUtils::FormatPlayerTickRequestId("auto_attack", player->getPlayerIndex(), static_cast<unsigned int>(now));
 
 			nlohmann::json message = {
 				{"type", "SessionCommand"},
-				{"request_id", std::string(requestIdBuffer)},
+				{"request_id", requestId},
 				{"cmd", "Game.AttackMove.RaidSmart"},
 				{"args", args}
 			};
@@ -15103,30 +15070,39 @@ namespace
 			const bool ok = executeGameAttackMoveRaidSmart(message, reason, &attackResult);
 			m_automation.attackRule.nextAllowedTick = now + m_automation.attackRule.cooldownMs;
 
-			// Phase 9.0: Create attack combat task with real unit IDs and target
-			if (ok && !attackResult.assignedUnitIds.empty())
-			{
-				// Check for equivalent active attack near same target
-				if (m_autonomy.combatTaskManager.hasEquivalentActiveTask(
+			const bool hasEquivalentActiveTask =
+				ok &&
+				!attackResult.assignedUnitIds.empty() &&
+				m_autonomy.combatTaskManager.hasEquivalentActiveTask(
 					CombatTaskType::Attack,
 					attackResult.targetPosition,
-					500.0f))
-				{
-					adapterLog(
-						"combat_task_skip type=attack reason=equivalent_active target=(%.1f,%.1f)",
-						attackResult.targetPosition.x,
-						attackResult.targetPosition.y);
+					500.0f);
+			const AIControlAdapterAttackTaskCreationDecision taskCreationDecision =
+				AIControlAdapterRaidManager::evaluateAttackTaskCreation(
+					ok,
+					static_cast<int>(attackResult.assignedUnitIds.size()),
+					hasEquivalentActiveTask);
 
-					// Release units since we didn't create task for them
-					// They'll be available for next cycle
-					adapterLog(
-						"automation_attack_rule request_id=%s player=%d combat_units=%d ok=0 reason=equivalent_active_task",
-						requestIdBuffer,
-						player->getPlayerIndex(),
-						static_cast<int>(attackResult.assignedUnitIds.size()));
-					return;
-				}
+			if (taskCreationDecision.shouldReleaseUnits)
+			{
+				adapterLog(
+					"combat_task_skip type=attack reason=equivalent_active target=(%.1f,%.1f)",
+					attackResult.targetPosition.x,
+					attackResult.targetPosition.y);
 
+				// Release units since we didn't create task for them.
+				adapterLog(
+					"automation_attack_rule request_id=%s player=%d combat_units=%d ok=0 reason=%s",
+					requestId.c_str(),
+					player->getPlayerIndex(),
+					static_cast<int>(attackResult.assignedUnitIds.size()),
+					taskCreationDecision.reason);
+				return;
+			}
+
+			// Phase 9.0: Create attack combat task with real unit IDs and target
+			if (taskCreationDecision.shouldCreateTask)
+			{
 				const unsigned int attackTaskId = m_autonomy.combatTaskManager.createTask(
 					CombatTaskType::Attack,
 					attackResult.assignedUnitIds,
@@ -15176,7 +15152,7 @@ namespace
 
 			adapterLog(
 				"automation_attack_rule request_id=%s player=%d combat_units=%d min_units=%d group_size=%d distance=%.1f ok=%d reason=%s",
-				requestIdBuffer,
+				requestId.c_str(),
 				player->getPlayerIndex(),
 				combatUnitCount,
 				m_automation.attackRule.minUnits,
@@ -15261,50 +15237,31 @@ namespace
 			const Int radarVanCount = counts.radarVanCount;
 			const Int combatVehicleCount = counts.combatVehicleCount;
 			const AIControlAdapterProfilePolicyConfig profilePolicyConfig = resolveAutonomyProfilePolicyConfig();
-			const bool isBalancedSprawl = profilePolicyConfig.isBalancedSprawl;
-			const UnsignedInt reserveCash = profilePolicyConfig.reserveCash;
-			const bool openingInfrastructureReady = supplyStashCount >= 1 && barracksCount >= 1 && armsCount >= 1;
-			const bool openingEconomyReady = supplyStashCount >= 2 || blackMarketCount >= 1;
-			const bool wasRecoveringFromReserve =
-				(m_autonomy.state.lastDecisionCategory == "production" && m_autonomy.state.lastDecisionReason == "reserve_cash_recovery");
-			const bool shouldPauseCombatProduction = AIControlAdapterShouldPauseCombatProduction({
-				isBalancedSprawl,
-				openingInfrastructureReady,
-				openingEconomyReady,
-				wasRecoveringFromReserve,
-				player->getMoney()->countMoney(),
-				reserveCash,
-				0,
-				0
-			});
-			const bool wasArmyCapReached =
-				(m_autonomy.state.lastDecisionCategory == "production" && m_autonomy.state.lastDecisionReason == "army_cap_reached");
-			const bool shouldHoldArmyCap = AIControlAdapterShouldHoldArmyCap({
-				shouldPauseCombatProduction,
-				isBalancedSprawl,
-				wasArmyCapReached,
-				combatVehicleCount,
-				AIControlAdapterProfilePolicyManager().ResolveCombatArmyCapBase(profilePolicyConfig)
-			});
-
-			if (!AIControlAdapterShouldQueueRadarVan({
-				shouldPauseCombatProduction,
-				shouldHoldArmyCap,
+			const Money* wallet = player->getMoney();
+			const AIControlAdapterProductionManager productionManager;
+			const RadarVanProductionDecision radarDecision = productionManager.ChooseRadarVanProduction({
+				wallet != nullptr ? wallet->countMoney() : 0u,
+				profilePolicyConfig.reserveCash,
+				supplyStashCount,
+				barracksCount,
+				blackMarketCount,
 				armsCount,
 				radarVanCount,
 				combatVehicleCount,
-				m_automation.radarVanRule.minCount
-			}))
+				m_automation.radarVanRule.minCount,
+				AIControlAdapterProfilePolicyManager().ResolveCombatArmyCapBase(profilePolicyConfig),
+				profilePolicyConfig.isBalancedSprawl,
+				(m_autonomy.state.lastDecisionCategory == "production" && m_autonomy.state.lastDecisionReason == "reserve_cash_recovery"),
+				(m_autonomy.state.lastDecisionCategory == "production" && m_autonomy.state.lastDecisionReason == "army_cap_reached")
+			});
+
+			if (!radarDecision.shouldQueue)
 			{
 				return;
 			}
 
-			char requestIdBuffer[64];
-			sprintf_s(
-				requestIdBuffer,
-				"auto_radar_van_%08X_%08X",
-				static_cast<unsigned int>(player->getPlayerIndex()),
-				static_cast<unsigned int>(now));
+			const std::string requestId =
+				AIControlAdapterUiUtils::FormatPlayerTickRequestId("auto_radar_van", player->getPlayerIndex(), static_cast<unsigned int>(now));
 
 			nlohmann::json args = nlohmann::json::object();
 			if (m_automation.radarVanRule.hasExplicitPlayerIndex)
@@ -15314,7 +15271,7 @@ namespace
 
 			nlohmann::json message = {
 				{"type", "SessionCommand"},
-				{"request_id", std::string(requestIdBuffer)},
+				{"request_id", requestId},
 				{"cmd", "Game.QueueRadarVan"},
 				{"args", args}
 			};
@@ -15325,7 +15282,7 @@ namespace
 			{
 				nlohmann::json fallbackMessage = {
 					{"type", "SessionCommand"},
-					{"request_id", std::string(requestIdBuffer)},
+					{"request_id", requestId},
 					{"cmd", "Game.QueueRadarVansAllWarFactories"},
 					{"args", nlohmann::json::object({{"count", 1}})}
 				};
@@ -15339,7 +15296,7 @@ namespace
 			m_automation.radarVanRule.nextAllowedTick = now + m_automation.radarVanRule.cooldownMs;
 			adapterLog(
 				"automation_radar_van_rule request_id=%s player=%d arms=%d radar_vans=%d min_count=%d ok=%d reason=%s",
-				requestIdBuffer,
+				requestId.c_str(),
 				player->getPlayerIndex(),
 				armsCount,
 				radarVanCount,
@@ -15655,43 +15612,48 @@ namespace
 				return;
 			}
 
+			std::vector<AutomationOwnedObjectSnapshot> ownedObjects;
+			collectOwnedAutomationObjects(player, ownedObjects);
+			Int completedBarracks = 0;
+			for (std::size_t i = 0; i < ownedObjects.size(); ++i)
 			{
-				std::vector<AutomationOwnedObjectSnapshot> ownedObjects;
-				collectOwnedAutomationObjects(player, ownedObjects);
-				Int completedBarracks = 0;
-				for (std::size_t i = 0; i < ownedObjects.size(); ++i)
+				const AutomationOwnedObjectSnapshot& owned = ownedObjects[i];
+				if (owned.isBarracks && !owned.underConstruction)
 				{
-					const AutomationOwnedObjectSnapshot& owned = ownedObjects[i];
-					if (owned.isBarracks && !owned.underConstruction)
-					{
-						++completedBarracks;
-					}
-				}
-				if (completedBarracks < 1)
-				{
-					m_automation.captureRule.nextAllowedTick = now + m_automation.captureRule.cooldownMs;
-					adapterLog("automation_capture_rule_skip player=%d reason=capture_barracks_not_ready completed_barracks=%d",
-						player->getPlayerIndex(), completedBarracks);
-					return;
+					++completedBarracks;
 				}
 			}
 
 			const UpgradeTemplate* captureUpgrade = TheUpgradeCenter != nullptr
 				? TheUpgradeCenter->findUpgrade("Upgrade_InfantryCaptureBuilding")
 				: nullptr;
-			if (captureUpgrade == nullptr)
+			const bool captureUpgradeFound = captureUpgrade != nullptr;
+			const bool captureUpgradeComplete = captureUpgradeFound && player->hasUpgradeComplete(captureUpgrade);
+			const bool captureUpgradeInProgress = captureUpgradeFound && player->hasUpgradeInProduction(captureUpgrade);
+			const AIControlAdapterCaptureReadinessDecision captureReadiness =
+				AIControlAdapterCaptureManager::ChooseAutomationReadiness(
+					completedBarracks,
+					captureUpgradeFound,
+					captureUpgradeComplete,
+					captureUpgradeInProgress);
+			if (!captureReadiness.canEvaluate)
 			{
 				m_automation.captureRule.nextAllowedTick = now + m_automation.captureRule.cooldownMs;
-				adapterLog("automation_capture_rule_skip player=%d reason=capture_upgrade_not_found", player->getPlayerIndex());
-				return;
-			}
-			if (!player->hasUpgradeComplete(captureUpgrade))
-			{
-				const bool upgradeInProgress = player->hasUpgradeInProduction(captureUpgrade) ? true : false;
-				m_automation.captureRule.nextAllowedTick = now + m_automation.captureRule.cooldownMs;
-				adapterLog("automation_capture_rule_skip player=%d reason=%s",
-					player->getPlayerIndex(),
-					upgradeInProgress ? "capture_upgrade_in_progress" : "capture_upgrade_not_ready");
+				if (std::strcmp(captureReadiness.reason, "capture_barracks_not_ready") == 0)
+				{
+					adapterLog(
+						"automation_capture_rule_skip player=%d reason=%s completed_barracks=%d",
+						player->getPlayerIndex(),
+						captureReadiness.reason,
+						completedBarracks);
+				}
+				else
+				{
+					adapterLog(
+						"automation_capture_rule_skip player=%d reason=%s",
+						player->getPlayerIndex(),
+						captureReadiness.reason);
+				}
 				return;
 			}
 

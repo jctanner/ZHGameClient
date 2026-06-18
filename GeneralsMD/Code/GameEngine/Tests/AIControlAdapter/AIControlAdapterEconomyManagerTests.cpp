@@ -599,6 +599,137 @@ static void TestHardCapBlocksScaling()
 	printf("PASS: TestHardCapBlocksScaling\n");
 }
 
+static void TestGlobalWorkerLiquidityPassBlocksReserveAndCap()
+{
+	AIControlAdapterEconomyManager manager;
+
+	AIControlAdapterLocalWorkerLiquidityResult reserveBlocked =
+		manager.ChooseGlobalWorkerLiquidityPass(20, 80, 2000u);
+	assert(reserveBlocked.shouldQueue == false);
+	assert(std::string(reserveBlocked.reason) == "cash_reserved");
+
+	AIControlAdapterLocalWorkerLiquidityResult capBlocked =
+		manager.ChooseGlobalWorkerLiquidityPass(80, 80, 5000u);
+	assert(capBlocked.shouldQueue == false);
+	assert(std::string(capBlocked.reason) == "worker_cap_reached");
+
+	AIControlAdapterLocalWorkerLiquidityResult allowed =
+		manager.ChooseGlobalWorkerLiquidityPass(20, 80, 5000u);
+	assert(allowed.shouldQueue == true);
+	assert(std::string(allowed.reason) == "queued_local_worker");
+
+	printf("PASS: TestGlobalWorkerLiquidityPassBlocksReserveAndCap\n");
+}
+
+static void TestLocalWorkerLiquidityDesiredCounts()
+{
+	AIControlAdapterEconomyManager manager;
+
+	LocalWorkerZoneInput input;
+	input.globalWorkers = 20;
+	input.workerCap = 80;
+	input.cashFloat = 5000u;
+	input.localIdleWorkers = 0;
+	input.hasLocalProducer = true;
+
+	LocalWorkerZoneDecision undeveloped = manager.ChooseLocalWorkerLiquidityForZone(input);
+	assert(undeveloped.desiredLocalWorkers == 0);
+	assert(undeveloped.policy.shouldQueue == false);
+	assert(std::string(undeveloped.policy.reason) == "target_met");
+
+	input.developed = true;
+	LocalWorkerZoneDecision developed = manager.ChooseLocalWorkerLiquidityForZone(input);
+	assert(developed.desiredLocalWorkers == 1);
+	assert(developed.policy.shouldQueue == true);
+
+	input.active = true;
+	LocalWorkerZoneDecision active = manager.ChooseLocalWorkerLiquidityForZone(input);
+	assert(active.desiredLocalWorkers == 2);
+	assert(active.policy.shouldQueue == true);
+
+	input.hasLocalStrategicTask = true;
+	LocalWorkerZoneDecision strategic = manager.ChooseLocalWorkerLiquidityForZone(input);
+	assert(strategic.desiredLocalWorkers == 3);
+	assert(strategic.policy.shouldQueue == true);
+
+	input.localIdleWorkers = 3;
+	LocalWorkerZoneDecision targetMet = manager.ChooseLocalWorkerLiquidityForZone(input);
+	assert(targetMet.desiredLocalWorkers == 3);
+	assert(targetMet.policy.shouldQueue == false);
+	assert(std::string(targetMet.policy.reason) == "target_met");
+
+	input.localIdleWorkers = 0;
+	input.hasLocalProducer = false;
+	LocalWorkerZoneDecision producerMissing = manager.ChooseLocalWorkerLiquidityForZone(input);
+	assert(producerMissing.desiredLocalWorkers == 3);
+	assert(producerMissing.policy.shouldQueue == false);
+	assert(std::string(producerMissing.policy.reason) == "producer_missing");
+
+	printf("PASS: TestLocalWorkerLiquidityDesiredCounts\n");
+}
+
+static void TestWorkerProductionDecision()
+{
+	AIControlAdapterEconomyManager manager;
+
+	WorkerProductionDecision targetMet = manager.ChooseWorkerProduction(3, 2, 1);
+	assert(targetMet.shouldQueue == false);
+	assert(targetMet.queueCount == 0);
+	assert(std::string(targetMet.reason) == "target_met");
+
+	WorkerProductionDecision disabled = manager.ChooseWorkerProduction(0, 0, 1);
+	assert(disabled.shouldQueue == false);
+	assert(disabled.queueCount == 0);
+	assert(std::string(disabled.reason) == "target_met");
+
+	WorkerProductionDecision deficit = manager.ChooseWorkerProduction(0, 2, 3);
+	assert(deficit.shouldQueue == true);
+	assert(deficit.queueCount == 3);
+	assert(std::string(deficit.reason) == "idle_worker_deficit");
+
+	WorkerProductionDecision sanitized = manager.ChooseWorkerProduction(0, 2, 0);
+	assert(sanitized.shouldQueue == true);
+	assert(sanitized.queueCount == 1);
+	assert(std::string(sanitized.reason) == "idle_worker_deficit");
+
+	printf("PASS: TestWorkerProductionDecision\n");
+}
+
+static void TestStashWorkerProductionDecision()
+{
+	AIControlAdapterEconomyManager manager;
+
+	StashWorkerProductionDecision noStashes =
+		manager.ChooseStashWorkerProduction({}, {}, 2);
+	assert(noStashes.shouldQueue == false);
+	assert(noStashes.targetStashId == 0);
+	assert(noStashes.queueCount == 0);
+	assert(std::string(noStashes.reason) == "no_stashes");
+
+	StashWorkerProductionDecision firstUnserviced =
+		manager.ChooseStashWorkerProduction({101, 202, 303}, {101}, 2);
+	assert(firstUnserviced.shouldQueue == true);
+	assert(firstUnserviced.targetStashId == 202);
+	assert(firstUnserviced.queueCount == 2);
+	assert(std::string(firstUnserviced.reason) == "unserviced_stash");
+
+	StashWorkerProductionDecision sanitized =
+		manager.ChooseStashWorkerProduction({101}, {}, 0);
+	assert(sanitized.shouldQueue == true);
+	assert(sanitized.targetStashId == 101);
+	assert(sanitized.queueCount == 1);
+	assert(std::string(sanitized.reason) == "unserviced_stash");
+
+	StashWorkerProductionDecision targetMet =
+		manager.ChooseStashWorkerProduction({101, 202}, {101, 202}, 2);
+	assert(targetMet.shouldQueue == false);
+	assert(targetMet.targetStashId == 0);
+	assert(targetMet.queueCount == 0);
+	assert(std::string(targetMet.reason) == "target_met");
+
+	printf("PASS: TestStashWorkerProductionDecision\n");
+}
+
 int main()
 {
 	TestHealthyEconomy();
@@ -625,6 +756,10 @@ int main()
 	TestInProgressConcurrencyLimit();
 	TestHighCashAllowsHigherConcurrency();
 	TestHardCapBlocksScaling();
+	TestGlobalWorkerLiquidityPassBlocksReserveAndCap();
+	TestLocalWorkerLiquidityDesiredCounts();
+	TestWorkerProductionDecision();
+	TestStashWorkerProductionDecision();
 
 	printf("All EconomyManager tests passed.\n");
 	return 0;
