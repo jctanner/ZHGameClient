@@ -129,6 +129,25 @@ bool AIControlAdapterWorkerShuttleManager::IsTechnicalAssigned(
 	return false;
 }
 
+bool AIControlAdapterWorkerShuttleManager::ShouldReleaseAssignmentForReservation(
+	bool reservationMissing,
+	bool reservationTerminal) const
+{
+	return reservationMissing || reservationTerminal;
+}
+
+bool AIControlAdapterWorkerShuttleManager::IsBuildTaskEligibleForAssignment(
+	const std::string& taskState,
+	bool workerAlreadyContained,
+	float workerDistance) const
+{
+	if (workerAlreadyContained || workerDistance < 1200.0f)
+	{
+		return false;
+	}
+	return taskState == "assigned" || taskState == "moving" || taskState == "executing";
+}
+
 nlohmann::json AIControlAdapterWorkerShuttleManager::BuildAssignmentTelemetry(
 	const AIControlAdapterWorkerShuttleAssignmentSnapshot& assignment,
 	const AIControlAdapterWorkerShuttleAssignmentStatus& status,

@@ -331,12 +331,17 @@ namespace
 		std::vector<unsigned int> infantryIds;
 		std::vector<AutonomyGarrisonInfantryAssignment> infantry;
 		UnsignedInt taskId = 0;
+		UnsignedInt shuttleTechnicalId = 0;
 		DWORD assignedTick = 0u;
 		DWORD lastProgressTick = 0u;
 		DWORD lastCommandTick = 0u;
+		DWORD lastShuttleCommandTick = 0u;
+		int shuttleCommandReissueCount = 0;
 		std::string state;
 		std::string reason;
 		std::string releaseReason;
+		std::string shuttleState = "inactive";
+		std::string shuttleReason = "not_needed";
 	};
 
 	struct AutonomyWorkerShuttleAssignment
@@ -9211,6 +9216,51 @@ namespace
 			return false;
 		}
 
+		bool isTechnicalAssignedToGarrisonShuttle(UnsignedInt technicalId) const
+		{
+			if (technicalId == 0u)
+			{
+				return false;
+			}
+			for (const auto& pair : m_autonomy.state.garrisonAssignments)
+			{
+				const AutonomyGarrisonAssignment& assignment = pair.second;
+				if (assignment.state == "released" || assignment.state == "failed")
+				{
+					continue;
+				}
+				if (assignment.shuttleTechnicalId == technicalId
+					&& assignment.shuttleState != "inactive"
+					&& assignment.shuttleState != "released"
+					&& assignment.shuttleState != "failed")
+				{
+					return true;
+				}
+			}
+			return false;
+		}
+
+		int countActiveGarrisonShuttleAssignments() const
+		{
+			int count = 0;
+			for (const auto& pair : m_autonomy.state.garrisonAssignments)
+			{
+				const AutonomyGarrisonAssignment& assignment = pair.second;
+				if (assignment.shuttleTechnicalId == 0u)
+				{
+					continue;
+				}
+				if (assignment.shuttleState == "inactive"
+					|| assignment.shuttleState == "released"
+					|| assignment.shuttleState == "failed")
+				{
+					continue;
+				}
+				++count;
+			}
+			return count;
+		}
+
 		using GarrisonDiscoveryResult = AIControlAdapterGarrisonDiscoveryResult;
 
 		bool isNearMapCacheGarrison(const std::string& templateName, Real x, Real y, Real radius) const
@@ -9372,6 +9422,340 @@ namespace
 			});
 		}
 
+		bool issueGarrisonShuttleEnter(Player* player, const std::vector<Object*>& infantry, Object* technical, std::string& reason)
+		{
+			if (player == nullptr || technical == nullptr || infantry.empty())
+			{
+				reason = "invalid_shuttle_request";
+				return false;
+			}
+			std::vector<ObjectID> ids;
+			std::vector<ObjectID> fallbackIds;
+			int rejectedByPreflight = 0;
+			for (Object* unit : infantry)
+			{
+				if (unit == nullptr || unit->isEffectivelyDead())
+				{
+					continue;
+				}
+				fallbackIds.push_back(unit->getID());
+				if (TheActionManager != nullptr
+					&& !TheActionManager->canEnterObject(unit, technical, CMD_FROM_PLAYER, CHECK_CAPACITY))
+				{
+					++rejectedByPreflight;
+					continue;
+				}
+				ids.push_back(unit->getID());
+			}
+			if (ids.empty())
+			{
+				if (fallbackIds.empty())
+				{
+					reason = "no_live_infantry";
+					return false;
+				}
+				ids.swap(fallbackIds);
+				reason = rejectedByPreflight > 0 ? "enterability_fallback" : "enter_command_issued";
+			}
+			else
+			{
+				reason = "enter_command_issued";
+			}
+			const ObjectID technicalId = technical->getID();
+			return executeScopedSelectionCommand(player, ids, reason, [&]() -> bool
+			{
+				GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_ENTER);
+				if (msg == nullptr)
+				{
+					reason = "message_stream_not_ready";
+					return false;
+				}
+				msg->appendObjectIDArgument(INVALID_ID);
+				msg->appendObjectIDArgument(technicalId);
+				return true;
+			});
+		}
+
+		Object* chooseGarrisonShuttleTechnical(Player* player, const std::vector<Object*>& infantry)
+		{
+			if (player == nullptr || TheGameLogic == nullptr || infantry.empty())
+			{
+				return nullptr;
+			}
+			const Coord3D* origin = nullptr;
+			for (Object* unit : infantry)
+			{
+				if (unit != nullptr && !unit->isEffectivelyDead())
+				{
+					origin = unit->getPosition();
+					if (origin != nullptr)
+					{
+						break;
+					}
+				}
+			}
+			if (origin == nullptr)
+			{
+				return nullptr;
+			}
+			Object* best = nullptr;
+			Real bestDistSq = 999999999.0f;
+			std::vector<AutomationOwnedObjectSnapshot> ownedObjects;
+			collectOwnedAutomationObjects(player, ownedObjects);
+			for (const AutomationOwnedObjectSnapshot& owned : ownedObjects)
+			{
+				if (owned.object == nullptr || !owned.isTechnical || owned.isStructure || owned.underConstruction)
+				{
+					continue;
+				}
+				const UnsignedInt id = static_cast<UnsignedInt>(owned.object->getID());
+				if (isTechnicalAssignedToWorkerShuttle(id) || isTechnicalAssignedToGarrisonShuttle(id))
+				{
+					continue;
+				}
+				Object* technical = owned.object;
+				if (technical->isEffectivelyDead())
+				{
+					continue;
+				}
+				if (m_autonomy.combatTaskManager.isUnitReserved(id))
+				{
+					continue;
+				}
+				const Coord3D* pos = technical->getPosition();
+				if (pos == nullptr)
+				{
+					continue;
+				}
+				const Real dx = pos->x - origin->x;
+				const Real dy = pos->y - origin->y;
+				const Real distSq = (dx * dx) + (dy * dy);
+				if (distSq < bestDistSq)
+				{
+					bestDistSq = distSq;
+					best = technical;
+				}
+			}
+			return best;
+		}
+
+		bool updateGarrisonShuttleAssignment(Player* player, AutonomyGarrisonAssignment& assignment, Object* structure, DWORD now)
+		{
+			if (player == nullptr || structure == nullptr || TheGameLogic == nullptr)
+			{
+				return false;
+			}
+
+			std::vector<Object*> outsideInfantry;
+			Real nearestDistance = 999999.0f;
+			for (const AutonomyGarrisonInfantryAssignment& unit : assignment.infantry)
+			{
+				if (unit.entered || unit.enteredPendingVerification)
+				{
+					continue;
+				}
+				Object* infantry = TheGameLogic->findObjectByID(static_cast<ObjectID>(unit.unitId));
+				if (infantry == nullptr || infantry->isEffectivelyDead())
+				{
+					continue;
+				}
+				if (infantry->getContainedBy() == structure)
+				{
+					continue;
+				}
+				const Coord3D* pos = infantry->getPosition();
+				if (pos != nullptr)
+				{
+					const Real dx = pos->x - assignment.x;
+					const Real dy = pos->y - assignment.y;
+					nearestDistance = std::min(nearestDistance, std::sqrt((dx * dx) + (dy * dy)));
+				}
+				outsideInfantry.push_back(infantry);
+			}
+			if (outsideInfantry.empty())
+			{
+				assignment.shuttleTechnicalId = 0u;
+				assignment.shuttleState = "inactive";
+				assignment.shuttleReason = "no_outside_infantry";
+				return false;
+			}
+			if (assignment.shuttleTechnicalId == 0u && nearestDistance < 900.0f)
+			{
+				char key[128];
+				std::snprintf(key, sizeof(key), "garrison_shuttle_nearby:%u", assignment.structureId);
+				if (shouldLogScoutReservationSkip(key, now, 12000u))
+				{
+					adapterLog(
+						"garrison_shuttle_blocked structure=%u infantry=%d distance=%.1f reason=nearby_assignment",
+						assignment.structureId,
+						static_cast<int>(outsideInfantry.size()),
+						nearestDistance);
+				}
+				assignment.shuttleReason = "nearby_assignment";
+				return false;
+			}
+
+			const int maxActiveGarrisonShuttles = 2;
+			const int activeGarrisonShuttles = countActiveGarrisonShuttleAssignments();
+			if (assignment.shuttleTechnicalId == 0u && activeGarrisonShuttles >= maxActiveGarrisonShuttles)
+			{
+				char key[128];
+				std::snprintf(key, sizeof(key), "garrison_shuttle_cap:%u", assignment.structureId);
+				if (shouldLogScoutReservationSkip(key, now, 12000u))
+				{
+					adapterLog(
+						"garrison_shuttle_blocked structure=%u active=%d max=%d infantry=%d distance=%.1f reason=in_progress_cap",
+						assignment.structureId,
+						activeGarrisonShuttles,
+						maxActiveGarrisonShuttles,
+						static_cast<int>(outsideInfantry.size()),
+						nearestDistance);
+				}
+				assignment.shuttleReason = "in_progress_cap";
+				return false;
+			}
+
+			Object* technical = assignment.shuttleTechnicalId != 0u
+				? TheGameLogic->findObjectByID(static_cast<ObjectID>(assignment.shuttleTechnicalId))
+				: chooseGarrisonShuttleTechnical(player, outsideInfantry);
+			if (technical == nullptr || technical->isEffectivelyDead())
+			{
+				if (assignment.shuttleTechnicalId != 0u)
+				{
+					adapterLog(
+						"garrison_shuttle_release structure=%u technical=%u state=%s reason=technical_dead",
+						assignment.structureId,
+						assignment.shuttleTechnicalId,
+						assignment.shuttleState.c_str());
+				}
+				assignment.shuttleTechnicalId = 0u;
+				assignment.shuttleState = "inactive";
+				assignment.shuttleReason = "technical_unavailable";
+				char key[128];
+				std::snprintf(key, sizeof(key), "garrison_shuttle_no_technical:%u", assignment.structureId);
+				if (shouldLogScoutReservationSkip(key, now, 12000u))
+				{
+					adapterLog(
+						"garrison_shuttle_blocked structure=%u infantry=%d distance=%.1f reason=no_available_technical",
+						assignment.structureId,
+						static_cast<int>(outsideInfantry.size()),
+						nearestDistance);
+				}
+				return false;
+			}
+			if (assignment.shuttleTechnicalId == 0u)
+			{
+				assignment.shuttleTechnicalId = static_cast<UnsignedInt>(technical->getID());
+				assignment.shuttleState = "loading";
+				assignment.shuttleReason = "assigned";
+				assignment.lastShuttleCommandTick = 0u;
+				assignment.shuttleCommandReissueCount = 0;
+				adapterLog(
+					"garrison_shuttle_assignment structure=%u technical=%u infantry=%d distance=%.1f reason=remote_garrison",
+					assignment.structureId,
+					assignment.shuttleTechnicalId,
+					static_cast<int>(outsideInfantry.size()),
+					nearestDistance);
+			}
+
+			std::vector<Object*> insideInfantry;
+			std::vector<Object*> looseInfantry;
+			for (Object* infantry : outsideInfantry)
+			{
+				if (isWorkerInsideTechnical(infantry, technical))
+				{
+					insideInfantry.push_back(infantry);
+				}
+				else
+				{
+					looseInfantry.push_back(infantry);
+				}
+			}
+
+			if (nearestDistance <= 520.0f && !outsideInfantry.empty())
+			{
+				std::string reason;
+				const bool issued = issueGarrisonCommand(player, structure, outsideInfantry, reason);
+				assignment.lastCommandTick = now;
+				assignment.lastShuttleCommandTick = now;
+				assignment.shuttleReason = issued ? "garrison_reissued" : reason;
+				assignment.shuttleState = issued ? "released" : "failed";
+				for (AutonomyGarrisonInfantryAssignment& unit : assignment.infantry)
+				{
+					for (Object* infantry : outsideInfantry)
+					{
+						if (infantry != nullptr && infantry->getID() == static_cast<ObjectID>(unit.unitId))
+						{
+							unit.lastCommandTick = now;
+							unit.reason = issued ? "garrison_shuttle_reissued" : reason;
+						}
+					}
+				}
+				adapterLog(
+					"garrison_shuttle_reissue structure=%u technical=%u infantry=%d issued=%d distance=%.1f reason=%s",
+					assignment.structureId,
+					assignment.shuttleTechnicalId,
+					static_cast<int>(outsideInfantry.size()),
+					issued ? 1 : 0,
+					nearestDistance,
+					issued ? "near_target" : reason.c_str());
+				if (issued)
+				{
+					assignment.shuttleTechnicalId = 0u;
+					assignment.shuttleState = "inactive";
+					assignment.shuttleReason = "garrison_reissued";
+				}
+				return true;
+			}
+
+			if (!insideInfantry.empty())
+			{
+				if (assignment.shuttleState != "transporting" || now - assignment.lastShuttleCommandTick >= 9000u)
+				{
+					std::string reason;
+					Coord3D target;
+					target.x = assignment.x;
+					target.y = assignment.y;
+					target.z = 0.0f;
+					const bool issued = issueTechnicalMoveAndEvacuate(technical, target, reason);
+					assignment.shuttleState = issued ? "transporting" : "failed";
+					assignment.shuttleReason = reason;
+					assignment.lastShuttleCommandTick = now;
+					adapterLog(
+						"garrison_shuttle_transport structure=%u technical=%u infantry=%d issued=%d distance=%.1f reason=%s",
+						assignment.structureId,
+						assignment.shuttleTechnicalId,
+						static_cast<int>(insideInfantry.size()),
+						issued ? 1 : 0,
+						nearestDistance,
+						reason.c_str());
+				}
+				return true;
+			}
+
+			if (!looseInfantry.empty()
+				&& (assignment.lastShuttleCommandTick == 0u || now - assignment.lastShuttleCommandTick >= 10000u)
+				&& assignment.shuttleCommandReissueCount < 3)
+			{
+				std::string reason;
+				const bool issued = issueGarrisonShuttleEnter(player, looseInfantry, technical, reason);
+				++assignment.shuttleCommandReissueCount;
+				assignment.shuttleState = issued ? "loading" : "failed";
+				assignment.shuttleReason = reason;
+				assignment.lastShuttleCommandTick = now;
+				adapterLog(
+					"garrison_shuttle_load structure=%u technical=%u infantry=%d issued=%d reissue=%d distance=%.1f reason=%s",
+					assignment.structureId,
+					assignment.shuttleTechnicalId,
+					static_cast<int>(looseInfantry.size()),
+					issued ? 1 : 0,
+					assignment.shuttleCommandReissueCount,
+					nearestDistance,
+					reason.c_str());
+			}
+			return assignment.shuttleTechnicalId != 0u;
+		}
+
 		std::string templateNameForObject(const Object* obj) const
 		{
 			const ThingTemplate* tt = obj != nullptr ? obj->getTemplate() : nullptr;
@@ -9424,7 +9808,15 @@ namespace
 				infantry.reason = unit.reason;
 				telemetry.infantry.push_back(infantry);
 			}
-			return AIControlAdapterGarrisonManager::buildAssignmentTelemetry(telemetry, now);
+			nlohmann::json result = AIControlAdapterGarrisonManager::buildAssignmentTelemetry(telemetry, now);
+			result["shuttle"] = nlohmann::json::object({
+				{"technical_id", assignment.shuttleTechnicalId},
+				{"state", assignment.shuttleState},
+				{"reason", assignment.shuttleReason},
+				{"last_command_age_ms", assignment.lastShuttleCommandTick != 0u ? now - assignment.lastShuttleCommandTick : 0u},
+				{"reissue_count", assignment.shuttleCommandReissueCount}
+			});
+			return result;
 		}
 
 		void evaluateGarrisonManagement(Player* player)
@@ -9607,30 +9999,41 @@ namespace
 					}
 					else if (releaseReason.empty() && !reissueInfantry.empty() && enteredCount < assignment.desiredInfantry)
 					{
-						std::string reissueReason;
-						const bool reissued = issueGarrisonCommand(player, structure, reissueInfantry, reissueReason);
-						if (reissued)
+						const bool shuttleActive = updateGarrisonShuttleAssignment(player, assignment, structure, now);
+						if (!shuttleActive)
 						{
-							assignment.lastCommandTick = now;
-							for (AutonomyGarrisonInfantryAssignment& unit : assignment.infantry)
+							std::string reissueReason;
+							const bool reissued = issueGarrisonCommand(player, structure, reissueInfantry, reissueReason);
+							if (reissued)
 							{
-								for (Object* reissuedUnit : reissueInfantry)
+								assignment.lastCommandTick = now;
+								for (AutonomyGarrisonInfantryAssignment& unit : assignment.infantry)
 								{
-									if (reissuedUnit != nullptr && reissuedUnit->getID() == static_cast<ObjectID>(unit.unitId))
+									for (Object* reissuedUnit : reissueInfantry)
 									{
-										unit.lastCommandTick = now;
-										unit.reason = "enter_reissued";
-										break;
+										if (reissuedUnit != nullptr && reissuedUnit->getID() == static_cast<ObjectID>(unit.unitId))
+										{
+											unit.lastCommandTick = now;
+											unit.reason = "enter_reissued";
+											break;
+										}
 									}
 								}
 							}
+							adapterLog(
+								"garrison_reissue structure=%u infantry=%d issued=%d reason=%s",
+								assignment.structureId,
+								static_cast<int>(reissueInfantry.size()),
+								reissued ? 1 : 0,
+								reissued ? "no_entry_progress" : reissueReason.c_str());
 						}
-						adapterLog(
-							"garrison_reissue structure=%u infantry=%d issued=%d reason=%s",
-							assignment.structureId,
-							static_cast<int>(reissueInfantry.size()),
-							reissued ? 1 : 0,
-							reissued ? "no_entry_progress" : reissueReason.c_str());
+						else
+						{
+							adapterLog(
+								"garrison_reissue structure=%u infantry=%d issued=0 reason=technical_shuttle_active",
+								assignment.structureId,
+								static_cast<int>(reissueInfantry.size()));
+						}
 					}
 				}
 
@@ -11117,6 +11520,28 @@ namespace
 			return m_workerShuttleManager.ResolveProtectedTechnicalCount(m_autonomy.state.glaUsaStrategyTelemetry);
 		}
 
+		std::string workerShuttleTaskStateName(SpecialTaskState state) const
+		{
+			switch (state)
+			{
+			case SpecialTaskState::Assigned:
+				return "assigned";
+			case SpecialTaskState::Moving:
+				return "moving";
+			case SpecialTaskState::Executing:
+				return "executing";
+			case SpecialTaskState::Verifying:
+				return "verifying";
+			case SpecialTaskState::Complete:
+				return "complete";
+			case SpecialTaskState::Failed:
+				return "failed";
+			case SpecialTaskState::Expired:
+				return "expired";
+			}
+			return "unknown";
+		}
+
 		AIControlAdapterWorkerShuttleTechnicalSnapshot buildWorkerShuttleTechnicalSnapshot(
 			const AutomationOwnedObjectSnapshot& owned) const
 		{
@@ -11390,16 +11815,17 @@ namespace
 				SpecialTaskReservation* task = m_autonomy.taskReservationManager.findReservation(assignment.taskId);
 				Object* worker = TheGameLogic->findObjectByID(static_cast<ObjectID>(assignment.workerId));
 				Object* technical = TheGameLogic->findObjectByID(static_cast<ObjectID>(assignment.technicalId));
+				const bool reservationTerminal =
+					task != nullptr
+					&& (task->state == SpecialTaskState::Complete
+						|| task->state == SpecialTaskState::Failed
+						|| task->state == SpecialTaskState::Expired);
 				if (protectedTechnicals <= 0)
 				{
 					releaseWorkerShuttleAssignment(it, "policy_disabled");
 					continue;
 				}
-				if (task == nullptr
-					|| task->state == SpecialTaskState::Complete
-					|| task->state == SpecialTaskState::Failed
-					|| task->state == SpecialTaskState::Expired
-					|| task->targetObjectId != 0u)
+				if (m_workerShuttleManager.ShouldReleaseAssignmentForReservation(task == nullptr, reservationTerminal))
 				{
 					releaseWorkerShuttleAssignment(it, "build_task_resolved");
 					continue;
@@ -11519,11 +11945,13 @@ namespace
 					{
 						break;
 					}
-					if (task == nullptr || task->targetObjectId != 0u)
+					if (task == nullptr)
 					{
 						continue;
 					}
-					if (task->state != SpecialTaskState::Assigned && task->state != SpecialTaskState::Moving)
+					if (task->state == SpecialTaskState::Complete
+						|| task->state == SpecialTaskState::Failed
+						|| task->state == SpecialTaskState::Expired)
 					{
 						continue;
 					}
@@ -11548,7 +11976,10 @@ namespace
 					const Real dx = workerPos->x - task->targetPosition.x;
 					const Real dy = workerPos->y - task->targetPosition.y;
 					const Real distance = std::sqrt((dx * dx) + (dy * dy));
-					if (distance < 1200.0f)
+					if (!m_workerShuttleManager.IsBuildTaskEligibleForAssignment(
+							workerShuttleTaskStateName(task->state),
+							worker->getContainedBy() != nullptr,
+							distance))
 					{
 						continue;
 					}

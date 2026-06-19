@@ -81,6 +81,15 @@ public:
 		unsigned int technicalId,
 		const std::vector<AIControlAdapterWorkerShuttleAssignmentSnapshot>& assignments) const;
 
+	bool ShouldReleaseAssignmentForReservation(
+		bool reservationMissing,
+		bool reservationTerminal) const;
+
+	bool IsBuildTaskEligibleForAssignment(
+		const std::string& taskState,
+		bool workerAlreadyContained,
+		float workerDistance) const;
+
 	nlohmann::json BuildAssignmentTelemetry(
 		const AIControlAdapterWorkerShuttleAssignmentSnapshot& assignment,
 		const AIControlAdapterWorkerShuttleAssignmentStatus& status,

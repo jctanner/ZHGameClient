@@ -84,6 +84,39 @@ int main()
 	}
 
 	{
+		expect(
+			!manager.ShouldReleaseAssignmentForReservation(false, false),
+			"Active build reservations should keep worker shuttle assignments alive");
+		expect(
+			manager.ShouldReleaseAssignmentForReservation(true, false),
+			"Missing build reservations should release worker shuttle assignments");
+		expect(
+			manager.ShouldReleaseAssignmentForReservation(false, true),
+			"Terminal build reservations should release worker shuttle assignments");
+	}
+
+	{
+		expect(
+			manager.IsBuildTaskEligibleForAssignment("assigned", false, 1500.0f),
+			"Assigned remote build tasks should be eligible for worker shuttle");
+		expect(
+			manager.IsBuildTaskEligibleForAssignment("moving", false, 1500.0f),
+			"Moving remote build tasks should be eligible for worker shuttle");
+		expect(
+			manager.IsBuildTaskEligibleForAssignment("executing", false, 1500.0f),
+			"Executing remote foundation tasks should remain eligible for worker shuttle");
+		expect(
+			!manager.IsBuildTaskEligibleForAssignment("complete", false, 1500.0f),
+			"Complete build tasks should not be eligible for worker shuttle");
+		expect(
+			!manager.IsBuildTaskEligibleForAssignment("executing", false, 800.0f),
+			"Nearby foundation tasks should not consume worker shuttle capacity");
+		expect(
+			!manager.IsBuildTaskEligibleForAssignment("executing", true, 1500.0f),
+			"Already contained workers should not start another worker shuttle assignment");
+	}
+
+	{
 		AIControlAdapterWorkerShuttleAssignmentSnapshot assignment;
 		assignment.taskId = 3u;
 		assignment.workerId = 10u;
