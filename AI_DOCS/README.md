@@ -17,18 +17,17 @@ Use this directory as the primary architecture and protocol context for the Zero
 
 Agents should not assume all AI-control context lives only under `AI_DOCS`.
 
-Important related subproject:
+The supported desktop operator console is maintained outside this checkout:
 
-1. `../../projects/bot-ui/AGENTS.md`
+1. `../../projects/zones-ui/README.md`
 
-That file defines the desktop operator UI plan in `projects/bot-ui`, including:
+That project provides the default Zones viewer and HTTP-backed operator controls, including:
 
-1. Tkinter app scope and architecture
-2. Protocol integration expectations
-3. Query polling and `StateFrame` usage
-4. Player metadata and tactical map rendering requirements
+1. Autonomy profile and lifecycle controls
+2. Manual commands and diagnostic tools
+3. Zones, telemetry, and player views
 
 ## Guidance
 
-1. If the task touches the desktop controller UI, canvas rendering, polling/stream consumption, or operator workflows, read `../../projects/bot-ui/AGENTS.md` before making changes.
+1. If the task touches the desktop controller UI, read `../../projects/zones-ui/README.md` and `../../projects/zones-ui/CAPABILITY_MATRIX.md`.
 2. If the task touches the in-process adapter, command semantics, or protocol messages, read the relevant `AI_DOCS/*.md` files first and use them as the source of truth.
