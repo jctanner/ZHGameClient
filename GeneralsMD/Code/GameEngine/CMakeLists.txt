@@ -1324,12 +1324,12 @@ if(BUILD_TESTING)
         target_link_libraries(${target_name} PRIVATE
             zi_gameengine_include
             corei_libraries_source_wwvegas
-            corei_libraries_source_wwvegas_wwlib
             zi_always
         )
         target_include_directories(${target_name} PRIVATE
             Include/Precompiled
             Include/GameNetwork/GeneralsOnline/Vendor/
+            ${CMAKE_SOURCE_DIR}/Core/Libraries/Source/WWVegas/WWLib
             ${CMAKE_SOURCE_DIR}/Core/Libraries/Source/WWVegas/WWDebug
         )
     endfunction()

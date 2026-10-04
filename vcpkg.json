@@ -12,9 +12,15 @@
         }
       ]
     },
+    "default-features": [ "ffmpeg" ],
+    "features": {
+      "ffmpeg": {
+        "description": "FFmpeg video backend, used when RTS_BUILD_OPTION_FFMPEG is enabled",
+        "dependencies": [ "ffmpeg" ]
+      }
+    },
     "dependencies": [
       "zlib",
-      "ffmpeg",
       "stb",
       {
         "name": "curl",

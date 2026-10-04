@@ -67,6 +67,7 @@ echo "Building Docker image (first run downloads ~3GB of MSVC tools)..."
 docker build \
 	--build-arg UID="$(id -u)" \
 	--build-arg GID="$(id -g)" \
+	--build-arg VCPKG_BASELINE="$(python3 -c 'import json, sys; print(json.load(open(sys.argv[1]))["builtin-baseline"])' "$PROJECT_DIR/vcpkg.json")" \
 	-t "$IMAGE_NAME" \
 	"$DOCKER_DIR"
 
@@ -85,5 +86,7 @@ if [ "$INTERACTIVE" = "true" ]; then
 	docker run -it "${DOCKER_ARGS[@]}" "$IMAGE_NAME" /bin/bash
 else
 	echo "Building..."
-	docker run "${DOCKER_ARGS[@]}" "$IMAGE_NAME"
+	# PowerShell (used by vcpkg) needs a Wine console even when host output is
+	# redirected to a build log. Allocate a container PTY without interactive input.
+	docker run -t "${DOCKER_ARGS[@]}" "$IMAGE_NAME"
 fi

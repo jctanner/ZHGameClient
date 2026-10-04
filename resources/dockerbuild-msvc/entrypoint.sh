@@ -2,6 +2,11 @@
 set -euo pipefail
 cd /build/cnc
 
+# Wine maps Windows Unicode filenames through the host locale. Some dependency
+# archives (including pkgconf's tests) contain non-ASCII and emoji paths.
+export LANG=C.UTF-8
+export LC_ALL=C.UTF-8
+
 # Use a fresh Wine prefix owned by the current user
 export WINEPREFIX="/tmp/wineprefix"
 mkdir -p "$WINEPREFIX"
@@ -79,19 +84,40 @@ fi
 
 CRT_REDIST="${BASE}\\VC\\Redist\\MSVC\\${MSVCVER}\\${ARCH}\\Microsoft.VC145.CRT"
 UCRT_REDIST="Z:\\build\\tools\\msvc\\WindowsKits\\10\\Redist\\${SDKVER}\\ucrt\\DLLs\\${ARCH}"
+# Install the native CRT in this disposable prefix for both host tools and
+# 32-bit configure probes. Their launchers may replace the DLL search PATH.
+cp -f "${MSVC_ROOT}/VC/Redist/MSVC/${MSVCVER}/x86/Microsoft.VC145.CRT/"*.dll "${WINEPREFIX}/drive_c/windows/syswow64/"
+cp -f "${MSVC_ROOT}/VC/Redist/MSVC/${MSVCVER}/x64/Microsoft.VC145.CRT/"*.dll "${WINEPREFIX}/drive_c/windows/system32/"
 BUILD_WINEPATH="Z:\\build\\cnc\\build\\${PRESET}\\_deps\\miles-build;Z:\\build\\cnc\\build\\${PRESET}\\GeneralsMD;${CRT_REDIST};${UCRT_REDIST};${WINEPATH}"
 
 RC_COMPILER="Z:/build/tools/msvc/WindowsKits/10/bin/${SDKVER}/x64/rc.exe"
 RC_INCLUDE="Z:/build/tools/msvc/WindowsKits/10/Include/${SDKVER}"
 RC_FLAGS="-I \"${RC_INCLUDE}/um\" -I \"${RC_INCLUDE}/shared\""
 
-# Configure if needed
-if [ "${FORCE_CMAKE:-}" = "true" ] || [ ! -f "${BUILD_DIR}/build.ninja" ]; then
-	rm -f "${BUILD_DIR}/CMakeCache.txt"
+# vcpkg builds the manifest's Windows dependencies with this same compiler.
+# Cache downloads, packages, registries and build logs on the mounted checkout.
+export VCPKG_ROOT="Z:/build/tools/vcpkg"
+export VCPKG_DISABLE_METRICS=1
+export VCPKG_DOWNLOADS="Z:/build/cnc/build/vcpkg-windows/downloads"
+export VCPKG_DEFAULT_BINARY_CACHE="Z:/build/cnc/build/vcpkg-windows/archives"
+export X_VCPKG_REGISTRIES_CACHE="Z:/build/cnc/build/vcpkg-windows/registries"
+mkdir -p /build/cnc/build/vcpkg-windows/{downloads,archives,registries,buildtrees,packages}
+export MSVC_WINE_CL="${CL_WIN}"
+export MSVC_WINE_LINK="${LINK_WIN}"
+export MSVC_WINE_RC="${RC_COMPILER}"
+export MSVC_WINE_RC_FLAGS="${RC_FLAGS}"
+# Dependency configure checks execute newly built 32-bit programs too.
+export WINEPATH="${CRT_REDIST};${UCRT_REDIST};Z:\\build\\tools\\cmake\\bin;Z:\\build\\tools\\git;Z:\\build\\tools;${WINEPATH}"
 
+# Configure if needed. --fresh resets toolchain detection as well as the cache.
+CONFIGURED_MARKER="${BUILD_DIR}/.msvc-wine-vcpkg-configured"
+if [ "${FORCE_CMAKE:-}" = "true" ] || [ ! -f "${BUILD_DIR}/build.ninja" ] || [ ! -f "${CONFIGURED_MARKER}" ]; then
+	# A failed configure must not leave the fast path using an old Ninja graph.
+	rm -f "${CONFIGURED_MARKER}"
 	wine /build/tools/cmake/bin/cmake.exe \
+		--fresh \
 		--preset ${PRESET} \
-		-DCMAKE_SYSTEM="Windows" \
+		-DVCPKG_INSTALL_OPTIONS="--x-buildtrees-root=Z:/build/cnc/build/vcpkg-windows/buildtrees;--x-packages-root=Z:/build/cnc/build/vcpkg-windows/packages" \
 		-DCMAKE_SYSTEM_NAME="Windows" \
 		-DCMAKE_SIZEOF_VOID_P=4 \
 		-DCMAKE_MAKE_PROGRAM="Z:/build/tools/ninja.exe" \
@@ -119,7 +145,8 @@ if [ "${FORCE_CMAKE:-}" = "true" ] || [ ! -f "${BUILD_DIR}/build.ninja" ]; then
 		-DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=ONLY \
 		-DCMAKE_RC_COMPILER="${RC_COMPILER}" \
 		-DCMAKE_RC_FLAGS="${RC_FLAGS}" \
-		-B "${BUILD_DIR}"
+		-B "Z:/build/cnc/build/${PRESET}"
+	touch "${CONFIGURED_MARKER}"
 fi
 
 # Fix PCH paths: CMake generates Unix paths for /FI, /Yc, /Fp flags.

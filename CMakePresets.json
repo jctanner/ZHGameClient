@@ -13,6 +13,12 @@
             "hidden": false,
             "binaryDir": "${sourceDir}/build/${presetName}",
             "cacheVariables": {
+                "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+                "VCPKG_OVERLAY_TRIPLETS": "${sourceDir}/triplets",
+                "VCPKG_TARGET_TRIPLET": "x86-windows-msvc-wine",
+                "VCPKG_HOST_TRIPLET": "x86-windows-msvc-wine",
+                "VCPKG_MANIFEST_NO_DEFAULT_FEATURES": "ON",
+                "RTS_BUILD_OPTION_FFMPEG": "OFF",
                 "CMAKE_EXPORT_COMPILE_COMMANDS": "ON",
                 "CMAKE_MSVC_RUNTIME_LIBRARY": "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL",
                 "CMAKE_BUILD_TYPE": "Release",

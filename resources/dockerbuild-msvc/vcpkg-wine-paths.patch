@@ -1,0 +1,13 @@
+diff --git a/src/vcpkg/base/files.cpp b/src/vcpkg/base/files.cpp
+--- a/src/vcpkg/base/files.cpp
++++ b/src/vcpkg/base/files.cpp
+@@ -519,6 +519,9 @@ namespace
+ #endif
+ 
+         wide_path.append(Strings::to_utf16(native_base));
++        // Wine requires backslashes after the extended-length path prefix.
++        // Normal Win32 paths accept '/', but \\?\ paths bypass normalization.
++        std::replace(wide_path.begin(), wide_path.end(), L'/', L'\\');
+ 
+         stdfs::directory_entry entry(wide_path, ec);
+         translate_not_found_to_success(ec);
