@@ -37,8 +37,8 @@ std::vector<IntentResult> AIControlAdapterScheduler::ProcessIntents(unsigned int
 {
 	std::vector<IntentResult> results;
 
-	// Sort intents by priority (higher priority first)
-	std::sort(m_pendingIntents.begin(), m_pendingIntents.end(), ComparePriority);
+	// Preserve submission order within each priority.
+	std::stable_sort(m_pendingIntents.begin(), m_pendingIntents.end(), ComparePriority);
 
 	// Process each intent in priority order
 	for (const Intent& intent : m_pendingIntents)

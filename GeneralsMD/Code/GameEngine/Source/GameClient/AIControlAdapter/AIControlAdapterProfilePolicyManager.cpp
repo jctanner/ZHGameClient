@@ -48,7 +48,8 @@ namespace
 		float defense)
 	{
 		ProfilePolicyPreset preset;
-		preset.isBalancedSprawl = normalizedProfile == "sprawl_balanced";
+		// Both presets reuse the adaptive sprawl execution/policy family.
+		preset.isBalancedSprawl = normalizedProfile == "sprawl_balanced" || normalizedProfile == "sprawl_economic";
 		preset.isSprawlStyle = normalizedProfile == "sprawl" || preset.isBalancedSprawl;
 		preset.reserveCash = preset.isBalancedSprawl ? 10000u : (normalizedProfile == "sprawl" ? 5000u : 0u);
 
@@ -167,6 +168,7 @@ AIControlAdapterProfilePolicyConfig AIControlAdapterResolveProfilePolicyConfig(
 	config.isDefensive = normalizedProfile == "defensive";
 	config.isTech = normalizedProfile == "tech";
 	config.isBalancedSprawl = preset.isBalancedSprawl;
+	config.isEconomyFirstSprawl = normalizedProfile == "sprawl_economic";
 	config.isSprawlStyle = preset.isSprawlStyle;
 	config.reserveCash = preset.reserveCash;
 	config.workerMinIdle = preset.workerMinIdle;
@@ -197,7 +199,46 @@ AIControlAdapterProfilePolicyConfig AIControlAdapterResolveProfilePolicyConfig(
 	config.allowExpansionBeforeFullRemoteFollowup = config.isSprawlStyle && multiplier >= 8.0f;
 	config.expansionHighCashFloatThreshold = 10000u;
 	config.scudStormHighCashFloatThreshold = 25000u;
+	if (config.isEconomyFirstSprawl)
+	{
+		config.reserveCash = 6000u;
+		config.stashWorkersPerStash = 2;
+		config.workerQueueCount = 1;
+		config.workerMinIdle = 2;
+		config.normalMaxConcurrentExpansionStashes = 1;
+		config.sprawlMarketCap = std::max(config.sprawlMarketCap, 24);
+	}
 	return config;
+}
+
+AIControlAdapterProfileSpendPlan AIControlAdapterProfilePolicyManager::ResolveSpendPlan(
+	const AIControlAdapterProfilePolicyConfig& config,
+	unsigned int availableCash, int completedMarkets,
+	int localEnemies, bool threatResponse, bool sustainedOffense) const
+{
+	AIControlAdapterProfileSpendPlan plan;
+	plan.active = config.isEconomyFirstSprawl;
+	if (!plan.active) return plan;
+	plan.threatResponse = threatResponse;
+	plan.sustainedOffense = sustainedOffense;
+	plan.workerLimit = config.workerLimit;
+	plan.armyTarget = sustainedOffense ? 1000 : threatResponse
+		? std::min(150, std::max(config.responseArmyFloor, 32 + std::min(29, std::max(0, localEnemies)) * 4))
+		: config.quietArmyTarget;
+	// Once the income asset threshold is met, preserve the small phase-entry
+	// balance across purchases so our own growth cannot reset qualification.
+	plan.growthProtectedCash = !threatResponse && !sustainedOffense
+		&& completedMarkets >= config.offensiveMarketThreshold
+		? config.reserveCash + config.offensiveCashFloat : config.reserveCash;
+	// During response, discretionary construction/worker purchases yield to
+	// combat. Essential income and builder recovery retain a bounded allowance.
+	plan.incomeProtectedCash = threatResponse ? 3000u : plan.growthProtectedCash;
+	plan.workerProtectedCash = threatResponse ? config.reserveCash : std::max(config.reserveCash + 2500u, plan.growthProtectedCash);
+	plan.combatProtectedCash = threatResponse ? 1000u : std::max(config.reserveCash + 2500u, plan.growthProtectedCash);
+	plan.maxConcurrentMarkets = !threatResponse && completedMarkets >= 3
+		&& availableCash >= plan.incomeProtectedCash + 5000u ? 2 : 1;
+	plan.reason = threatResponse ? "threat_response" : sustainedOffense ? "income_funded_offense" : "quiet_economic_growth";
+	return plan;
 }
 
 AIControlAdapterProfilePolicyConfig AIControlAdapterProfilePolicyManager::Resolve(

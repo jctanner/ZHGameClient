@@ -807,7 +807,7 @@
 			if (zoneArgs.hasZoneCenter)
 			{
 				foundLocation = findBuildLocationInZone(player, worker, buildingTemplate, zoneArgs.zoneCenter, zoneArgs.zoneRadius, location, angle);
-				if (!foundLocation && zoneArgs.strictZone)
+				if (!foundLocation && zoneArgs.strictZone && (autonomyRuleEnabled("zone_expansion") || !m_profileAutomaticSpendScope))
 				{
 					logSmartBuildPlacement(message, "black_market", "move", player, worker, buildingTemplateName, requestedAnchorId, anchor, zoneArgs, &zoneArgs.zoneCenter, 0.0f, "zone_strict");
 					return moveWorkerToPosition(worker, &zoneArgs.zoneCenter, reason);
@@ -817,6 +817,24 @@
 			{
 				foundLocation = findBuildLocationAroundAnchor(player, worker, anchor, buildingTemplate, location, angle);
 			}
+            if (!foundLocation && m_profileAutomaticSpendScope && isAutonomyModeActive() && !autonomyRuleEnabled("zone_expansion"))
+            {
+                for (const auto& zone : m_autonomy.state.telemetryZones)
+                {
+                    const auto threat = m_autonomy.state.zoneThreats.find(zone.value("anchor_id", 0u));
+                    if (threat != m_autonomy.state.zoneThreats.end() && adapterGameplayTick() - threat->second.lastSeenTick <= 10000u
+                        && (threat->second.localEnemyCount > 0 || threat->second.enemyArtilleryCount > 0)) continue;
+                    const Coord3D center = {zone.value("center_x", 0.0f), zone.value("center_y", 0.0f), 0.0f};
+                    if (findBuildLocationInZone(player, worker, buildingTemplate, center, m_autonomy.state.zoneRadius, location, angle))
+                    { foundLocation = true; break; }
+                }
+                if (!foundLocation)
+                {
+                    reason = "no_existing_zone_space";
+                    m_autonomy.state.ruleBlocks["market_growth"] = {reason, adapterGameplayTick()};
+                    return false;
+                }
+            }
 			if (!foundLocation)
 			{
 				const Coord3D* moveTarget = zoneArgs.hasZoneCenter

@@ -3,8 +3,12 @@
 		{
 			bool success = false;
 			std::vector<unsigned int> assignedUnitIds;
+			std::vector<unsigned int> scudLauncherUnitIds;
+			int desiredScudLaunchers = 0;
+			std::string compositionReason;
 			Coord3D targetPosition = {0.0f, 0.0f, 0.0f};
 			Coord3D originPosition = {0.0f, 0.0f, 0.0f};
+			Coord3D rallyPosition = {0.0f, 0.0f, 0.0f};
 			std::string raidMode;
 			std::string failureReason;
 		};
@@ -603,6 +607,10 @@
 				{
 					continue;
 				}
+				if (candidate->getDefaultTeam() == nullptr || player->getRelationship(candidate->getDefaultTeam()) != ENEMIES)
+				{
+					continue;
+				}
 				nlohmann::json enemyPos = buildPlayerMapPositionSummary(candidate);
 				const auto exIt = enemyPos.find("x");
 				const auto eyIt = enemyPos.find("y");
@@ -618,7 +626,7 @@
 			}
 			if (!enemyTargets.empty())
 			{
-				const std::size_t pick = static_cast<std::size_t>(::GetTickCount() % enemyTargets.size());
+				const std::size_t pick = static_cast<std::size_t>(adapterGameplayTick() % enemyTargets.size());
 				target = enemyTargets[pick];
 				haveTarget = true;
 			}
@@ -626,7 +634,7 @@
 			// Fallback: directional offset from our anchor.
 			if (!haveTarget)
 			{
-				Int directionIndex = static_cast<Int>(::GetTickCount() & 3u);
+				Int directionIndex = static_cast<Int>(adapterGameplayTick() & 3u);
 				if (argsIt != message.end() && argsIt->is_object())
 				{
 					const auto directionIt = argsIt->find("direction_index");
@@ -662,26 +670,38 @@
 				target.y = anchor.y + (dy * distance);
 			}
 
+			// Preserve local coherence while deliberately reserving siege seats.
+			std::vector<AIControlAdapterRaidLaunchUnitSnapshot> candidates;
+			for (Object* unit : combatUnits)
+			{
+				if (unit == nullptr || unit->isEffectivelyDead() || unit->getPosition() == nullptr ||
+					unit->getContainedBy() != nullptr || unit->getAI() == nullptr) continue;
+				AIControlAdapterRaidLaunchUnitSnapshot candidate;
+				candidate.unitId = static_cast<unsigned int>(unit->getID());
+				candidate.x = unit->getPosition()->x;
+				candidate.y = unit->getPosition()->y;
+				const ThingTemplate* tt = unit->getTemplate();
+				candidate.scudLauncher = tt != nullptr && containsIgnoreCase(tt->getName().str(), "scudlauncher");
+				candidates.push_back(candidate);
+			}
+			const AIControlAdapterRaidLaunchSelection selection = AIControlAdapterRaidManager::selectLaunchUnitIds(
+				candidates, target.x, target.y, minUnits, groupSize, raidMode != "infantry");
+			if (selection.unitIds.empty())
+			{
+				reason = selection.reason;
+				return false;
+			}
+			const Coord3D clusterPosition = {selection.clusterX, selection.clusterY, 0.0f};
 			std::vector<ObjectID> selectedIds;
 			int selectedVehicles = 0;
 			int selectedInfantry = 0;
-			const std::size_t maxToCommand = std::min<std::size_t>(combatUnits.size(), static_cast<std::size_t>(groupSize));
-			for (std::size_t i = 0; i < maxToCommand; ++i)
+			for (unsigned int id : selection.unitIds)
 			{
-				Object* obj = combatUnits[i];
-				if (obj == nullptr || obj->getAI() == nullptr)
-				{
-					continue;
-				}
+				Object* obj = TheGameLogic->findObjectByID(static_cast<ObjectID>(id));
+				if (obj == nullptr || obj->isEffectivelyDead() || obj->getAI() == nullptr) continue;
 				selectedIds.push_back(obj->getID());
-				if (obj->isKindOf(KINDOF_INFANTRY))
-				{
-					++selectedInfantry;
-				}
-				if (obj->isKindOf(KINDOF_VEHICLE) || obj->isKindOf(KINDOF_AIRCRAFT))
-				{
-					++selectedVehicles;
-				}
+				if (obj->isKindOf(KINDOF_INFANTRY)) ++selectedInfantry;
+				if (obj->isKindOf(KINDOF_VEHICLE) || obj->isKindOf(KINDOF_AIRCRAFT)) ++selectedVehicles;
 			}
 
 			if (selectedIds.empty())
@@ -689,8 +709,8 @@
 				reason = "no_valid_objects";
 				return false;
 			}
-			const Real targetDx = target.x - anchor.x;
-			const Real targetDy = target.y - anchor.y;
+			const Real targetDx = target.x - clusterPosition.x;
+			const Real targetDy = target.y - clusterPosition.y;
 			const Real targetDistance = std::sqrt((targetDx * targetDx) + (targetDy * targetDy));
 			const CombatTaskRaidMixDecision mixDecision = evaluateCombatTaskRaidMixPolicy(selectedVehicles, selectedInfantry, targetDistance);
 			if (!mixDecision.shouldLaunch)
@@ -745,12 +765,37 @@
 					return false;
 				}
 			}
+			// A long-distance mixed wave may lose its infantry in the mode filter.
+			// Do not let that turn an escorted selection into a launcher-only raid.
+			int selectedScudLaunchers = 0;
+			for (unsigned int id : selection.scudLauncherUnitIds)
+			{
+				if (std::find(selectedIds.begin(), selectedIds.end(), static_cast<ObjectID>(id)) != selectedIds.end())
+					++selectedScudLaunchers;
+			}
+			if (selectedScudLaunchers > 0 && selectedScudLaunchers == static_cast<int>(selectedIds.size()))
+			{
+				reason = "insufficient_raid_escorts";
+				return false;
+			}
 			adapterLog(
 				"raid_mix_policy mode=%s selected_vehicles=%d selected_infantry=%d reason=%s",
 				mixDecision.mode,
 				selectedVehicles,
 				selectedInfantry,
 				mixDecision.reason);
+			Coord3D rally = {0.0f, 0.0f, 0.0f};
+			for (ObjectID id : selectedIds)
+			{
+				const Coord3D& pos = *TheGameLogic->findObjectByID(id)->getPosition();
+				rally.x += pos.x;
+				rally.y += pos.y;
+				rally.z += pos.z;
+			}
+			const Real rallyCount = static_cast<Real>(selectedIds.size());
+			rally.x /= rallyCount;
+			rally.y /= rallyCount;
+			rally.z /= rallyCount;
 
 			bool commandSuccess = true;
 			if (!deferCommand)
@@ -778,7 +823,19 @@
 				outResult->success = commandSuccess;
 				outResult->targetPosition = target;
 				outResult->originPosition = anchor;
+				outResult->rallyPosition = rally;
 				outResult->raidMode = mixDecision.mode;
+				outResult->desiredScudLaunchers = selection.desiredScudLaunchers;
+				outResult->compositionReason = selection.reason;
+				outResult->scudLauncherUnitIds.clear();
+				if (commandSuccess)
+				{
+					for (unsigned int id : selection.scudLauncherUnitIds)
+					{
+						if (std::find(selectedIds.begin(), selectedIds.end(), static_cast<ObjectID>(id)) != selectedIds.end())
+							outResult->scudLauncherUnitIds.push_back(id);
+					}
+				}
 				if (commandSuccess)
 				{
 					outResult->assignedUnitIds.reserve(selectedIds.size());
@@ -824,11 +881,14 @@
 				std::vector<ObjectID> skippedReservedUnits; // Track skipped for logging
 				std::vector<ObjectID> skippedCombatReservedUnits;
 				std::vector<ObjectID> skippedGarrisonReservedUnits;
+				bool survivalRally = false;
+				Coord3D rallyPosition = {};
 			};
 
 			GuardCollectContext collectCtx;
 			collectCtx.taskReservationManager = &m_autonomy.taskReservationManager;
 			collectCtx.adapter = this;
+			collectCtx.survivalRally = player == resolveAutonomyPlayer() && survivalRallyPosition(collectCtx.rallyPosition);
 			player->iterateObjects([](Object* obj, void* userData)
 			{
 				if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead())
@@ -883,7 +943,7 @@
 
 				GuardCommand command = {};
 				command.id = obj->getID();
-				command.pos = *pos;
+				command.pos = ctx->survivalRally ? ctx->rallyPosition : *pos;
 				command.pos.z = 0.0f;
 				ctx->commands.push_back(command);
 			}, &collectCtx);
@@ -918,7 +978,7 @@
 			}
 			for (ObjectID skippedId : collectCtx.skippedGarrisonReservedUnits)
 			{
-				const DWORD now = ::GetTickCount();
+				const DWORD now = adapterGameplayTick();
 				const std::string logKey =
 					std::string("garrison:guard:") +
 					std::to_string(static_cast<unsigned int>(skippedId)) +

@@ -215,8 +215,7 @@
 				return false;
 			}
 
-			Coord3D pos;
-			TheTacticalView->getPosition(&pos);
+			const Coord3D& pos = TheTacticalView->getPosition();
 			result = nlohmann::json::object({
 				{"path", "game.camera"},
 				{"x", pos.x},
@@ -231,5 +230,27 @@
 				{"max_height", TheGlobalData != nullptr ? TheGlobalData->m_maxCameraHeight : 0.0f},
 				{"zoom_limited", TheTacticalView->isZoomLimited()}
 			});
+			return true;
+		}
+
+		bool executeGameDisplayGet(const nlohmann::json& /*message*/, nlohmann::json& result, std::string& reason)
+		{
+			if (TheDisplay == nullptr)
+			{
+				reason = "display_not_ready";
+				return false;
+			}
+
+			result = nlohmann::json::object({
+				{"width", TheDisplay->getWidth()},
+				{"height", TheDisplay->getHeight()},
+				{"windowed", TheDisplay->getWindowed() != FALSE}
+			});
+			if (TheGlobalData != nullptr)
+			{
+				result["configured_width"] = TheGlobalData->m_xResolution;
+				result["configured_height"] = TheGlobalData->m_yResolution;
+				result["configured_windowed"] = TheGlobalData->m_windowed != FALSE;
+			}
 			return true;
 		}

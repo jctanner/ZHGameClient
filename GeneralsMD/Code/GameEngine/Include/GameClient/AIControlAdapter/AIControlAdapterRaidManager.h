@@ -44,10 +44,38 @@ struct AIControlAdapterAttackTaskCreationDecision
 	const char* reason = "command_failed";
 };
 
+// Caller supplies eligible, unreserved, on-map units only.
+struct AIControlAdapterRaidLaunchUnitSnapshot
+{
+	unsigned int unitId = 0u;
+	float x = 0.0f;
+	float y = 0.0f;
+	bool scudLauncher = false;
+};
+
+struct AIControlAdapterRaidLaunchSelection
+{
+	std::vector<unsigned int> unitIds;
+	std::vector<unsigned int> scudLauncherUnitIds;
+	int desiredScudLaunchers = 0;
+	float clusterX = 0.0f;
+	float clusterY = 0.0f;
+	const char* reason = "insufficient_local_combat_units";
+};
+
 class AIControlAdapterRaidManager
 {
 public:
 	static bool containsIgnoreCase(const std::string& haystack, const std::string& needle);
+
+	static AIControlAdapterRaidLaunchSelection selectLaunchUnitIds(
+		const std::vector<AIControlAdapterRaidLaunchUnitSnapshot>& units,
+		float targetX,
+		float targetY,
+		int minimumUnits,
+		int groupSize,
+		bool includeScudLaunchers,
+		float clusterRadius = 1000.0f);
 
 	static std::vector<unsigned int> selectProbeUnitIds(
 		const std::vector<AIControlAdapterRaidProbeUnitSnapshot>& units,

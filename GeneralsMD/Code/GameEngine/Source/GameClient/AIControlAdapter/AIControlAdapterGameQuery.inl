@@ -1506,13 +1506,13 @@
 
 			if (path == "game.match_outcome")
 			{
-				result = buildMatchOutcome(localPlayer, ::GetTickCount());
+				result = buildMatchOutcome(localPlayer, adapterGameplayTick());
 				return true;
 			}
 
 			if (path == "game.final_snapshot")
 			{
-				buildMatchOutcome(localPlayer, ::GetTickCount());
+				buildMatchOutcome(localPlayer, adapterGameplayTick());
 				result = m_autonomy.state.finalDiagnosticSnapshot.is_object()
 					? m_autonomy.state.finalDiagnosticSnapshot
 					: m_autonomy.state.lastActiveMatchSnapshot;
@@ -1528,7 +1528,7 @@
 
 			if (path == "game.run_summary")
 			{
-				nlohmann::json outcome = buildMatchOutcome(localPlayer, ::GetTickCount());
+				nlohmann::json outcome = buildMatchOutcome(localPlayer, adapterGameplayTick());
 				result = m_autonomy.state.finalRunSummary.is_object()
 					? m_autonomy.state.finalRunSummary
 					: outcome.value("run_summary", nlohmann::json::object());
@@ -1829,7 +1829,7 @@
 			{
 				result = buildPlayerDetails(selectedPlayer);
 				result["is_local_player"] = (selectedPlayer == localPlayer);
-				result["match_outcome"] = buildMatchOutcome(localPlayer, ::GetTickCount());
+				result["match_outcome"] = buildMatchOutcome(localPlayer, adapterGameplayTick());
 				result["final_snapshot_available"] = m_autonomy.state.finalDiagnosticSnapshot.is_object();
 				result["final_snapshot_tick"] = m_autonomy.state.finalDiagnosticSnapshot.is_object()
 					? m_autonomy.state.finalDiagnosticSnapshot.value("tick", 0u)

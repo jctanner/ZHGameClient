@@ -109,6 +109,7 @@ struct EconomyRecoveryRequest
  */
 struct EconomyManagerInput
 {
+	AIControlAdapterProfileSpendPlan profilePlan;
 	unsigned int currentMoney = 0;
 	int smoothedNetCashPerMinute = 0;  // Can be negative
 
@@ -120,6 +121,7 @@ struct EconomyManagerInput
 	bool hasPalace = false;  // GLA Palace prerequisite for Black Markets
 
 	std::string profile;  // e.g., "sprawl", "sprawl_balanced", "tech"
+	bool economicVictory = false;
 };
 
 struct LocalWorkerZoneInput
@@ -132,6 +134,7 @@ struct LocalWorkerZoneInput
 	unsigned int cashFloat = 0;
 	int localIdleWorkers = 0;
 	bool hasLocalProducer = false;
+	bool allowReserveRecovery = false;
 };
 
 struct LocalWorkerZoneDecision

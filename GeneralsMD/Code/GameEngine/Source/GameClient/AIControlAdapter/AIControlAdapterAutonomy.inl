@@ -100,7 +100,7 @@
 	 *
 	 * The autonomy system provides telemetry for analysis:
 	 * - lastDecisionCategory/Command/Reason: Most recent autonomy decision
-	 * - telemetryEvents: Recent autonomy events (builds, attacks, state changes)
+	 * - Recent autonomy events are owned by the bounded recording journal
 	 * - telemetryZones: Zone management state (expansions, front lines)
 	 * - nextMacroTick/nextProductionTick: Timing of next evaluations
 	 *
@@ -159,6 +159,16 @@
 			state.allowExpansionBeforeFullRemoteFollowupOverride = false;
 			state.hasExpansionHighCashFloatThresholdOverride = false;
 			state.expansionHighCashFloatThresholdOverride = 0u;
+			state.economicVictory = false;
+			state.economicVictoryPlayerIndex = -1;
+			state.economicVictoryTick = 0u;
+			state.nextAssaultTick = 0u;
+			state.survivalRecoveryUntilTick = 0u;
+			state.productionSpineEstablished = false;
+			state.recoveryZoneAnchor = 0u;
+			state.survivalCoreZones.clear();
+			state.searchedAssaultObjectives.clear();
+			state.deferredAssaultObjectives.clear();
 			state.lastAppliedTick = 0u;
 			state.nextMacroTick = 0u;
 			state.nextProductionTick = 0u;
@@ -182,7 +192,6 @@
 			state.lastDecisionReason.clear();
 			state.telemetryZonesDirty = true;
 			state.telemetryZones = nlohmann::json::array();
-			state.telemetryEvents = nlohmann::json::array();
 			enemyMemory.clear();
 		}
 

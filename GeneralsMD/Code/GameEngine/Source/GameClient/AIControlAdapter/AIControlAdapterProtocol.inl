@@ -281,6 +281,7 @@
 					{"session_id", m_log.sessionId()},
 					{"capabilities", nlohmann::json::array({
 						"session",
+						"recording_snapshot_v1",
 						"menu_click",
 						"menu_set_text",
 						"menu_select_combobox",
@@ -449,6 +450,8 @@
 		{
 			const std::string cmd = getJsonString(message, "cmd");
 			DEBUG_LOG(("[AICTRL] session_cmd request_id=%s cmd=%s", requestId.c_str(), cmd.c_str()));
+			if (cmd != "Game.Query" && cmd.find("Snapshot") == std::string::npos && cmd != "Autonomy.RecordingEvents" && cmd != "Autonomy.Telemetry" && cmd != "Autonomy.Status")
+				appendRecordingEvent("command", "command_received", cmd.c_str(), 0, 0, "operator", requestId.c_str());
 			if (cmd.empty())
 			{
 				sendActionAck(requestId, false, "bad_request", "missing_cmd");
@@ -584,6 +587,19 @@
 				nlohmann::json result;
 				std::string reason;
 				if (!executeGameCameraGet(message, result, reason))
+				{
+					sendQueryError(requestId, "invalid_state", reason.c_str());
+					return;
+				}
+				sendQueryResult(requestId, result);
+				return;
+			}
+
+			if (cmd == "Game.Display.Get")
+			{
+				nlohmann::json result;
+				std::string reason;
+				if (!executeGameDisplayGet(message, result, reason))
 				{
 					sendQueryError(requestId, "invalid_state", reason.c_str());
 					return;
@@ -895,6 +911,26 @@
 			if (cmd == "Autonomy.Status")
 			{
 				sendQueryResult(requestId, buildAutonomyStatus());
+				return;
+			}
+
+			if (cmd == "Autonomy.RecordingSnapshot" || cmd == "Autonomy.RecordingEvents")
+			{
+				const nlohmann::json args = message.value("args", nlohmann::json::object());
+				if (!args.is_object()) { sendQueryError(requestId, "bad_request", "args_must_be_object"); return; }
+				const auto after = args.find("after_sequence");
+				const auto limit = args.find("max_events");
+				if ((after != args.end() && (!after->is_number_unsigned() && !(after->is_number_integer() && after->get<long long>() >= 0))) ||
+					(limit != args.end() && (!limit->is_number_integer() || limit->get<long long>() < 1)))
+				{ sendQueryError(requestId, "bad_request", "invalid_event_cursor_or_limit"); return; }
+				const auto expected = args.find("match_generation");
+				if (expected != args.end() && !expected->is_number_unsigned() && !(expected->is_number_integer() && expected->get<long long>() >= 0))
+				{ sendQueryError(requestId, "bad_request", "invalid_match_generation"); return; }
+				std::uint64_t cursor = args.value("after_sequence", std::uint64_t(0));
+				if (args.value("match_generation", m_recordingJournal.generation) != m_recordingJournal.generation) cursor = 0;
+				sendQueryResult(requestId, cmd == "Autonomy.RecordingEvents" ?
+					buildRecordingEvents(cursor, args.value("max_events", std::size_t(512))) :
+					buildRecordingSnapshot(cursor, args.value("max_events", std::size_t(512))));
 				return;
 			}
 

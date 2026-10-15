@@ -160,6 +160,7 @@ set(GAMEENGINE_SRC
     Include/GameClient/AIControlAdapter/AIControlAdapterSurvivalPolicyManager.h
     Include/GameClient/AIControlAdapter/AIControlAdapterCombatTask.h
     Include/GameClient/AIControlAdapter/AIControlAdapterProductionManager.h
+    Include/GameClient/AIControlAdapter/AIControlAdapterSimulationClock.h
     Include/GameClient/AIControlAdapter/AIControlAdapterScheduler.h
     Include/GameClient/AIControlAdapter/AIControlAdapterTaskReservation.h
     Include/GameClient/AIControlAdapter/AIControlAdapterTechManager.h

@@ -238,6 +238,7 @@ bool AIControlAdapterShouldHoldArmyCap(const AIControlAdapterCombatProductionPol
 int AIControlAdapterGetEffectiveArmyCap(const AIControlAdapterEffectiveArmyCapPolicyInputs& inputs)
 {
 	const int baseArmyCap = inputs.baseArmyCap > 0 ? inputs.baseArmyCap : 0;
+	if (inputs.isBalancedSprawl && inputs.economicVictory) return 1000;
 	if (!inputs.isBalancedSprawl || inputs.money < 100000u)
 	{
 		return baseArmyCap;
@@ -1064,6 +1065,8 @@ const char* AIControlAdapterStrategicSpendCategoryName(StrategicSpendCategory ca
 	case StrategicSpendCategory::EmergencyDefenseUnits: return "emergency_defense_units";
 	case StrategicSpendCategory::CounterbatteryUnits: return "counterbattery_units";
 	case StrategicSpendCategory::LuxuryBaseline: return "luxury_baseline";
+	case StrategicSpendCategory::ProducerRecovery: return "producer_recovery";
+	case StrategicSpendCategory::ProductionGrowth: return "production_growth";
 	default: return "unknown";
 	}
 }
@@ -1120,7 +1123,7 @@ AIControlAdapterStrategicSpendDecision AIControlAdapterEvaluateStrategicSpend(
 			result.reason = "cash_below_expansion_cost";
 			return result;
 		}
-		if (inputs.expansionUrgent || !recoveryPathNeeded || protectedAffordable)
+		if (protectedAffordable)
 		{
 			result.allowed = true;
 			result.reason = inputs.expansionUrgent ? "urgent_expansion_priority" : "expansion_allowed";
@@ -1129,7 +1132,8 @@ AIControlAdapterStrategicSpendDecision AIControlAdapterEvaluateStrategicSpend(
 		result.reason = "recovery_cash_protected";
 		return result;
 	case StrategicSpendCategory::LocalWorkerRecovery:
-		if (affordable && (protectedAffordable || inputs.staleStrategicFoundations > 0))
+		if (affordable && (protectedAffordable || inputs.staleStrategicFoundations > 0
+			|| (inputs.emergencySurvivalActive && inputs.money >= inputs.requestCost + 600u)))
 		{
 			result.allowed = true;
 			result.reason = "worker_recovery";
@@ -1138,6 +1142,17 @@ AIControlAdapterStrategicSpendDecision AIControlAdapterEvaluateStrategicSpend(
 		{
 			result.reason = affordable ? "recovery_cash_protected" : "cash_below_worker_cost";
 		}
+		return result;
+	case StrategicSpendCategory::ProducerRecovery:
+		// Recovery retains builder funding and, without income, a market allowance.
+		result.protectedCash = inputs.completedMarkets > 0 ? 600u : 3100u;
+		result.spendBudget = inputs.money > result.protectedCash ? inputs.money - result.protectedCash : 0u;
+		result.allowed = result.spendBudget >= inputs.requestCost;
+		result.reason = result.allowed ? "producer_recovery" : "recovery_cash_protected";
+		return result;
+	case StrategicSpendCategory::ProductionGrowth:
+		result.allowed = protectedAffordable;
+		result.reason = result.allowed ? "funded_production_growth" : "recovery_cash_protected";
 		return result;
 	case StrategicSpendCategory::EmergencyDefenseUnits:
 		if (!inputs.emergencySurvivalActive && inputs.activeLocalEnemies <= 0 && !inputs.mainBaseCritical)
@@ -1199,7 +1214,7 @@ AIControlAdapterStrategicSpendDecision AIControlAdapterEvaluateStrategicSpend(
 		}
 		return result;
 	case StrategicSpendCategory::EconomyGrowth:
-		if (affordable && protectedAffordable && !inputs.expansionUrgent)
+		if (affordable && protectedAffordable && (!inputs.expansionUrgent || inputs.money >= inputs.reserveCash + inputs.requestCost + 5000u))
 		{
 			result.allowed = true;
 			result.reason = "growth_allowed";
@@ -2125,6 +2140,7 @@ AIControlAdapterMobileSiegeTemplateResult AIControlAdapterClassifyMobileSiegeTem
 		return { false, "effect_rejected" };
 	}
 	if (lower.find("shell") != std::string::npos ||
+		lower.find("missile") != std::string::npos ||
 		lower.find("projectile") != std::string::npos ||
 		lower.find("weapon") != std::string::npos ||
 		lower.find("explosion") != std::string::npos ||
@@ -2233,7 +2249,7 @@ AIControlAdapterLocalWorkerLiquidityResult AIControlAdapterChooseLocalWorkerLiqu
 		result.reason = "worker_cap_reached";
 		return result;
 	}
-	if (inputs.cashFloat < 3000u)
+	if (inputs.cashFloat < 3000u && !inputs.allowReserveRecovery)
 	{
 		result.reason = "cash_reserved";
 		return result;
@@ -3068,9 +3084,15 @@ AIControlAdapterZoneTerrainResult AIControlAdapterApplyZoneTerrainFacts(
 			const AIControlAdapterTerrainPoint center = { inputs.centerX, inputs.centerY };
 			const float approachDx = feature.position.x - inputs.centerX;
 			const float approachDy = feature.position.y - inputs.centerY;
-			const bool towardFront = ((approachDx * dirX) + (approachDy * dirY)) >= -80.0f;
+			const float approachLen = std::sqrt((approachDx * approachDx) + (approachDy * approachDy));
+			// A nearby entrance may refine the front, but cannot turn it sideways
+			// or select an entrance belonging to a distant starting base.
+			const bool towardFront = approachLen > 0.001f
+				&& ((approachDx * dirX) + (approachDy * dirY)) >= approachLen * 0.5f;
+			const float entranceReach = std::max(160.0f, inputs.radius) * 2.5f;
+			const bool nearbyEntrance = approachLen <= entranceReach;
 			const bool crossesBarrier = AIControlAdapterSegmentCrossesBarrier(facts, center, feature.position);
-			if (towardFront && !crossesBarrier && distSq < nearestEntranceSq)
+			if (towardFront && nearbyEntrance && !crossesBarrier && distSq < nearestEntranceSq)
 			{
 				nearestEntranceSq = distSq;
 				nearestEntrance = &feature;

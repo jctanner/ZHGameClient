@@ -635,6 +635,78 @@ TEST_F(AIControlAdapterCombatTaskTests, Cohesion_TimeoutAdvancesWhenViable)
 	EXPECT_STREQ(decision.reason, "timeout_advancing");
 }
 
+TEST_F(AIControlAdapterCombatTaskTests, Cohesion_PartialStagedCommitAdvancesAfterHold)
+{
+	CombatTaskCohesionDecision decision = evaluateCombatTaskCohesion({
+		28,
+		12,
+		0,
+		0,
+		6,
+		false,
+		true,
+		true,
+		false,
+		22000,
+		20000,
+		40,
+		6
+	});
+
+	EXPECT_TRUE(decision.shouldAdvance);
+	EXPECT_FALSE(decision.shouldFail);
+	EXPECT_STREQ(decision.reason, "staged_commit");
+	EXPECT_EQ(decision.requiredQuorum, 20);
+	EXPECT_EQ(decision.commitQuorum, 12);
+}
+
+TEST_F(AIControlAdapterCombatTaskTests, Cohesion_PartialFinalCommitReportsBaseEntry)
+{
+	CombatTaskCohesionDecision decision = evaluateCombatTaskCohesion({
+		24,
+		10,
+		0,
+		0,
+		6,
+		false,
+		true,
+		true,
+		true,
+		25000,
+		20000,
+		40,
+		6
+	});
+
+	EXPECT_TRUE(decision.shouldAdvance);
+	EXPECT_STREQ(decision.reason, "base_entry_commit");
+	EXPECT_EQ(decision.commitQuorum, 10);
+}
+
+TEST_F(AIControlAdapterCombatTaskTests, Cohesion_PartialCommitWaitsForMeaningfulStrength)
+{
+	CombatTaskCohesionDecision decision = evaluateCombatTaskCohesion({
+		24,
+		5,
+		0,
+		0,
+		6,
+		false,
+		true,
+		true,
+		true,
+		25000,
+		20000,
+		40,
+		6
+	});
+
+	EXPECT_FALSE(decision.shouldAdvance);
+	EXPECT_FALSE(decision.shouldFail);
+	EXPECT_STREQ(decision.reason, "waiting_for_cohesion");
+	EXPECT_EQ(decision.commitQuorum, decision.requiredQuorum);
+}
+
 TEST_F(AIControlAdapterCombatTaskTests, Cohesion_FailsWhenBelowMinimumViable)
 {
 	CombatTaskCohesionDecision decision = evaluateCombatTaskCohesion({

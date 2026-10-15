@@ -18,6 +18,97 @@ bool AIControlAdapterRaidManager::containsIgnoreCase(const std::string& haystack
 	return hay.find(ndl) != std::string::npos;
 }
 
+AIControlAdapterRaidLaunchSelection AIControlAdapterRaidManager::selectLaunchUnitIds(
+	const std::vector<AIControlAdapterRaidLaunchUnitSnapshot>& units,
+	float targetX,
+	float targetY,
+	int minimumUnits,
+	int groupSize,
+	bool includeScudLaunchers,
+	float clusterRadius)
+{
+	AIControlAdapterRaidLaunchSelection result;
+	if (groupSize <= 0 || clusterRadius <= 0.0f) return result;
+	// Reserve roughly ten percent of a wave for siege, with at least one
+	// escort and no more than four launchers. Early waves need not wait for tech.
+	result.desiredScudLaunchers = includeScudLaunchers && groupSize > 1
+		? std::min(4, std::min(groupSize - 1, groupSize / 10 + (groupSize % 10 != 0 ? 1 : 0)))
+		: 0;
+	const int minimumLocalGroup = std::min(std::max(1, minimumUnits), groupSize);
+	const float radiusSq = clusterRadius * clusterRadius;
+	const AIControlAdapterRaidLaunchUnitSnapshot* bestSeed = nullptr;
+	int bestCount = 0;
+	int bestScudCount = 0;
+	float bestTargetDistanceSq = 0.0f;
+	for (const auto& seed : units)
+	{
+		int escortCount = 0;
+		int scudCount = 0;
+		for (const auto& unit : units)
+		{
+			const float dx = unit.x - seed.x;
+			const float dy = unit.y - seed.y;
+			if (dx * dx + dy * dy > radiusSq) continue;
+			if (unit.scudLauncher) ++scudCount;
+			else ++escortCount;
+		}
+		// Excess artillery must not make a launcher-only cluster look viable.
+		scudCount = escortCount > 0 ? std::min(scudCount, result.desiredScudLaunchers) : 0;
+		const int count = std::min(groupSize, escortCount + scudCount);
+		if (count < minimumLocalGroup) continue;
+		const float dx = targetX - seed.x;
+		const float dy = targetY - seed.y;
+		const float targetDistanceSq = dx * dx + dy * dy;
+		if (bestSeed == nullptr || count > bestCount ||
+			(count == bestCount && (scudCount > bestScudCount ||
+			 (scudCount == bestScudCount && (targetDistanceSq < bestTargetDistanceSq ||
+			  (targetDistanceSq == bestTargetDistanceSq && seed.unitId < bestSeed->unitId))))))
+		{
+			bestSeed = &seed;
+			bestCount = count;
+			bestScudCount = scudCount;
+			bestTargetDistanceSq = targetDistanceSq;
+		}
+	}
+	if (bestSeed == nullptr) return result;
+	result.clusterX = bestSeed->x;
+	result.clusterY = bestSeed->y;
+	std::vector<const AIControlAdapterRaidLaunchUnitSnapshot*> local;
+	for (const auto& unit : units)
+	{
+		const float dx = unit.x - bestSeed->x;
+		const float dy = unit.y - bestSeed->y;
+		if (dx * dx + dy * dy <= radiusSq) local.push_back(&unit);
+	}
+	std::sort(local.begin(), local.end(), [&](const AIControlAdapterRaidLaunchUnitSnapshot* a,
+		const AIControlAdapterRaidLaunchUnitSnapshot* b)
+	{
+		const float ax = a->x - bestSeed->x;
+		const float ay = a->y - bestSeed->y;
+		const float bx = b->x - bestSeed->x;
+		const float by = b->y - bestSeed->y;
+		const float aDist = ax * ax + ay * ay;
+		const float bDist = bx * bx + by * by;
+		return aDist != bDist ? aDist < bDist : a->unitId < b->unitId;
+	});
+	// Pick launchers before filling escort slots so distance ordering cannot
+	// consume all seats with Quads/Buggies. Both roles share the same task.
+	for (const auto* unit : local)
+	{
+		if (!unit->scudLauncher || static_cast<int>(result.scudLauncherUnitIds.size()) >= bestScudCount) continue;
+		result.scudLauncherUnitIds.push_back(unit->unitId);
+		result.unitIds.push_back(unit->unitId);
+	}
+	for (const auto* unit : local)
+	{
+		if (static_cast<int>(result.unitIds.size()) >= groupSize) break;
+		if (!unit->scudLauncher) result.unitIds.push_back(unit->unitId);
+	}
+	result.reason = bestScudCount > 0 ? "scud_launchers_included" :
+		(result.desiredScudLaunchers > 0 ? "no_local_scud_launchers" : "scud_slots_disabled");
+	return result;
+}
+
 std::vector<unsigned int> AIControlAdapterRaidManager::selectProbeUnitIds(
 	const std::vector<AIControlAdapterRaidProbeUnitSnapshot>& units,
 	const CombatTaskWaypoint& waypoint,

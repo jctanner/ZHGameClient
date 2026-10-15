@@ -123,6 +123,7 @@ CombatTaskCohesionDecision evaluateCombatTaskCohesion(
 	}
 
 	decision.requiredQuorum = std::max(1, (input.liveAssigned * 70 + 99) / 100);
+	decision.commitQuorum = decision.requiredQuorum;
 	if (input.infantryLive > 0)
 	{
 		decision.infantryRequiredQuorum = std::max(1, (input.infantryLive * 50 + 99) / 100);
@@ -140,10 +141,28 @@ CombatTaskCohesionDecision evaluateCombatTaskCohesion(
 		return decision;
 	}
 
+	if (input.allowPartialCommit && input.cohesionWaitMs >= input.minPartialCommitWaitMs)
+	{
+		const int percent = std::max(1, std::min(100, input.partialCommitPercent));
+		const int percentQuorum = std::max(1, (input.liveAssigned * percent + 99) / 100);
+		const int minArrived = std::max(1, input.partialCommitMinArrived);
+		const int partialFloor = std::min(decision.requiredQuorum, std::max(input.minimumViable, minArrived));
+		const int partialQuorum = std::min(decision.requiredQuorum, std::max(partialFloor, percentQuorum));
+		const bool partialGroupQuorum = input.arrived >= partialQuorum;
+		if (partialGroupQuorum && infantryQuorum)
+		{
+			decision.shouldAdvance = true;
+			decision.commitQuorum = partialQuorum;
+			decision.reason = input.finalWaypoint ? "base_entry_commit" : "staged_commit";
+			return decision;
+		}
+	}
+
 	if (input.timeout)
 	{
-		decision.shouldAdvance = true;
-		decision.reason = "timeout_advancing";
+		decision.shouldFail = input.retreatOnTimeout;
+		decision.shouldAdvance = !input.retreatOnTimeout;
+		decision.reason = input.retreatOnTimeout ? "stage_timeout_no_quorum" : "timeout_advancing";
 		return decision;
 	}
 
@@ -305,7 +324,7 @@ CombatTaskProbeDecision evaluateCombatTaskProbePolicy(
 			return decision;
 		}
 		if (input.probeStartedTick > 0 &&
-			input.currentTick >= input.probeStartedTick + input.probeTimeoutMs)
+			(input.currentTick - input.probeStartedTick) >= input.probeTimeoutMs)
 		{
 			decision.shouldTimeout = true;
 			decision.mode = "timeout";
@@ -333,7 +352,7 @@ CombatTaskProbeDecision evaluateCombatTaskProbePolicy(
 		return decision;
 	}
 	if (input.lastProbeEndTick > 0 &&
-		input.currentTick < input.lastProbeEndTick + input.cooldownMs)
+		(input.currentTick - input.lastProbeEndTick) < input.cooldownMs)
 	{
 		decision.reason = "probe_cooldown";
 		return decision;
@@ -768,7 +787,7 @@ unsigned int AIControlAdapterCombatTaskManager::createTask(
 	unsigned int timeoutMs)
 {
 	const unsigned int taskId = nextTaskId++;
-	const DWORD now = ::GetTickCount();
+	const DWORD now = (m_clock != nullptr ? m_clock() : ::GetTickCount());
 
 	CombatTask task;
 	task.taskId = taskId;
@@ -788,6 +807,7 @@ unsigned int AIControlAdapterCombatTaskManager::createTask(
 	task.minimumViableCount = std::max(1, task.initialUnitCount * 30 / 100);
 
 	tasks[taskId] = task;
+	if (m_recordingSink) m_recordingSink(m_recordingContext, "combat", "task_created", taskId, 0, "assembling", owner.c_str(), reason.c_str());
 	return taskId;
 }
 
@@ -897,8 +917,16 @@ bool AIControlAdapterCombatTaskManager::updateTaskState(
 		return false;
 	}
 
+	const bool changed = task->state != newState || task->reason != reason;
 	task->state = newState;
 	task->reason = reason;
+	if (changed && m_recordingSink)
+	{
+		const char* label = newState == CombatTaskState::Complete ? "task_complete" :
+			(newState == CombatTaskState::Failed || newState == CombatTaskState::Expired ? "task_failed" : "task_state");
+		m_recordingSink(m_recordingContext, "combat", label, taskId, task->targetObjectId,
+			combatTaskStateName(newState), task->owner.c_str(), reason.c_str());
+	}
 	return true;
 }
 
@@ -991,9 +1019,10 @@ void AIControlAdapterCombatTaskManager::updateTasks(DWORD currentTick)
 			task.state != CombatTaskState::Expired)
 		{
 			// Check for timeout
-			if (currentTick >= task.timeoutTick)
+			if (!task.manageTimeoutExternally && static_cast<int>(currentTick - task.timeoutTick) >= 0)
 			{
 				task.state = CombatTaskState::Expired;
+				if (m_recordingSink) m_recordingSink(m_recordingContext, "combat", "task_failed", task.taskId, task.targetObjectId, "expired", task.owner.c_str(), "timeout");
 				task.reason = "timeout";
 			}
 		}

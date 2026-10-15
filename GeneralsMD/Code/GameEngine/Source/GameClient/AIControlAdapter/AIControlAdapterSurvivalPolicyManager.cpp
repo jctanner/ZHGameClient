@@ -7,7 +7,7 @@ AIControlAdapterSurvivalPolicyResult AIControlAdapterSurvivalPolicyManager::Eval
 {
 	AIControlAdapterSurvivalPolicyResult result;
 	const bool reserveDepleted = input.money < input.reserveCash;
-	result.wmdCrisis = input.enemyWmdTargets > 0 && input.readyScudStorms <= 0;
+	result.wmdCrisis = input.allowSuperweapons && input.enemyWmdTargets > 0 && input.readyScudStorms <= 0;
 	result.producerSpineBroken = input.readyBarracks <= 0 || input.readyArmsDealers <= 0;
 	result.collapseImminent =
 		(input.criticalZoneCount >= 2 && input.activeCombatTasks <= 0) ||
@@ -41,6 +41,12 @@ AIControlAdapterSurvivalPolicyResult AIControlAdapterSurvivalPolicyManager::Eval
 		result.priority = "stabilize_front";
 		result.reason = input.criticalZoneCount > 0 ? "critical_zone_pressure" : "defense_reserve_deficit";
 		return result;
+	}
+	if (input.enemyWmdTargets > 0 && !input.allowSuperweapons)
+	{
+		result.state = "under_pressure";
+		result.priority = "conventional_wmd_response";
+		result.reason = "superweapons_disabled";
 	}
 
 	return result;

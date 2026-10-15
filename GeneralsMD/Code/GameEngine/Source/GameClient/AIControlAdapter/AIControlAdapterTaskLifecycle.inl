@@ -77,26 +77,46 @@ bool hasActiveBuilderForFoundation(Player* player, ObjectID foundationId)
 	{
 		return false;
 	}
-	for (Object* worker = TheGameLogic->getFirstObject(); worker != nullptr; worker = worker->getNextObject())
+	Object* foundation = TheGameLogic->findObjectByID(foundationId);
+	if (foundation == nullptr || foundation->isEffectivelyDead() ||
+		foundation->getControllingPlayer() != player ||
+		!foundation->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION)) return false;
+	Object* worker = TheGameLogic->findObjectByID(foundation->getBuilderID());
+	return worker != nullptr && !worker->isEffectivelyDead() &&
+		worker->getControllingPlayer() == player && worker->isKindOf(KINDOF_DOZER) &&
+		worker->getAI() != nullptr && !worker->getAI()->isIdle();
+}
+
+void updateStrategicFoundationProgress(Object* foundation, AutonomyStrategicFoundationState& state, DWORD now)
+{
+	if (foundation == nullptr || (state.firstSeenTick != 0u && state.lastSeenTick == now)) return;
+	if (state.firstSeenTick == 0u)
 	{
-		if (worker == nullptr || worker->isEffectivelyDead())
+		appendRecordingEvent("construction", "foundation_seen", state.templateName.c_str(), 0, static_cast<unsigned int>(foundation->getID()));
+		state.firstSeenTick = now;
+		state.lastProgressTick = now;
+	}
+	state.lastSeenTick = now;
+	state.lastHealth = getObjectHealthForStrategicFoundation(foundation);
+	state.maxHealth = getObjectMaxHealthForStrategicFoundation(foundation);
+	const Coord3D* pos = foundation->getPosition();
+	if (pos != nullptr) { state.x = pos->x; state.y = pos->y; state.z = pos->z; }
+	if (state.lastHealth < 0.0f) return;
+	// Accumulate small frame gains; damage establishes a new baseline, not progress.
+	if (state.progressHealth < 0.0f || state.lastHealth > state.progressHealth + 1.0f)
+	{
+		state.progressHealth = state.lastHealth;
+		state.lastProgressTick = now;
+		state.reason = "healthy_in_progress";
+		if (state.stopIssued)
 		{
-			continue;
-		}
-		if (worker->getControllingPlayer() != player)
-		{
-			continue;
-		}
-		if (!worker->isKindOf(KINDOF_DOZER))
-		{
-			continue;
-		}
-		if (worker->getBuilderID() == foundationId)
-		{
-			return true;
+			appendRecordingEvent("construction", "foundation_progress_resumed", state.templateName.c_str(), 0, static_cast<unsigned int>(foundation->getID()));
+			state.stopIssued = false;
+			state.recoveryAttempts = 0;
+			m_autonomy.taskReservationManager.clearFoundationTombstone(static_cast<unsigned int>(foundation->getID()));
 		}
 	}
-	return false;
+	else if (state.lastHealth < state.progressHealth) state.progressHealth = state.lastHealth;
 }
 
 void adoptOrphanFoundations(Player* player)
@@ -106,7 +126,7 @@ void adoptOrphanFoundations(Player* player)
 		return;
 	}
 
-	const DWORD now = ::GetTickCount();
+	const DWORD now = adapterGameplayTick();
 
 	// Scan all owned under-construction structures
 	for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
@@ -210,32 +230,10 @@ void adoptOrphanFoundations(Player* player)
 				const bool reserveProtected = currentMoney >= profilePolicyConfig.reserveCash + 5000u;
 				AutonomyStrategicFoundationState& strategicState =
 					m_autonomy.state.strategicFoundationHealth[static_cast<UnsignedInt>(foundationId)];
-				if (strategicState.firstSeenTick == 0u)
-				{
-					strategicState.firstSeenTick = now;
-				}
 				strategicState.templateName = templateName;
-				strategicState.x = foundationPos->x;
-				strategicState.y = foundationPos->y;
-				strategicState.z = foundationPos->z;
-				strategicState.lastSeenTick = now;
-				strategicState.lastHealth = currentHealth;
-				strategicState.maxHealth = maxHealth;
-				AIControlAdapterStrategicFoundationFact fact;
-				fact.foundationId = static_cast<unsigned int>(foundationId);
-				fact.templateName = templateName;
-				fact.x = foundationPos->x;
-				fact.y = foundationPos->y;
-				fact.lastHealth = currentHealth;
-				fact.maxHealth = maxHealth;
-				fact.nowTick = now;
-				fact.firstSeenTick = strategicState.firstSeenTick;
-				fact.lastSeenTick = strategicState.lastSeenTick;
-				fact.lastProgressTick = strategicState.lastProgressTick;
-				fact.recoveryAttempts = strategicState.recoveryAttempts;
-				fact.stopIssued = strategicState.stopIssued;
-				fact.tombstoned = true;
-				fact.activeWmdThreat = activeWmdThreat;
+				updateStrategicFoundationProgress(obj, strategicState, now);
+				AIControlAdapterStrategicFoundationFact fact = observeStrategicFoundation(
+					player, static_cast<UnsignedInt>(foundationId), strategicState, now, activeWmdThreat);
 				fact.reason = strategicState.reason.empty() ? tombstoneReason : strategicState.reason;
 				const AIControlAdapterStrategicFoundationClassification classification =
 					AIControlAdapterStrategicFoundationSurvivalManager().Classify(fact);
@@ -286,30 +284,8 @@ void adoptOrphanFoundations(Player* player)
 				}
 			}
 
-			// Check if anyone is actively building it
-			bool hasActiveBuilder = false;
-			unsigned int activeBuilderWorkerId = 0;
-			for (Object* worker = TheGameLogic->getFirstObject(); worker != nullptr; worker = worker->getNextObject())
-			{
-				if (worker->isEffectivelyDead())
-				{
-					continue;
-				}
-				if (worker->getControllingPlayer() != player)
-				{
-					continue;
-				}
-				if (!worker->isKindOf(KINDOF_DOZER))
-				{
-					continue;
-				}
-				if (worker->getBuilderID() == foundationId)
-				{
-					hasActiveBuilder = true;
-					activeBuilderWorkerId = worker->getID();
-					break;
-				}
-			}
+			const bool hasActiveBuilder = hasActiveBuilderForFoundation(player, foundationId);
+			const unsigned int activeBuilderWorkerId = hasActiveBuilder ? static_cast<unsigned int>(obj->getBuilderID()) : 0u;
 
 			// Create adoption task
 			const unsigned int taskId = m_autonomy.taskReservationManager.createReservation(
@@ -367,7 +343,7 @@ void updateConstructionTaskLifecycle(Player* player)
 		return;
 	}
 
-	const DWORD now = ::GetTickCount();
+	const DWORD now = adapterGameplayTick();
 
 	// Prune expired tasks
 	m_autonomy.taskReservationManager.pruneExpiredTasks(now);
@@ -539,62 +515,11 @@ void updateConstructionTaskLifecycle(Player* player)
 					{
 						AutonomyStrategicFoundationState& foundationState =
 							m_autonomy.state.strategicFoundationHealth[static_cast<UnsignedInt>(foundationId)];
-						if (foundationState.firstSeenTick == 0u)
-						{
-							foundationState.firstSeenTick = now;
-							foundationState.lastProgressTick = now;
-						}
 						foundationState.templateName = task->expectedTemplate;
-						foundationState.lastSeenTick = now;
-						const Real currentHealth = getObjectHealthForStrategicFoundation(foundFoundation);
-						foundationState.maxHealth = getObjectMaxHealthForStrategicFoundation(foundFoundation);
-						if (foundationState.lastHealth < 0.0f || currentHealth > foundationState.lastHealth + 1.0f)
-						{
-							foundationState.lastProgressTick = now;
-							foundationState.reason = "healthy_in_progress";
-						}
-						foundationState.lastHealth = currentHealth;
+						updateStrategicFoundationProgress(foundFoundation, foundationState, now);
 					}
 
-					// Check if original worker is building it
-					if (workerExists)
-					{
-						AIUpdateInterface* ai = worker->getAI();
-						if (ai != nullptr && !ai->isIdle())
-						{
-							// Check if worker's builder target matches this foundation
-							const ObjectID builderTarget = worker->getBuilderID();
-							if (builderTarget == foundationId)
-							{
-								hasActiveBuilder = true;
-							}
-						}
-					}
-
-					// Check if any other worker is building it
-					if (!hasActiveBuilder)
-					{
-						for (Object* otherWorker = TheGameLogic->getFirstObject(); otherWorker != nullptr; otherWorker = otherWorker->getNextObject())
-						{
-							if (otherWorker->isEffectivelyDead())
-							{
-								continue;
-							}
-							if (otherWorker->getControllingPlayer() != player)
-							{
-								continue;
-							}
-							if (!otherWorker->isKindOf(KINDOF_DOZER))
-							{
-								continue;
-							}
-							if (otherWorker->getBuilderID() == foundationId)
-							{
-								hasActiveBuilder = true;
-								break;
-							}
-						}
-					}
+					hasActiveBuilder = hasActiveBuilderForFoundation(player, foundationId);
 
 					// If no active builder, foundation is stalled - needs recovery
 					if (!hasActiveBuilder)
@@ -631,6 +556,7 @@ void updateConstructionTaskLifecycle(Player* player)
 					else
 					{
 						// Active builder found, update last seen
+						task->reason = "active_builder";
 						task->lastSeenTick = now;
 						task->lastUpdateTick = now;
 					}
@@ -697,7 +623,7 @@ void attemptAbandonedFoundationRecovery(Player* player)
 	{
 		return;
 	}
-	const DWORD now = ::GetTickCount();
+	const DWORD now = adapterGameplayTick();
 
 	// Get all active build tasks
 	std::vector<SpecialTaskReservation*> buildTasks = m_autonomy.taskReservationManager.findBuildTasks();
@@ -734,6 +660,14 @@ void attemptAbandonedFoundationRecovery(Player* player)
 			continue;
 		}
 
+		if (hasActiveBuilderForFoundation(player, foundation->getID()))
+		{
+			task->reason = "active_builder";
+			task->lastSeenTick = now;
+			task->lastUpdateTick = now;
+			continue;
+		}
+
 		const Coord3D* foundationPos = foundation->getPosition();
 		if (foundationPos == nullptr)
 		{
@@ -744,24 +678,8 @@ void attemptAbandonedFoundationRecovery(Player* player)
 		if (isPhase79Strategic)
 		{
 			strategicState = &m_autonomy.state.strategicFoundationHealth[static_cast<UnsignedInt>(foundation->getID())];
-			if (strategicState->firstSeenTick == 0u)
-			{
-				strategicState->firstSeenTick = now;
-				strategicState->lastProgressTick = now;
-			}
 			strategicState->templateName = task->expectedTemplate;
-			strategicState->x = foundationPos->x;
-			strategicState->y = foundationPos->y;
-			strategicState->z = foundationPos->z;
-			strategicState->lastSeenTick = now;
-			const Real currentHealth = getObjectHealthForStrategicFoundation(foundation);
-			strategicState->maxHealth = getObjectMaxHealthForStrategicFoundation(foundation);
-			if (strategicState->lastHealth < 0.0f || currentHealth > strategicState->lastHealth + 1.0f)
-			{
-				strategicState->lastProgressTick = now;
-			}
-			strategicState->lastHealth = currentHealth;
-
+			updateStrategicFoundationProgress(foundation, *strategicState, now);
 			const DWORD noProgressMs = now - strategicState->lastProgressTick;
 			const bool workerDead = (task->sourceObjectId != 0u &&
 				(TheGameLogic->findObjectByID(static_cast<ObjectID>(task->sourceObjectId)) == nullptr ||
@@ -780,6 +698,7 @@ void attemptAbandonedFoundationRecovery(Player* player)
 					}
 					return true;
 				});
+				appendRecordingEvent("construction", stopIssued ? "foundation_stop_issued" : "foundation_stop_rejected", stopIssued ? stopReason : stopCommandReason.c_str(), task->taskId, static_cast<unsigned int>(foundation->getID()));
 				strategicState->stopIssued = stopIssued;
 				strategicState->reason = workerDead ? "stopped_worker_dead" : "stopped_stale_no_progress";
 				adapterLog(
@@ -1092,7 +1011,7 @@ void attemptAbandonedFoundationRecovery(Player* player)
 			// Update task: reset stalled state and update source worker
 			task->sourceObjectId = bestWorker->getID();
 			task->reason = "worker_reassigned";
-			task->lastUpdateTick = ::GetTickCount();
+			task->lastUpdateTick = adapterGameplayTick();
 
 			// Reserve the reassigned worker
 			reserveWorkerForBuild(bestWorker, 30000u);
@@ -1100,7 +1019,7 @@ void attemptAbandonedFoundationRecovery(Player* player)
 		else
 		{
 			// No suitable worker found for recovery
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			const DWORD stalledDuration = now - task->createdTick;
 
 			if (stalledDuration > 60000u) // 60 seconds total stall - give up
@@ -1167,7 +1086,7 @@ void logStrategicFoundationHealth(Player* player)
 		int damaged = 0;
 	};
 	std::map<std::string, Counts> countsByTemplate;
-	const DWORD now = ::GetTickCount();
+	const DWORD now = adapterGameplayTick();
 
 	for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
 	{

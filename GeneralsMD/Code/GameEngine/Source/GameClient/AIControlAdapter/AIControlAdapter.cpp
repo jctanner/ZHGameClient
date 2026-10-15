@@ -64,9 +64,12 @@
 #include "GameClient/MapUtil.h"
 #include "GameLogic/AI.h"
 #include "GameLogic/GameLogic.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterSimulationClock.h"
+#include "GameClient/AIControlAdapter/AIControlAdapterRecordingJournal.h"
 #include "GameLogic/PartitionManager.h"
 #include "GameLogic/TerrainLogic.h"
 #include "GameLogic/VictoryConditions.h"
+#include "GameLogic/Weapon.h"
 #include "GameLogic/Module/AIUpdate.h"
 #include "GameLogic/Module/BodyModule.h"
 #include "GameLogic/Module/ContainModule.h"
@@ -101,6 +104,11 @@ extern void skirmishUpdateSlotList();
 #include <cstdarg>
 #include <cstdio>
 #include <share.h>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <chrono>
 
 namespace
 {
@@ -284,10 +292,19 @@ namespace
 		bool donorAllowed = false;
 	};
 
+	struct AutonomyWorkerTransfer
+	{
+		UnsignedInt zoneId = 0u;
+		Real x = 0.0f;
+		Real y = 0.0f;
+		DWORD expiresTick = 0u;
+	};
+
 	struct AutonomyStrategicFoundationState
 	{
 		std::string templateName;
 		Real lastHealth = -1.0f;
+		Real progressHealth = -1.0f;
 		Real maxHealth = -1.0f;
 		Real x = 0.0f;
 		Real y = 0.0f;
@@ -364,13 +381,22 @@ namespace
 	{
 		std::string mode;
 		std::string profile;
+		std::map<std::string, bool> ruleOverrides;
+		std::map<std::string, std::pair<std::string, DWORD>> ruleBlocks;
+		unsigned int ruleRevision = 0u;
+		DWORD ruleChangedTick = 0u;
 		bool paused;
 		bool hasAttackAutomationEnabledOverride;
 		bool attackAutomationEnabled;
-		bool captureTech;
-		bool allowSuperweapons;
-		bool hasExplicitPlayerIndex;
-		Int playerIndex;
+			bool captureTech;
+			bool allowSuperweapons;
+			bool simCommandsEnabled;
+			bool hasExplicitSimCommandsEnabled;
+			bool workerShuttlesEnabled;
+			bool technicalScoutShuttlesEnabled;
+			bool garrisonsEnabled;
+			bool hasExplicitPlayerIndex;
+			Int playerIndex;
 		bool hasExplicitTargetPlayerIndex;
 		Int targetPlayerIndex;
 		Real economyBias;
@@ -423,12 +449,31 @@ namespace
 		bool telemetryZonesDirty;
 		UnsignedInt zonesSnapshotVersion;
 		DWORD zonesSnapshotTick;
+		AIControlAdapterProfileSpendPlan profileSpendPlan;
+		DWORD profileThreatUntilTick = 0u;
+		DWORD profileOffenseFundedSinceTick = 0u;
+		int profileCompletedMarkets = 0;
+		int profileArmyObserved = 0;
+		unsigned int profileAvailableCash = 0u;
+		unsigned int profileConstructionCommittedCash = 0u;
+		unsigned int profileUnitCommittedCash = 0u;
+		DWORD profilePlanTick = 0u;
+		bool economicVictory = false;
+		Int economicVictoryPlayerIndex = -1;
+		DWORD economicVictoryTick = 0u;
+		std::string economicVictoryReason = "pending";
+		DWORD nextAssaultTick = 0u;
+		DWORD survivalRecoveryUntilTick = 0u;
+		bool productionSpineEstablished = false;
+		UnsignedInt recoveryZoneAnchor = 0u;
+		std::set<UnsignedInt> survivalCoreZones;
+		std::unordered_map<UnsignedInt, DWORD> searchedAssaultObjectives;
+		std::unordered_map<UnsignedInt, DWORD> deferredAssaultObjectives;
 		bool hasCashRateSample;
 		UnsignedInt lastCashRateMoney;
 		DWORD lastCashRateTick;
 		Real smoothedNetCashPerMinute;
 		nlohmann::json telemetryZones;
-		nlohmann::json telemetryEvents;
 		std::unordered_map<UnsignedInt, AutonomyTrackedObjectHealth> trackedStructureHealth;
 		std::unordered_map<UnsignedInt, AutonomyZoneThreatState> zoneThreats;
 		std::unordered_map<UnsignedInt, AutonomyZoneDefenseAllocation> zoneDefenseAllocations;
@@ -441,6 +486,9 @@ namespace
 		nlohmann::json staticDefenseTelemetry;
 		nlohmann::json palaceRedundancyTelemetry;
 		nlohmann::json garrisonTelemetry;
+		std::map<UnsignedInt, AutonomyWorkerTransfer> workerTransfers;
+		nlohmann::json workerLiquidityTelemetry;
+		nlohmann::json productionTelemetry;
 		nlohmann::json scoutingTelemetry;
 		nlohmann::json counterbatteryTelemetry;
 		nlohmann::json brutalPressureTelemetry;
@@ -508,6 +556,12 @@ namespace
 
 	#include "AIControlAdapterSchedulerIntegration.inl"
 
+	static unsigned int adapterGameplayTick()
+	{
+		return AIControlAdapterSimulationTick(TheGameLogic != nullptr ? TheGameLogic->getFrame() : 0u,
+			LOGICFRAMES_PER_SECOND);
+	}
+
 	class AIControlAdapterState
 	{
 	public:
@@ -529,12 +583,22 @@ namespace
 
 		void reset()
 		{
+			m_recordingJournal.beginMatch();
+			m_recordingSnapshotCache = nlohmann::json();
+			m_recordingSnapshotCacheWall = 0u;
+			m_recordingProducerSamples = m_recordingProducerUs = m_recordingProducerMaxUs = 0;
+			m_recordingUpdateSamples = m_recordingUpdateUs = m_recordingUpdateMaxUs = 0;
+			m_recordingUpdateHistogram.fill(0);
 			m_transport.clearLineBuffer();
 			m_lastAutoSupplySourceByPlayer.clear();
 			m_reservedBuildLocations.clear();
 			m_buildExpansionRadiusByKey.clear();
 			m_cache.reset();
+			m_workers.reset();
+			m_workerShuttleManager = AIControlAdapterWorkerShuttleManager();
 			m_automation.reset();
+			m_autonomy = AdapterAutonomyState();
+			m_pendingUnitQueues.clear();
 			resetAutonomyState();
 			m_terrainMapCacheService.clear();
 			m_mapFileTerrainMergeLoggedKeys.clear();
@@ -543,6 +607,7 @@ namespace
 
 		void update()
 		{
+			LARGE_INTEGER started; ::QueryPerformanceCounter(&started);
 			m_transport.ensurePipeCreated();
 			m_transport.ensureTcpCreated();
 			if (!m_transport.hasListener())
@@ -558,9 +623,36 @@ namespace
 
 			// Autonomy should run even when no client is connected
 			evaluateAutomationRules();
+			LARGE_INTEGER ended, frequency; ::QueryPerformanceCounter(&ended); ::QueryPerformanceFrequency(&frequency);
+			const std::uint64_t elapsed = frequency.QuadPart > 0 ? (ended.QuadPart - started.QuadPart) * 1000000 / frequency.QuadPart : 0;
+			++m_recordingUpdateSamples; m_recordingUpdateUs += elapsed;
+			m_recordingUpdateMaxUs = std::max(m_recordingUpdateMaxUs, elapsed);
+			++m_recordingUpdateHistogram[std::min<std::size_t>(127, static_cast<std::size_t>(elapsed / 100))];
 		}
 
 	private:
+		DWORD m_nextScudStormEvaluationTick = 0u;
+		DWORD m_nextScudStormBuildTick = 0u;
+		DWORD m_nextScudStormFireTick = 0u;
+		DWORD m_nextCaptureSourceSearchLogTick = 0u;
+		struct PendingUnitQueue
+		{
+			ObjectID producerId;
+			ProductionID productionId;
+			Int playerIndex;
+			UnsignedInt cost;
+			DWORD issuedTick;
+			std::string templateName;
+		};
+		std::vector<PendingUnitQueue> m_pendingUnitQueues;
+
+		AIControlAdapterRecordingJournal m_recordingJournal;
+		nlohmann::json m_recordingSnapshotCache;
+		DWORD m_recordingSnapshotCacheWall = 0u;
+		unsigned int m_recordingTerminalGeneration = 0u;
+		std::uint64_t m_recordingProducerSamples = 0, m_recordingProducerUs = 0, m_recordingProducerMaxUs = 0;
+		std::uint64_t m_recordingUpdateSamples = 0, m_recordingUpdateUs = 0, m_recordingUpdateMaxUs = 0;
+		std::array<std::uint64_t, 128> m_recordingUpdateHistogram{};
 		AdapterLog m_log;
 		AdapterTransport m_transport;
 
@@ -581,11 +673,13 @@ namespace
 
 		void sendJsonLine(const nlohmann::json& payload) { m_transport.sendJsonLine(payload); }
 		void sendProtocolError(const std::string& requestId, const char* code, const char* reason) { m_transport.sendProtocolError(requestId, code, reason); }
-		void sendActionAck(const std::string& requestId, bool ok, const char* code = nullptr, const char* reason = nullptr) { m_transport.sendActionAck(requestId, ok, code, reason); }
+		void sendActionAck(const std::string& requestId, bool ok, const char* code = nullptr, const char* reason = nullptr) { appendRecordingEvent("command", ok ? "command_accepted" : "command_rejected", reason != nullptr ? reason : (code != nullptr ? code : ""), 0, 0, "operator", requestId.c_str()); m_transport.sendActionAck(requestId, ok, code, reason); }
 		void sendQueryResult(const std::string& requestId, const nlohmann::json& result) { m_transport.sendQueryResult(requestId, result); }
 		void sendQueryError(const std::string& requestId, const char* code, const char* reason) { m_transport.sendQueryError(requestId, code, reason); }
 		std::unordered_map<Int, Int> m_lastAutoSupplySourceByPlayer;
 		AdapterWorkersState m_workers;
+		bool m_profileAutomaticSpendScope = false;
+		bool m_ruleExpansionConstructionScope = false;
 		std::vector<PendingBuildLocationReservation> m_reservedBuildLocations;
 		std::unordered_map<std::string, Real> m_buildExpansionRadiusByKey;
 		AdapterObjectCache m_cache;
@@ -597,14 +691,31 @@ namespace
 
 		void resetAutonomyState()
 		{
+			m_autonomy.taskReservationManager.setClock(adapterGameplayTick);
+			m_autonomy.combatTaskManager.setClock(adapterGameplayTick);
+			m_autonomy.combatTaskManager.setRecordingSink(onRecordingTask, this);
+			m_autonomy.taskReservationManager.setRecordingSink(onRecordingTask, this);
+			m_nextScudStormEvaluationTick = 0u;
+			m_nextScudStormBuildTick = 0u;
+			m_nextScudStormFireTick = 0u;
+			m_nextCaptureSourceSearchLogTick = 0u;
 			m_autonomy.state.mode = "manual";
 			m_autonomy.state.profile = "sprawl_balanced";
 			m_autonomy.state.paused = false;
+			m_autonomy.state.ruleOverrides.clear();
+			m_autonomy.state.ruleBlocks.clear();
+			m_autonomy.state.ruleRevision = 0u;
+			m_autonomy.state.ruleChangedTick = 0u;
 			m_autonomy.state.hasAttackAutomationEnabledOverride = false;
 			m_autonomy.state.attackAutomationEnabled = true;
 			m_autonomy.state.captureTech = true;
-			m_autonomy.state.allowSuperweapons = false;
-			m_autonomy.state.hasExplicitPlayerIndex = false;
+				m_autonomy.state.allowSuperweapons = false;
+				m_autonomy.state.simCommandsEnabled = true;
+				m_autonomy.state.hasExplicitSimCommandsEnabled = false;
+				m_autonomy.state.workerShuttlesEnabled = true;
+				m_autonomy.state.technicalScoutShuttlesEnabled = true;
+				m_autonomy.state.garrisonsEnabled = true;
+				m_autonomy.state.hasExplicitPlayerIndex = false;
 			m_autonomy.state.playerIndex = -1;
 			m_autonomy.state.hasExplicitTargetPlayerIndex = false;
 			m_autonomy.state.targetPlayerIndex = -1;
@@ -658,22 +769,32 @@ namespace
 			m_autonomy.state.telemetryZonesDirty = true;
 			m_autonomy.state.zonesSnapshotVersion = 0u;
 			m_autonomy.state.zonesSnapshotTick = 0u;
+			resetEconomicVictory();
 			m_autonomy.state.hasCashRateSample = false;
 			m_autonomy.state.lastCashRateMoney = 0u;
 			m_autonomy.state.lastCashRateTick = 0u;
 			m_autonomy.state.smoothedNetCashPerMinute = 0.0f;
 			m_autonomy.state.telemetryZones = nlohmann::json::array();
-			m_autonomy.state.telemetryEvents = nlohmann::json::array();
+			m_recordingJournal.clearRecent();
 			m_autonomy.state.trackedStructureHealth.clear();
 			m_autonomy.state.zoneThreats.clear();
 			m_autonomy.state.zoneDefenseAllocations.clear();
 			m_autonomy.state.zoneDefenseReserves.clear();
+			m_autonomy.state.survivalRecoveryUntilTick = 0u;
+			m_autonomy.state.productionSpineEstablished = false;
+			m_autonomy.state.recoveryZoneAnchor = 0u;
+			m_autonomy.state.survivalCoreZones.clear();
 			m_autonomy.state.strategicFoundationHealth.clear();
 			m_autonomy.state.garrisonAssignments.clear();
 			m_autonomy.state.zoneThreatTelemetry = nlohmann::json::array();
 			m_autonomy.state.staticDefenseTelemetry = nlohmann::json::array();
 			m_autonomy.state.palaceRedundancyTelemetry = nlohmann::json::array();
 			m_autonomy.state.garrisonTelemetry = nlohmann::json::array();
+			for (const auto& transfer : m_autonomy.state.workerTransfers)
+				m_workers.reservedWorkersUntilTick.erase(static_cast<ObjectID>(transfer.first));
+			m_autonomy.state.workerTransfers.clear();
+			m_autonomy.state.workerLiquidityTelemetry = nlohmann::json::object();
+			m_autonomy.state.productionTelemetry = nlohmann::json::object();
 			m_autonomy.state.scoutingTelemetry = nlohmann::json::object();
 			m_autonomy.state.counterbatteryTelemetry = nlohmann::json::object();
 			m_autonomy.state.brutalPressureTelemetry = nlohmann::json::object();
@@ -709,7 +830,7 @@ namespace
 			m_autonomy.state.activeMatchIdentity.clear();
 			if (m_autonomy.state.matchOutcomeStartTick == 0u)
 			{
-				m_autonomy.state.matchOutcomeStartTick = ::GetTickCount();
+				m_autonomy.state.matchOutcomeStartTick = adapterGameplayTick();
 			}
 		}
 
@@ -729,6 +850,21 @@ namespace
 				return getPlayerByIndex(m_autonomy.state.playerIndex);
 			}
 			return ThePlayerList != nullptr ? ThePlayerList->getLocalPlayer() : nullptr;
+		}
+
+		bool areAutonomySimCommandsEnabled() const
+		{
+			if (!m_autonomy.state.simCommandsEnabled)
+			{
+				return false;
+			}
+			if (TheGameLogic != nullptr
+				&& TheGameLogic->isInMultiplayerGame()
+				&& !m_autonomy.state.hasExplicitSimCommandsEnabled)
+			{
+				return false;
+			}
+			return true;
 		}
 
 		struct AutomationOwnedObjectSnapshot
@@ -822,38 +958,123 @@ namespace
 			clearRadarVanAutomationRule();
 		}
 
-		void recordAutonomyTelemetryEvent(
-			const char* kind,
-			const std::string& label,
-			const std::string& reason,
-			const Coord3D* position = nullptr)
+		static void onRecordingTask(void* context, const char* kind, const char* label,
+			unsigned int taskId, unsigned int objectId, const char* state, const char* owner, const char* reason)
 		{
-			if (kind == nullptr || kind[0] == '\0')
-			{
-				return;
-			}
+			static_cast<AIControlAdapterState*>(context)->appendRecordingEvent(kind, label, reason, taskId, objectId, owner, "", state);
+		}
 
-			nlohmann::json event = nlohmann::json::object({
-				{"kind", kind},
-				{"label", label},
-				{"reason", reason},
-				{"tick", static_cast<UnsignedInt>(::GetTickCount())}
-			});
-			if (position != nullptr)
+		void appendRecordingEvent(const char* kind, const char* label, const char* reason,
+			unsigned int taskId = 0, unsigned int objectId = 0, const char* owner = "",
+			const char* requestId = "", const char* state = "", const Coord3D* position = nullptr, bool recentEligible = false, unsigned int productionId = 0)
+		{
+			const bool sample = (m_recordingJournal.nextSequence & 63u) == 0u;
+			LARGE_INTEGER started; if (sample) ::QueryPerformanceCounter(&started);
+			Player* player = resolveAutonomyPlayer();
+			float xy[2] = { position != nullptr ? position->x : 0.0f, position != nullptr ? position->y : 0.0f };
+			m_recordingJournal.append(kind, label, reason, adapterGameplayTick(),
+				TheGameLogic != nullptr ? TheGameLogic->getFrame() : 0u,
+				player != nullptr ? player->getPlayerIndex() : -1,
+				taskId, objectId, owner, requestId, state, position != nullptr ? xy : nullptr, recentEligible, productionId);
+			if (sample)
 			{
-				event["x"] = position->x;
-				event["y"] = position->y;
+				LARGE_INTEGER ended, frequency; ::QueryPerformanceCounter(&ended); ::QueryPerformanceFrequency(&frequency);
+				const std::uint64_t elapsed = frequency.QuadPart > 0 ? (ended.QuadPart - started.QuadPart) * 1000000 / frequency.QuadPart : 0;
+				++m_recordingProducerSamples; m_recordingProducerUs += elapsed; m_recordingProducerMaxUs = std::max(m_recordingProducerMaxUs, elapsed);
 			}
+		}
 
-			if (!m_autonomy.state.telemetryEvents.is_array())
+		static nlohmann::json recordingEventJson(const AIControlAdapterRecordingEvent& e)
+		{
+			nlohmann::json event = {{"version", 1}, {"sequence", e.sequence}, {"tick", e.tick},
+				{"frame", e.frame}, {"clock", "simulation"}, {"player_index", e.playerIndex},
+				{"kind", e.kind}, {"label", e.label}, {"reason", e.reason}, {"task_id", e.taskId},
+				{"object_id", e.objectId}, {"production_id", e.productionId}, {"owner", e.owner}, {"request_id", e.requestId},
+				{"state", e.state}, {"truncated", e.truncated}};
+			if (e.hasPosition) { event["x"] = e.x; event["y"] = e.y; }
+			return event;
+		}
+
+		void recordAutonomyTelemetryEvent(const char* kind, const std::string& label,
+			const std::string& reason, const Coord3D* position = nullptr, unsigned int taskId = 0, unsigned int objectId = 0)
+		{
+			if (kind == nullptr || kind[0] == '\0') return;
+			appendRecordingEvent(kind, label.c_str(), reason.c_str(), taskId, objectId, "", "", "", position, true);
+		}
+
+		nlohmann::json buildRecentRecordingEvents() const
+		{
+			nlohmann::json events = nlohmann::json::array();
+			m_recordingJournal.recentEvents([&](const AIControlAdapterRecordingEvent& e) { events.push_back(recordingEventJson(e)); });
+			return events;
+		}
+
+		nlohmann::json buildRecordingEvents(std::uint64_t after, std::size_t limit)
+		{
+			nlohmann::json result = {{"version", 1}, {"clock", "simulation"}, {"match_generation", m_recordingJournal.generation}};
+			result["events"] = nlohmann::json::array();
+			m_recordingJournal.after(after, std::min<std::size_t>(512, std::max<std::size_t>(1, limit)),
+				[&](const AIControlAdapterRecordingEvent& e) { result["events"].push_back(recordingEventJson(e)); });
+			result["recording_health"] = {{"retained", m_recordingJournal.retained()}, {"capacity", m_recordingJournal.capacity()},
+				{"high_water", m_recordingJournal.highWater}, {"overwritten", m_recordingJournal.overwritten},
+				{"next_sequence", m_recordingJournal.nextSequence}, {"truncated_fields", m_recordingJournal.truncated},
+				{"event_record_bytes", sizeof(AIControlAdapterRecordingEvent)},
+				{"diagnostic_lines_dropped", m_log.dropped()}, {"diagnostic_write_errors", m_log.errors()},
+				{"diagnostic_lines_written", m_log.written()}, {"diagnostic_flushes", m_log.flushes()},
+				{"sampled_producer_count", m_recordingProducerSamples}, {"sampled_producer_us_total", m_recordingProducerUs}, {"sampled_producer_us_max", m_recordingProducerMaxUs},
+				{"adapter_update_count", m_recordingUpdateSamples}, {"adapter_update_us_total", m_recordingUpdateUs}, {"adapter_update_us_max", m_recordingUpdateMaxUs},
+				{"adapter_update_us_histogram", m_recordingUpdateHistogram}, {"adapter_update_us_bucket_size", 100}};
+			return result;
+		}
+
+		nlohmann::json buildRecordingSnapshot(std::uint64_t after, std::size_t limit)
+		{
+			LARGE_INTEGER started, ended, frequency;
+			::QueryPerformanceCounter(&started); ::QueryPerformanceFrequency(&frequency);
+			const DWORD wall = ::GetTickCount();
+			if (!m_recordingSnapshotCache.is_object() || wall - m_recordingSnapshotCacheWall >= 1000u)
 			{
-				m_autonomy.state.telemetryEvents = nlohmann::json::array();
+				const unsigned int beginTick = adapterGameplayTick();
+				nlohmann::json telemetry = buildAutonomyTelemetry();
+				Player* player = resolveAutonomyPlayer();
+				int idleWorkers = 0, containedWorkers = 0;
+				if (player != nullptr)
+				{
+					std::vector<AutomationOwnedObjectSnapshot> owned; collectOwnedAutomationObjects(player, owned);
+					for (const auto& entry : owned) if (entry.isDozer)
+					{
+						if (entry.object->getContainedBy() != nullptr) ++containedWorkers;
+						else if (entry.object->getAI() != nullptr && entry.object->getAI()->isIdle()) ++idleWorkers;
+					}
+				}
+				telemetry["worker_observation"] = {{"idle_workers", idleWorkers}, {"contained_workers", containedWorkers}, {"tick", beginTick}};
+				const nlohmann::json outcome = telemetry.value("match_outcome", nlohmann::json::object());
+				const std::string outcomeState = outcome.value("state", "unknown");
+				if ((outcomeState == "victory" || outcomeState == "defeat" || outcomeState == "draw_or_unknown") &&
+					m_recordingTerminalGeneration != m_recordingJournal.generation)
+				{
+					appendRecordingEvent("match", "match_end", outcomeState.c_str());
+					m_recordingTerminalGeneration = m_recordingJournal.generation;
+				}
+				const bool active = TheGameLogic != nullptr && TheGameLogic->getFrame() > 0u &&
+					(telemetry.value("assets", nlohmann::json::object()).value("units", 0) +
+					 telemetry.value("assets", nlohmann::json::object()).value("buildings", 0) > 0);
+				std::string mapName = TheGlobalData != nullptr ? TheGlobalData->m_mapName.str() : "";
+				m_recordingSnapshotCache = {{"version", 1}, {"clock", "simulation"},
+					{"match_generation", m_recordingJournal.generation}, {"match_active", active}, {"map", mapName},
+					{"collection_start_tick", beginTick}, {"collection_end_tick", adapterGameplayTick()},
+					{"frame", TheGameLogic != nullptr ? TheGameLogic->getFrame() : 0u},
+					{"telemetry", telemetry}, {"match_outcome", outcome},
+					{"game_status", {{"player", telemetry.value("player", nlohmann::json::object())}, {"resources", {{"money", telemetry.value("money", 0u)}}}, {"match_outcome", outcome}}},
+					{"final_snapshot", m_autonomy.state.finalDiagnosticSnapshot.is_object() ? m_autonomy.state.finalDiagnosticSnapshot : nlohmann::json::object()},
+					{"run_summary", m_autonomy.state.finalRunSummary.is_object() ? m_autonomy.state.finalRunSummary : nlohmann::json::object()}};
+				m_recordingSnapshotCacheWall = wall;
 			}
-			m_autonomy.state.telemetryEvents.push_back(event);
-			while (m_autonomy.state.telemetryEvents.size() > 12u)
-			{
-				m_autonomy.state.telemetryEvents.erase(m_autonomy.state.telemetryEvents.begin());
-			}
+			nlohmann::json result = m_recordingSnapshotCache;
+			result.update(buildRecordingEvents(after, limit));
+			::QueryPerformanceCounter(&ended);
+			result["recording_health"]["collection_us"] = frequency.QuadPart != 0 ? (ended.QuadPart - started.QuadPart) * 1000000 / frequency.QuadPart : 0;
+			return result;
 		}
 
 		AIControlAdapterProfilePolicyConfig resolveAutonomyProfilePolicyConfig() const
@@ -873,15 +1094,22 @@ namespace
 			request.overrides.allowExpansionBeforeFullRemoteFollowup = m_autonomy.state.allowExpansionBeforeFullRemoteFollowupOverride;
 			request.overrides.hasExpansionHighCashFloatThreshold = m_autonomy.state.hasExpansionHighCashFloatThresholdOverride;
 			request.overrides.expansionHighCashFloatThreshold = m_autonomy.state.expansionHighCashFloatThresholdOverride;
-			return AIControlAdapterProfilePolicyManager().Resolve(request);
+			auto config = AIControlAdapterProfilePolicyManager().Resolve(request);
+			if (config.isBalancedSprawl && m_autonomy.state.economicVictory)
+			{
+				config.sprawlMarketCap = 120;
+			}
+			return config;
 		}
+
+		#include "AIControlAdapterRuleControls.inl"
 
 		void applyAutonomyRules()
 		{
 			if (!isAutonomyModeActive())
 			{
 				clearAutonomyManagedRules();
-				m_autonomy.state.lastAppliedTick = ::GetTickCount();
+				m_autonomy.state.lastAppliedTick = adapterGameplayTick();
 				adapterLog("autonomy_rules_inactive mode=%s paused=%d", m_autonomy.state.mode.c_str(), m_autonomy.state.paused ? 1 : 0);
 				return;
 			}
@@ -890,7 +1118,21 @@ namespace
 			const Real expansion = clampUnitFloat(m_autonomy.state.expansionBias, 0.0f, 1.0f);
 			const AIControlAdapterProfilePolicyConfig policyConfig = resolveAutonomyProfilePolicyConfig();
 
-			m_automation.workerRule.enabled = true;
+			if (!areAutonomySimCommandsEnabled())
+			{
+				clearAutonomyManagedRules();
+				const DWORD now = adapterGameplayTick();
+				m_autonomy.combatTaskManager.updateTasks(now);
+				m_autonomy.combatTaskManager.pruneExpiredTasks(now);
+				m_autonomy.state.lastAppliedTick = now;
+				adapterLog(
+					"autonomy_rules_command_gated mode=%s profile=%s reason=sim_commands_disabled",
+					m_autonomy.state.mode.c_str(),
+					m_autonomy.state.profile.c_str());
+				return;
+			}
+
+			m_automation.workerRule.enabled = autonomyRuleEnabled("worker_recruitment");
 			m_automation.workerRule.hasExplicitPlayerIndex = m_autonomy.state.hasExplicitPlayerIndex;
 			m_automation.workerRule.playerIndex = m_autonomy.state.playerIndex;
 			m_automation.workerRule.hasExplicitProducerKind = true;
@@ -899,24 +1141,20 @@ namespace
 			m_automation.workerRule.queueCount = policyConfig.workerQueueCount;
 			m_automation.workerRule.cooldownMs = policyConfig.workerCooldownMs;
 
-			m_automation.stashWorkerRule.enabled = profile != "builtin_passthrough";
+			m_automation.stashWorkerRule.enabled = autonomyRuleEnabled("worker_recruitment") && profile != "builtin_passthrough";
 			m_automation.stashWorkerRule.hasExplicitPlayerIndex = m_autonomy.state.hasExplicitPlayerIndex;
 			m_automation.stashWorkerRule.playerIndex = m_autonomy.state.playerIndex;
 			m_automation.stashWorkerRule.targetWorkersPerStash = policyConfig.stashWorkersPerStash;
 			m_automation.stashWorkerRule.cooldownMs = policyConfig.stashWorkerCooldownMs;
 
 			const AIControlAdapterProfilePolicyManager profilePolicyManager;
-			m_automation.radarVanRule.enabled = profilePolicyManager.AllowsRadarVanAutomation(policyConfig);
+			m_automation.radarVanRule.enabled = autonomyRuleEnabled("scouting") && profilePolicyManager.AllowsRadarVanAutomation(policyConfig);
 			m_automation.radarVanRule.hasExplicitPlayerIndex = m_autonomy.state.hasExplicitPlayerIndex;
 			m_automation.radarVanRule.playerIndex = m_autonomy.state.playerIndex;
 			m_automation.radarVanRule.minCount = profilePolicyManager.ResolveRadarVanMinCount(policyConfig);
 			m_automation.radarVanRule.cooldownMs = 12000u;
 
-			m_automation.attackRule.enabled = profile != "builtin_passthrough";
-			if (m_autonomy.state.hasAttackAutomationEnabledOverride)
-			{
-				m_automation.attackRule.enabled = m_autonomy.state.attackAutomationEnabled && profile != "builtin_passthrough";
-			}
+			m_automation.attackRule.enabled = (autonomyRuleEnabled("raids") || autonomyRuleEnabled("sustained_assaults")) && profile != "builtin_passthrough";
 			m_automation.attackRule.hasExplicitPlayerIndex = m_autonomy.state.hasExplicitPlayerIndex;
 			m_automation.attackRule.playerIndex = m_autonomy.state.playerIndex;
 			m_automation.attackRule.minUnits = policyConfig.attackMinUnits;
@@ -925,7 +1163,7 @@ namespace
 			m_automation.attackRule.cooldownMs = policyConfig.attackCooldownMs;
 
 			const bool captureWasEnabled = m_automation.captureRule.enabled;
-			m_automation.captureRule.enabled = m_autonomy.state.captureTech && profile != "builtin_passthrough";
+			m_automation.captureRule.enabled = autonomyRuleEnabled("capture") && profile != "builtin_passthrough";
 			m_automation.captureRule.hasExplicitPlayerIndex = m_autonomy.state.hasExplicitPlayerIndex;
 			m_automation.captureRule.playerIndex = m_autonomy.state.playerIndex;
 			m_automation.captureRule.preferIdle = true;
@@ -941,7 +1179,7 @@ namespace
 			}
 
 			// Phase 9: Combat task maintenance
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			m_autonomy.combatTaskManager.updateTasks(now);
 			m_autonomy.combatTaskManager.pruneExpiredTasks(now);
 
@@ -985,7 +1223,7 @@ namespace
 							task->minimumViableCount);
 
 						// Fail task if below minimum viable count
-						if (static_cast<int>(task->assignedUnitIds.size()) < task->minimumViableCount)
+						if (!task->manageTimeoutExternally && static_cast<int>(task->assignedUnitIds.size()) < task->minimumViableCount)
 						{
 							m_autonomy.combatTaskManager.failTask(
 								task->taskId,
@@ -1029,7 +1267,7 @@ namespace
 			m_autonomy.state.nextTechTick = 0u;
 			m_autonomy.state.nextGuardTick = 0u;
 			Player* player = resolveAutonomyPlayer();
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			Int playerIndex = -1;
 			UnsignedInt money = 0u;
 			Int ownedUnits = -1;
@@ -1090,7 +1328,7 @@ namespace
 				return;
 			}
 
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			const AIControlAdapterAutonomyTickSchedule tickSchedule =
 				AIControlAdapterScheduler::EvaluateAutonomyTickSchedule(
 					now,
@@ -1175,10 +1413,10 @@ namespace
 					};
 					if (m_autonomy.state.hasExplicitPlayerIndex)
 					{
-						message["args"]["player"] = player->getPlayerIndex();
+						message["args"]["player_index"] = player->getPlayerIndex();
 					}
 					std::string reason;
-					const bool guarded = executeGameGuardAllIdleGroundCombat(message, reason);
+					const bool guarded = autonomyRuleEnabled("idle_guard") && executeGameGuardAllIdleGroundCombat(message, reason);
 					adapterLog(
 						"autonomy_command request_id=%s cmd=Game.GuardAllIdleGroundCombat money=%lu ok=%d reason=%s",
 						requestIdBuffer,
@@ -1207,6 +1445,7 @@ namespace
 			{
 				money = wallet->countMoney();
 			}
+			updateEconomicVictory(player, money, now);
 			if (!m_autonomy.state.hasCashRateSample)
 			{
 				m_autonomy.state.hasCashRateSample = true;
@@ -1229,6 +1468,10 @@ namespace
 				}
 			}
 
+			// Preserve raw bank deltas above; policy budgets account for issued
+			// unit orders that have not yet reached native production queues.
+			if (isEconomicVictoryPhase() || resolveAutonomyProfilePolicyConfig().isEconomyFirstSprawl) money = availableAutonomyCash(player);
+
 			struct AutonomyMacroCounts
 			{
 				Int barracks;
@@ -1246,6 +1489,8 @@ namespace
 				Int supplyStashes;
 				Int supplyStashesInProgress;
 				Int mobileUnits;
+				Int mobileCombatUnits;
+				Int containedCombatUnits;
 				Int workers;
 				Int radarVans;
 				Int soldiers;
@@ -1498,6 +1743,11 @@ namespace
 				}
 
 				++counts->mobileUnits;
+				if (!isDozer && !underConstruction && (obj->isKindOf(KINDOF_CAN_ATTACK) || obj->isAbleToAttack()))
+				{
+					if (obj->getContainedBy() != nullptr) ++counts->containedCombatUnits;
+					else if (!obj->isKindOf(KINDOF_IMMOBILE) && obj->getAI() != nullptr) ++counts->mobileCombatUnits;
+				}
 				if (isDozer)
 				{
 					++counts->workers;
@@ -2238,33 +2488,26 @@ namespace
 				return candidate;
 			};
 
-			const UnsignedInt telemetryNowTick = ::GetTickCount();
+			const UnsignedInt telemetryNowTick = adapterGameplayTick();
 			AIControlAdapterMapPoint recentAttackTarget = { 0.0f, 0.0f };
-			const bool hasRecentAttackTarget = AIControlAdapterTryGetRecentAttackTarget(
-				m_autonomy.state.telemetryEvents,
-				telemetryNowTick,
-				45000u,
-				recentAttackTarget);
+			const bool hasRecentAttackTarget = m_recordingJournal.recentAttack(telemetryNowTick, 45000u, recentAttackTarget.x, recentAttackTarget.y);
 
-			const GameSlot* selfSlot = findSlotForPlayer(player);
-			const Int selfTeamNumber = selfSlot != nullptr ? selfSlot->getTeamNumber() : -1;
 			bool hasPreferredEnemyBase = false;
 			AIControlAdapterMapPoint preferredEnemyBase = { 0.0f, 0.0f };
 			std::vector<AIControlAdapterMapPoint> knownEnemyBasePositions;
 			auto captureEnemyBasePosition = [&](Player* candidate, bool preferred) -> void
 			{
-				if (candidate == nullptr || candidate == player || ThePlayerList == nullptr)
+				if (candidate == nullptr || candidate == player || ThePlayerList == nullptr
+					|| candidate == ThePlayerList->getNeutralPlayer() || isCivilianLikePlayer(candidate)
+					|| candidate->isPlayerObserver() || candidate->isPlayerDead())
 				{
 					return;
 				}
-				const GameSlot* candidateSlot = findSlotForPlayer(candidate);
-				if (candidateSlot != nullptr && selfSlot != nullptr)
+				// Diplomacy uses engine teams; lobby slots are metadata, not player IDs.
+				if (candidate->getDefaultTeam() == nullptr
+					|| player->getRelationship(candidate->getDefaultTeam()) != ENEMIES)
 				{
-					const Int candidateTeamNumber = candidateSlot->getTeamNumber();
-					if (candidateTeamNumber >= 0 && selfTeamNumber >= 0 && candidateTeamNumber == selfTeamNumber)
-					{
-						return;
-					}
+					return;
 				}
 				AIControlAdapterMapPoint candidatePos = { 0.0f, 0.0f };
 				if (!AIControlAdapterTryReadMapPosition(buildPlayerMapPositionSummary(candidate), candidatePos))
@@ -2280,9 +2523,9 @@ namespace
 				knownEnemyBasePositions.push_back(candidatePos);
 			};
 
-			if (m_autonomy.state.hasExplicitPlayerIndex)
+			if (m_autonomy.state.hasExplicitTargetPlayerIndex)
 			{
-				captureEnemyBasePosition(getPlayerByIndex(m_autonomy.state.playerIndex), true);
+				captureEnemyBasePosition(getPlayerByIndex(m_autonomy.state.targetPlayerIndex), true);
 			}
 			if (ThePlayerList != nullptr)
 			{
@@ -2294,7 +2537,7 @@ namespace
 					{
 						continue;
 					}
-					if (hasPreferredEnemyBase && candidate->getPlayerIndex() == m_autonomy.state.playerIndex)
+					if (hasPreferredEnemyBase && candidate->getPlayerIndex() == m_autonomy.state.targetPlayerIndex)
 					{
 						continue;
 					}
@@ -2304,6 +2547,16 @@ namespace
 
 			auto resolveZoneFrontDirection = [&](const AutonomyZone& zone, Real& outDx, Real& outDy, const char*& outSource) -> void
 			{
+				Real fallbackDx = sprawlAxisDx;
+				Real fallbackDy = sprawlAxisDy;
+				bool hasOutwardFallback = false;
+				if (!zone.isMainBase && mainZoneIndex >= 0)
+				{
+					const AutonomyZone& mainZone = zones[static_cast<std::size_t>(mainZoneIndex)];
+					hasOutwardFallback = AIControlAdapterTryNormalizeDirection(
+						zone.center.x - mainZone.center.x, zone.center.y - mainZone.center.y,
+						fallbackDx, fallbackDy);
+				}
 				const AIControlAdapterZoneFrontDirectionResult result = AIControlAdapterResolveZoneFrontDirection(
 					{ zone.center.x, zone.center.y },
 					hasRecentAttackTarget,
@@ -2311,11 +2564,12 @@ namespace
 					hasPreferredEnemyBase,
 					preferredEnemyBase,
 					knownEnemyBasePositions,
-					sprawlAxisDx,
-					sprawlAxisDy);
+					fallbackDx,
+					fallbackDy);
 				outDx = result.dx;
 				outDy = result.dy;
-				outSource = result.source;
+				outSource = hasOutwardFallback && std::strcmp(result.source, "sprawl_axis") == 0
+					? "outward_from_main" : result.source;
 			};
 
 			struct AutonomyZoneCounts
@@ -2664,7 +2918,7 @@ namespace
 
 			if (!zones.empty() && !m_autonomy.state.zoneThreats.empty())
 			{
-				const DWORD zonePriorityNow = ::GetTickCount();
+				const DWORD zonePriorityNow = adapterGameplayTick();
 				Int threatenedZoneIndex = -1;
 				DWORD newestThreatTick = 0u;
 				for (std::size_t zoneIdx = 0; zoneIdx < zones.size(); ++zoneIdx)
@@ -2702,7 +2956,7 @@ namespace
 
 			bool zoneThreatsChanged = false;
 			std::set<UnsignedInt> visibleStructureIds;
-			const DWORD threatNowTick = ::GetTickCount();
+			const DWORD threatNowTick = adapterGameplayTick();
 			const Real threatAssociationRadius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius) * 1.25f;
 			const Real threatAssociationRadiusSq = threatAssociationRadius * threatAssociationRadius;
 			if (!zones.empty())
@@ -2863,146 +3117,196 @@ namespace
 				m_autonomy.state.zonesSnapshotTick = threatNowTick;
 			}
 
-			// Detect zone count changes (new zones created or destroyed)
-			if (m_autonomy.state.telemetryZones.is_array() && m_autonomy.state.telemetryZones.size() != zones.size())
+			// A replaced anchor may preserve the count while changing zone identity.
+			if (!m_autonomy.state.telemetryZones.is_array() || m_autonomy.state.telemetryZones.size() != zones.size())
 			{
 				m_autonomy.state.telemetryZonesDirty = true;
 			}
+			else if (!m_autonomy.state.telemetryZonesDirty)
+			{
+				for (std::size_t i = 0; i < zones.size(); ++i)
+				{
+					const auto& cachedZone = m_autonomy.state.telemetryZones[i];
+					if (cachedZone.value("anchor_id", 0u) != static_cast<UnsignedInt>(zones[i].anchorId)
+						|| std::abs(cachedZone.value("center_x", 0.0f) - zones[i].center.x) > 1.0f
+						|| std::abs(cachedZone.value("center_y", 0.0f) - zones[i].center.y) > 1.0f)
+					{
+						m_autonomy.state.telemetryZonesDirty = true;
+						break;
+					}
+				}
+			}
 
-			// Only rebuild zone telemetry when zones have changed (dirty flag set)
-			// This reduces overhead from ~2-10ms per macro tick to ~0.1ms when zones unchanged
+			// Refresh spatial fields at macro cadence even when no construction dirties
+			// the full snapshot. Unchanged geometry adds no JSON writes or text logs.
+			bool zoneTelemetryChanged = m_autonomy.state.telemetryZonesDirty;
 			if (m_autonomy.state.telemetryZonesDirty)
 			{
 				m_autonomy.state.telemetryZones = nlohmann::json::array();
-				for (std::size_t i = 0; i < zones.size(); ++i)
-				{
-					const Int zoneSupply = zoneCounts[i].supplyStashes + zoneCounts[i].supplyStashesInProgress;
-					const Int zoneBarracks = zoneCounts[i].barracks + zoneCounts[i].barracksInProgress;
-					const Int zoneArms = zoneCounts[i].armsDealers + zoneCounts[i].armsDealersInProgress;
-					const Int zonePalaces = zoneCounts[i].palaces + zoneCounts[i].palacesInProgress;
-					const Int zoneMarkets = zoneCounts[i].blackMarkets + zoneCounts[i].blackMarketsInProgress;
-					const Int zoneTunnels = zoneCounts[i].tunnels + zoneCounts[i].tunnelsInProgress;
-					const Int zoneStingers = zoneCounts[i].stingers + zoneCounts[i].stingersInProgress;
-					const bool isActiveZone = hasActiveZone && static_cast<Int>(i) == activeZoneIndex;
-
-					// Phase 5.8: Zone development logic must handle non-supply zones
-					// Different anchor types have different development requirements
-					bool zoneNeedsFollowup = false;
-					bool zoneDeveloped = false;
-
-					if (zones[i].anchorType == ZoneAnchorType::SupplyStash || zones[i].anchorType == ZoneAnchorType::MainBase)
-					{
-						// Supply zones: require Supply Stash + infrastructure
-						zoneNeedsFollowup =
-							zoneSupply > 0
-							&& (zoneTunnels < 1 || zoneBarracks < 1 || zoneArms < 1 || zoneStingers < 1);
-						zoneDeveloped =
-							zoneSupply > 0
-							&& (zoneBarracks + zoneArms + zoneTunnels + zoneStingers) >= 3;
-					}
-					else if (zones[i].anchorType == ZoneAnchorType::CapturedStructure)
-					{
-						// Captured structure zones: require Tunnel + defense, Supply Stash optional
-						zoneNeedsFollowup =
-							zoneTunnels < 1 || zoneStingers < 1;
-						zoneDeveloped =
-							zoneTunnels >= 1 && zoneStingers >= 1;
-					}
-					else if (zones[i].anchorType == ZoneAnchorType::StrategicFoothold || zones[i].anchorType == ZoneAnchorType::MarketFoothold)
-					{
-						// Strategic/Market foothold zones: require Tunnel + Stinger minimum
-						// Black Markets are follow-up goals only when safe
-						zoneNeedsFollowup =
-							zoneTunnels < 1 || zoneStingers < 1;
-						zoneDeveloped =
-							zoneTunnels >= 1 && zoneStingers >= 1;
-					}
-					const Real zoneRadius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius);
-					Real zoneFrontDx = sprawlAxisDx;
-					Real zoneFrontDy = sprawlAxisDy;
-					const char* frontSource = "sprawl_axis";
-					resolveZoneFrontDirection(zones[i], zoneFrontDx, zoneFrontDy, frontSource);
-					const AIControlAdapterZoneFrontRearPoints zonePoints = AIControlAdapterBuildZoneFrontRearPoints(
-						{ zones[i].center.x, zones[i].center.y },
-						zoneRadius,
-						zoneFrontDx,
-						zoneFrontDy);
-					const AIControlAdapterZoneTerrainResult terrainZone = AIControlAdapterApplyZoneTerrainFacts(
-						terrainFacts,
-						{ zones[i].center.x, zones[i].center.y, zoneRadius, zoneFrontDx, zoneFrontDy, zones[i].isMainBase });
-					Real frontPointX = zonePoints.frontPoint.x;
-					Real frontPointY = zonePoints.frontPoint.y;
-					Real rearPointX = zonePoints.rearPoint.x;
-					Real rearPointY = zonePoints.rearPoint.y;
-					std::string frontSourceValue = frontSource;
-					if (terrainZone.terrainLimited || terrainZone.hasEntrance)
-					{
-						frontPointX = terrainZone.frontPoint.x;
-						frontPointY = terrainZone.frontPoint.y;
-						rearPointX = terrainZone.rearPoint.x;
-						rearPointY = terrainZone.rearPoint.y;
-						if (!terrainZone.frontSource.empty() && terrainZone.frontSource != "fallback")
-						{
-							frontSourceValue = std::string("terrain_") + terrainZone.frontSource;
-						}
-					}
-					if (terrainZone.hasEntrance)
-					{
-						adapterLog(
-							"zone_entrance_selected zone=%u entrance=%s x=%.1f y=%.1f reason=main_base",
-							static_cast<unsigned int>(zones[i].anchorId),
-							terrainZone.entranceId.c_str(),
-							frontPointX,
-							frontPointY);
-					}
-					adapterLog(
-						"zone_terrain_shape zone=%u anchor=%u naive_radius=%.1f effective_radius=%.1f limited=%d reason=%s",
-						static_cast<unsigned int>(zones[i].anchorId),
-						static_cast<unsigned int>(zones[i].anchorId),
-						zoneRadius,
-						terrainZone.effectiveRadius,
-						terrainZone.terrainLimited ? 1 : 0,
-						terrainZone.reason);
-					adapterLog(
-						"zone_terrain_points zone=%u front_x=%.1f front_y=%.1f rear_x=%.1f rear_y=%.1f source=%s reason=%s",
-						static_cast<unsigned int>(zones[i].anchorId),
-						frontPointX,
-						frontPointY,
-						rearPointX,
-						rearPointY,
-						frontSourceValue.c_str(),
-						terrainZone.reason);
-					m_autonomy.state.telemetryZones.push_back(nlohmann::json::object({
-						{"anchor_id", static_cast<UnsignedInt>(zones[i].anchorId)},
-						{"anchor_type", zoneAnchorTypeToString(zones[i].anchorType)},
-						{"is_main_base", zones[i].isMainBase},
-						{"active", isActiveZone},
-						{"center_x", zones[i].center.x},
-						{"center_y", zones[i].center.y},
-						{"front_point_x", frontPointX},
-						{"front_point_y", frontPointY},
-						{"rear_point_x", rearPointX},
-						{"rear_point_y", rearPointY},
-						{"front_source", frontSourceValue},
-						{"effective_radius", terrainZone.effectiveRadius},
-						{"terrain_limited", terrainZone.terrainLimited},
-						{"terrain_reason", terrainZone.reason},
-						{"terrain_entrance_id", terrainZone.entranceId},
-						{"supply_stashes", zoneSupply},
-						{"barracks", zoneBarracks},
-						{"arms_dealers", zoneArms},
-						{"palaces", zonePalaces},
-						{"black_markets", zoneMarkets},
-						{"tunnels", zoneTunnels},
-						{"stingers", zoneStingers},
-						{"developed", zoneDeveloped},
-						{"needs_followup", zoneNeedsFollowup}
-					}));
-				}
-				++m_autonomy.state.zonesSnapshotVersion;
-				m_autonomy.state.zonesSnapshotTick = ::GetTickCount();
-				m_autonomy.state.telemetryZonesDirty = false;
 			}
+			for (std::size_t i = 0; i < zones.size(); ++i)
+			{
+				const Int zoneSupply = zoneCounts[i].supplyStashes + zoneCounts[i].supplyStashesInProgress;
+				const Int zoneBarracks = zoneCounts[i].barracks + zoneCounts[i].barracksInProgress;
+				const Int zoneArms = zoneCounts[i].armsDealers + zoneCounts[i].armsDealersInProgress;
+				const Int zonePalaces = zoneCounts[i].palaces + zoneCounts[i].palacesInProgress;
+				const Int zoneMarkets = zoneCounts[i].blackMarkets + zoneCounts[i].blackMarketsInProgress;
+				const Int zoneTunnels = zoneCounts[i].tunnels + zoneCounts[i].tunnelsInProgress;
+				const Int zoneStingers = zoneCounts[i].stingers + zoneCounts[i].stingersInProgress;
+				const bool isActiveZone = hasActiveZone && static_cast<Int>(i) == activeZoneIndex;
+
+				// Phase 5.8: Zone development logic must handle non-supply zones
+				// Different anchor types have different development requirements
+				bool zoneNeedsFollowup = false;
+				bool zoneDeveloped = false;
+
+				if (zones[i].anchorType == ZoneAnchorType::SupplyStash || zones[i].anchorType == ZoneAnchorType::MainBase)
+				{
+					// Supply zones: require Supply Stash + infrastructure
+					zoneNeedsFollowup =
+						zoneSupply > 0
+						&& (zoneTunnels < 1 || zoneBarracks < 1 || zoneArms < 1 || zoneStingers < 1);
+					zoneDeveloped =
+						zoneSupply > 0
+						&& (zoneBarracks + zoneArms + zoneTunnels + zoneStingers) >= 3;
+				}
+				else if (zones[i].anchorType == ZoneAnchorType::CapturedStructure)
+				{
+					// Captured structure zones: require Tunnel + defense, Supply Stash optional
+					zoneNeedsFollowup =
+						zoneTunnels < 1 || zoneStingers < 1;
+					zoneDeveloped =
+						zoneTunnels >= 1 && zoneStingers >= 1;
+				}
+				else if (zones[i].anchorType == ZoneAnchorType::StrategicFoothold || zones[i].anchorType == ZoneAnchorType::MarketFoothold)
+				{
+					// Strategic/Market foothold zones: require Tunnel + Stinger minimum
+					// Black Markets are follow-up goals only when safe
+					zoneNeedsFollowup =
+						zoneTunnels < 1 || zoneStingers < 1;
+					zoneDeveloped =
+						zoneTunnels >= 1 && zoneStingers >= 1;
+				}
+				const Real zoneRadius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius);
+				Real zoneFrontDx = sprawlAxisDx;
+				Real zoneFrontDy = sprawlAxisDy;
+				const char* frontSource = "sprawl_axis";
+				resolveZoneFrontDirection(zones[i], zoneFrontDx, zoneFrontDy, frontSource);
+				const AIControlAdapterZoneFrontRearPoints zonePoints = AIControlAdapterBuildZoneFrontRearPoints(
+					{ zones[i].center.x, zones[i].center.y },
+					zoneRadius,
+					zoneFrontDx,
+					zoneFrontDy);
+				const AIControlAdapterZoneTerrainResult terrainZone = AIControlAdapterApplyZoneTerrainFacts(
+					terrainFacts,
+					{ zones[i].center.x, zones[i].center.y, zoneRadius, zoneFrontDx, zoneFrontDy, zones[i].isMainBase });
+				Real frontPointX = zonePoints.frontPoint.x;
+				Real frontPointY = zonePoints.frontPoint.y;
+				Real rearPointX = zonePoints.rearPoint.x;
+				Real rearPointY = zonePoints.rearPoint.y;
+				std::string frontSourceValue = frontSource;
+				if (terrainZone.terrainLimited || terrainZone.hasEntrance)
+				{
+					frontPointX = terrainZone.frontPoint.x;
+					frontPointY = terrainZone.frontPoint.y;
+					rearPointX = terrainZone.rearPoint.x;
+					rearPointY = terrainZone.rearPoint.y;
+					if (!terrainZone.frontSource.empty() && terrainZone.frontSource != "fallback")
+					{
+						frontSourceValue = std::string("terrain_") + terrainZone.frontSource;
+					}
+				}
+				if (!m_autonomy.state.telemetryZonesDirty)
+				{
+					auto& cachedZone = m_autonomy.state.telemetryZones[i];
+					const bool geometryChanged =
+						std::abs(cachedZone.value("front_point_x", 0.0f) - frontPointX) > 1.0f
+						|| std::abs(cachedZone.value("front_point_y", 0.0f) - frontPointY) > 1.0f
+						|| std::abs(cachedZone.value("rear_point_x", 0.0f) - rearPointX) > 1.0f
+						|| std::abs(cachedZone.value("rear_point_y", 0.0f) - rearPointY) > 1.0f
+						|| std::abs(cachedZone.value("effective_radius", 0.0f) - terrainZone.effectiveRadius) > 1.0f
+						|| cachedZone.value("front_source", std::string()) != frontSourceValue
+						|| cachedZone.value("front_direction_source", std::string()) != frontSource
+						|| cachedZone.value("terrain_limited", false) != terrainZone.terrainLimited
+						|| cachedZone.value("terrain_entrance_id", std::string()) != terrainZone.entranceId
+						|| cachedZone.value("active", false) != isActiveZone;
+					if (geometryChanged)
+					{
+						cachedZone["front_point_x"] = frontPointX;
+						cachedZone["front_point_y"] = frontPointY;
+						cachedZone["rear_point_x"] = rearPointX;
+						cachedZone["rear_point_y"] = rearPointY;
+						cachedZone["front_source"] = frontSourceValue;
+						cachedZone["front_direction_source"] = frontSource;
+						cachedZone["effective_radius"] = terrainZone.effectiveRadius;
+						cachedZone["terrain_limited"] = terrainZone.terrainLimited;
+						cachedZone["terrain_reason"] = terrainZone.reason;
+						cachedZone["terrain_entrance_id"] = terrainZone.entranceId;
+						cachedZone["active"] = isActiveZone;
+						zoneTelemetryChanged = true;
+					}
+					continue;
+				}
+				if (terrainZone.hasEntrance)
+				{
+					adapterLog(
+						"zone_entrance_selected zone=%u entrance=%s x=%.1f y=%.1f reason=main_base",
+						static_cast<unsigned int>(zones[i].anchorId),
+						terrainZone.entranceId.c_str(),
+						frontPointX,
+						frontPointY);
+				}
+				adapterLog(
+					"zone_terrain_shape zone=%u anchor=%u naive_radius=%.1f effective_radius=%.1f limited=%d reason=%s",
+					static_cast<unsigned int>(zones[i].anchorId),
+					static_cast<unsigned int>(zones[i].anchorId),
+					zoneRadius,
+					terrainZone.effectiveRadius,
+					terrainZone.terrainLimited ? 1 : 0,
+					terrainZone.reason);
+				adapterLog(
+					"zone_terrain_points zone=%u front_x=%.1f front_y=%.1f rear_x=%.1f rear_y=%.1f source=%s reason=%s",
+					static_cast<unsigned int>(zones[i].anchorId),
+					frontPointX,
+					frontPointY,
+					rearPointX,
+					rearPointY,
+					frontSourceValue.c_str(),
+					terrainZone.reason);
+				m_autonomy.state.telemetryZones.push_back(nlohmann::json::object({
+					{"anchor_id", static_cast<UnsignedInt>(zones[i].anchorId)},
+					{"anchor_type", zoneAnchorTypeToString(zones[i].anchorType)},
+					{"is_main_base", zones[i].isMainBase},
+					{"active", isActiveZone},
+					{"center_x", zones[i].center.x},
+					{"center_y", zones[i].center.y},
+					{"front_point_x", frontPointX},
+					{"front_point_y", frontPointY},
+					{"rear_point_x", rearPointX},
+					{"rear_point_y", rearPointY},
+					{"front_source", frontSourceValue},
+					{"front_direction_source", frontSource},
+					{"effective_radius", terrainZone.effectiveRadius},
+					{"terrain_limited", terrainZone.terrainLimited},
+					{"terrain_reason", terrainZone.reason},
+					{"terrain_entrance_id", terrainZone.entranceId},
+					{"supply_stashes", zoneSupply},
+					{"barracks", zoneBarracks},
+					{"arms_dealers", zoneArms},
+					{"palaces", zonePalaces},
+					{"black_markets", zoneMarkets},
+					{"tunnels", zoneTunnels},
+					{"stingers", zoneStingers},
+					{"developed", zoneDeveloped},
+					{"needs_followup", zoneNeedsFollowup}
+				}));
+			}
+			if (zoneTelemetryChanged)
+			{
+				++m_autonomy.state.zonesSnapshotVersion;
+				m_autonomy.state.zonesSnapshotTick = adapterGameplayTick();
+			}
+			m_autonomy.state.telemetryZonesDirty = false;
 			adapterLog(
 				"autonomy_macro_phase phase=zone_counts player=%d zone_supply=%d zone_barracks=%d zone_arms=%d",
 				player->getPlayerIndex(),
@@ -3036,7 +3340,31 @@ namespace
 
 			auto tryCommand = [&](const char* requestIdPrefix, const char* cmd, const nlohmann::json& args, std::string& outReason) -> bool
 			{
-				const std::string requestId =
+				if (!areAutonomySimCommandsEnabled())
+				{
+					outReason = "sim_commands_disabled";
+					adapterLog(
+						"autonomy_command request_id=%s cmd=%s money=%lu ok=0 reason=%s",
+						requestIdPrefix != nullptr ? requestIdPrefix : "",
+						cmd != nullptr ? cmd : "",
+						static_cast<unsigned long>(money),
+						outReason.c_str());
+					return false;
+				}
+				const std::string rawCommand = cmd != nullptr ? cmd : "";
+                const char* buildRule = rawCommand == "Game.BuildBlackMarketSmart" ? "market_growth"
+                    : rawCommand == "Game.BuildSupplyStashSmart" ? "zone_expansion"
+                    : rawCommand == "Game.BuildPalaceSmart" ? "tech_upgrades"
+                    : (rawCommand == "Game.BuildTunnelNetwork" || rawCommand == "Game.BuildStingerSite") ? "static_defense" : nullptr;
+                if (m_ruleExpansionConstructionScope && buildRule != nullptr) buildRule = "zone_expansion";
+                if (buildRule != nullptr && !requireAutonomyRule(buildRule, outReason)) return false;
+                if (rawCommand == "Game.BuildArmsDealerSmart" && totalArmsDealers > 0
+                    && !requireAutonomyRule("capacity_growth", outReason)) return false;
+                if (rawCommand == "Game.BuildBarracksSmart" && totalBarracks > 0
+                    && !requireAutonomyRule("capacity_growth", outReason)) return false;
+                if (rawCommand == "Game.QueueUpgrade" && containsIgnoreCase(args.value("upgrade_name", std::string()), "capture")
+                    && !requireAutonomyRule("capture", outReason)) return false;
+                const std::string requestId =
 					AIControlAdapterUiUtils::FormatPlayerTickRequestId(requestIdPrefix, player->getPlayerIndex(), static_cast<unsigned int>(now));
 				nlohmann::json message = {
 					{"type", "SessionCommand"},
@@ -3101,11 +3429,6 @@ namespace
 				}
 				else if (cmdString == "Game.QueueScudLauncher")
 				{
-					nlohmann::json queuedMessage = message;
-					if (!queuedMessage["args"].is_object())
-					{
-						queuedMessage["args"] = nlohmann::json::object();
-					}
 					const std::string scudTemplate = AIControlAdapterTemplateInferenceService::InferScudLauncherTemplate(player);
 						adapterLog(
 							"autonomy_scud_attempt player=%d side=%s base_side=%s template=%s",
@@ -3113,10 +3436,7 @@ namespace
 							player != nullptr ? player->getSide().str() : "",
 							player != nullptr ? player->getBaseSide().str() : "",
 							scudTemplate.c_str());
-					queuedMessage["cmd"] = "Game.QueueUnit";
-					queuedMessage["args"]["producer_kind"] = "arms_dealer";
-					queuedMessage["args"]["unit_template"] = scudTemplate;
-					ok = executeGameQueueUnit(queuedMessage, outReason);
+					ok = queueCombatUnitAtWarFactory(player, "scudlauncher", parseQueueCountArg(message), outReason);
 				}
 				else if (cmdString == "Game.PurchaseScience")
 				{
@@ -3297,12 +3617,22 @@ namespace
 							zoneCenter.y);
 					}
 				}
+				const bool safeCapacity = requestIdPrefix != nullptr
+					&& (std::strcmp(requestIdPrefix, "auto_producer_recovery") == 0 || isSurvivalRecoveryActive(now));
+				if (safeCapacity && hasAxis && (cmdString == "Game.BuildArmsDealerSmart"
+					|| cmdString == "Game.BuildBarracksSmart" || cmdString == "Game.BuildBlackMarketSmart"))
+				{
+					zoneCenter = zone.center;
+					zoneCenter.x -= zoneFrontDx * m_autonomy.state.zoneRadius * 0.25f;
+					zoneCenter.y -= zoneFrontDy * m_autonomy.state.zoneRadius * 0.25f;
+					zoneRadius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius * 0.75f);
+				}
 				args["zone_center"] = nlohmann::json::object({
 					{"x", zoneCenter.x},
 					{"y", zoneCenter.y}
 				});
 				args["zone_radius"] = zoneRadius;
-				args["strict_zone"] = false;
+				args["strict_zone"] = safeCapacity;
 				return tryCommand(requestIdPrefix, cmd, args, outReason);
 			};
 
@@ -3426,6 +3756,8 @@ namespace
 			for (const auto& foundationPair : m_autonomy.state.strategicFoundationHealth)
 			{
 				const AutonomyStrategicFoundationState& state = foundationPair.second;
+				const auto fact = observeStrategicFoundation(player, foundationPair.first, state, now, false);
+				if (!fact.currentExists || !fact.currentOwned || !fact.currentUnderConstruction) continue;
 				if (state.stopIssued ||
 					state.reason == "stalled_no_builder" ||
 					state.reason == "stopped_stale_no_progress" ||
@@ -3441,6 +3773,8 @@ namespace
 				static_cast<int>(staleBlackMarketFoundations),
 				staleStrategicFoundations);
 			m_autonomy.state.strategicSpendTelemetry["market_foundations_no_builder"] = blackMarketFoundationsNoBuilder;
+			updateProfileSpendingPlan(player, money, static_cast<int>(completedBlackMarkets), counts.mobileCombatUnits
+				+ counts.queuedQuads + counts.queuedScorpions + counts.queuedRocketBuggies + counts.queuedScudLaunchers, now);
 			const AIControlAdapterStrategicSpendSnapshotBuilder strategicSpendSnapshotBuilder;
 
 			auto tryOpeningBarracksFallbackAfterSupplyFailure = [&](std::string& outReason) -> bool
@@ -3468,6 +3802,7 @@ namespace
 				return fallbackIssued;
 			};
 
+			bool macroIncomeIssued = false;
 			if (macroDue)
 			{
 				std::string reason;
@@ -3481,6 +3816,127 @@ namespace
 				const UnsignedInt reserveCash = policyConfig.reserveCash;
 				const UnsignedInt blackMarketCost = 2500u;
 				const bool openingInfrastructureReady = counts.supplyStashes >= 1 && counts.barracks >= 1 && counts.armsDealers >= 1;
+				int criticalZoneCount = 0;
+				int defenseReserveDeficits = 0;
+				for (const auto& zone : zones)
+				{
+					const UnsignedInt anchor = static_cast<UnsignedInt>(zone.anchorId);
+					const auto threat = m_autonomy.state.zoneThreats.find(anchor);
+					if (threat != m_autonomy.state.zoneThreats.end() && now - threat->second.lastSeenTick <= 45000u
+						&& threat->second.level == "critical") ++criticalZoneCount;
+					const auto reserve = m_autonomy.state.zoneDefenseReserves.find(anchor);
+					if (reserve != m_autonomy.state.zoneDefenseReserves.end())
+						defenseReserveDeficits += std::max(0, reserve->second.deficit);
+				}
+				const int activeCombatTaskCount = m_autonomy.combatTaskManager.getActiveTaskCount();
+				const int enemyWmdTargetCount = static_cast<int>(m_autonomy.wmdTargetTracker.getAllTargets().size());
+				const int readyScudStormCount = countReadyScudStorms(player);
+				AIControlAdapterSurvivalPolicyInput survivalInput;
+				survivalInput.criticalZoneCount = criticalZoneCount;
+				survivalInput.defenseReserveDeficits = defenseReserveDeficits;
+				survivalInput.activeCombatTasks = activeCombatTaskCount;
+				survivalInput.readyScudStorms = readyScudStormCount;
+				survivalInput.enemyWmdTargets = enemyWmdTargetCount;
+				survivalInput.readyBarracks = counts.barracks;
+				survivalInput.readyArmsDealers = counts.armsDealers;
+				survivalInput.money = static_cast<unsigned int>(money);
+				survivalInput.reserveCash = static_cast<unsigned int>(reserveCash);
+				survivalInput.allowSuperweapons = m_autonomy.state.allowSuperweapons;
+				const AIControlAdapterSurvivalPolicyResult survivalPolicy =
+					AIControlAdapterSurvivalPolicyManager().Evaluate(survivalInput);
+				m_autonomy.state.survivalPolicyTelemetry = nlohmann::json::object({
+					{"state", survivalPolicy.state},
+					{"priority", survivalPolicy.priority},
+					{"reason", survivalPolicy.reason},
+					{"critical_zones", criticalZoneCount},
+					{"defense_reserve_deficits", defenseReserveDeficits},
+					{"active_combat_tasks", activeCombatTaskCount},
+					{"ready_scuds", readyScudStormCount},
+					{"enemy_wmd_targets", enemyWmdTargetCount},
+					{"ready_barracks", counts.barracks},
+					{"ready_arms_dealers", counts.armsDealers},
+				{"money", money},
+				{"reserve", reserveCash},
+				{"cash_float", money > reserveCash ? money - reserveCash : 0u},
+				{"block_exposed_wmd_foundations", survivalPolicy.blockExposedWmdFoundations}
+			});
+				adapterLog(
+					"survival_policy state=%s priority=%s reason=%s critical_zones=%d defense_deficits=%d active_tasks=%d ready_scuds=%d enemy_wmd=%d producers=%d/%d money=%lu reserve=%lu",
+					survivalPolicy.state,
+					survivalPolicy.priority,
+					survivalPolicy.reason,
+						criticalZoneCount,
+						defenseReserveDeficits,
+						activeCombatTaskCount,
+						readyScudStormCount,
+						enemyWmdTargetCount,
+					counts.barracks,
+					counts.armsDealers,
+					static_cast<unsigned long>(money),
+					static_cast<unsigned long>(reserveCash));
+
+				// Hold recovery for 30 seconds so consolidation cannot oscillate when floors fall.
+				if (openingInfrastructureReady) m_autonomy.state.productionSpineEstablished = true;
+				const bool establishedEconomy = m_autonomy.state.productionSpineEstablished || totalSupplyStashes >= 2 || completedBlackMarkets > 0;
+				if (isBalancedSprawl && (survivalPolicy.collapseImminent
+					|| (now >= 120000u && establishedEconomy && survivalPolicy.producerSpineBroken)))
+					m_autonomy.state.survivalRecoveryUntilTick = now + 30000u;
+				const bool survivalRecovery = isSurvivalRecoveryActive(now);
+				Int recoveryZoneIndex = -1;
+				const UnsignedInt previousRecoveryZone = m_autonomy.state.recoveryZoneAnchor;
+				m_autonomy.state.recoveryZoneAnchor = 0u;
+				Real bestRecoveryScore = -1.0e30f;
+				m_autonomy.state.survivalCoreZones.clear();
+				for (std::size_t i = 0; i < zones.size(); ++i)
+				{
+					const auto& zone = zones[i]; const auto& zc = zoneCounts[i];
+					const UnsignedInt anchor = static_cast<UnsignedInt>(zone.anchorId);
+					const auto threat = m_autonomy.state.zoneThreats.find(anchor);
+					const bool fresh = threat != m_autonomy.state.zoneThreats.end() && now - threat->second.lastSeenTick <= 15000u;
+					const int enemies = fresh ? threat->second.localEnemyCount : 0;
+					const int artillery = fresh ? threat->second.enemyArtilleryCount : 0;
+					if (!zone.isMainBase && zc.supplyStashes + zc.blackMarkets + zc.armsDealers + zc.barracks == 0) continue;
+					const Real score = (zone.isMainBase ? 300.0f : 0.0f)
+						+ 40.0f * (zc.armsDealers + zc.barracks) + 25.0f * zc.blackMarkets
+						+ 15.0f * (zc.tunnels + zc.stingers) - 180.0f * enemies - 240.0f * artillery
+						+ (anchor == previousRecoveryZone ? 50.0f : 0.0f);
+					if (score > bestRecoveryScore) { bestRecoveryScore = score; recoveryZoneIndex = static_cast<Int>(i); }
+					if (zone.isMainBase) m_autonomy.state.survivalCoreZones.insert(anchor);
+				}
+				if (recoveryZoneIndex >= 0)
+				{
+					m_autonomy.state.recoveryZoneAnchor = static_cast<UnsignedInt>(zones[recoveryZoneIndex].anchorId);
+					m_autonomy.state.survivalCoreZones.insert(m_autonomy.state.recoveryZoneAnchor);
+				}
+				// Retain at most one additional quiet income cluster alongside the main/recovery base.
+				Int incomeCore = -1; int mostMarkets = 1;
+				for (std::size_t i = 0; i < zones.size(); ++i)
+				{
+					const UnsignedInt anchor = static_cast<UnsignedInt>(zones[i].anchorId);
+					if (m_autonomy.state.survivalCoreZones.count(anchor) != 0u) continue;
+					const auto threat = m_autonomy.state.zoneThreats.find(anchor);
+					if (threat != m_autonomy.state.zoneThreats.end() && now - threat->second.lastSeenTick <= 15000u
+						&& threat->second.localEnemyCount + threat->second.enemyArtilleryCount > 0) continue;
+					if (zoneCounts[i].blackMarkets > mostMarkets) { mostMarkets = zoneCounts[i].blackMarkets; incomeCore = static_cast<Int>(i); }
+				}
+				if (incomeCore >= 0) m_autonomy.state.survivalCoreZones.insert(static_cast<UnsignedInt>(zones[incomeCore].anchorId));
+				const bool fundedCapacity = policyConfig.isEconomyFirstSprawl
+					? money >= m_autonomy.state.profileSpendPlan.growthProtectedCash + 2500u
+					: money >= reserveCash + 8000u;
+				const bool queuesSaturated = counts.armsDealers > 0
+					&& counts.queuedQuads + counts.queuedScorpions + counts.queuedRocketBuggies + counts.queuedScudLaunchers >= counts.armsDealers * 2;
+				const Int desiredReadyArms = std::min(policyConfig.sprawlArmsCap,
+					policyConfig.isEconomyFirstSprawl && fundedCapacity ? std::min(8, 2 + static_cast<int>(completedBlackMarkets) / 3) :
+					establishedEconomy ? std::max(survivalRecovery ? 4 : 2,
+						fundedCapacity && queuesSaturated ? std::min(8, 2 + counts.blackMarkets / 3) : 0) : 1);
+				const Int desiredReadyBarracks = std::min(policyConfig.sprawlBarracksCap, establishedEconomy ? 2 : 1);
+				m_autonomy.state.survivalPolicyTelemetry["recovery_active"] = survivalRecovery;
+				m_autonomy.state.survivalPolicyTelemetry["recovery_zone"] = m_autonomy.state.recoveryZoneAnchor;
+				m_autonomy.state.survivalPolicyTelemetry["core_zones"] = m_autonomy.state.survivalCoreZones;
+				m_autonomy.state.survivalPolicyTelemetry["desired_arms_dealers"] = desiredReadyArms;
+				m_autonomy.state.survivalPolicyTelemetry["desired_barracks"] = desiredReadyBarracks;
+				m_autonomy.state.survivalPolicyTelemetry["queues_saturated"] = queuesSaturated;
+
 				const Int effectiveTotalBlackMarkets = static_cast<Int>(completedBlackMarkets + inProgressBlackMarkets);
 				Int stashZoneCount = 0;
 				Int developedZoneCount = 0;
@@ -3573,6 +4029,27 @@ namespace
 					AIControlAdapterProfilePolicyManager().WantsBaselineTwoMarkets(policyConfig);
 				AIControlAdapterMacroBuildSnapshot macroBuildSnapshotBase =
 					AIControlAdapterMacroBuildSnapshotBuilder().Build(macroSnapshotInput);
+				macroBuildSnapshotBase.survivalRecovery = survivalRecovery;
+				macroBuildSnapshotBase.recoveryZoneIndex = establishedEconomy || survivalRecovery ? recoveryZoneIndex : -1;
+				macroBuildSnapshotBase.readyArmsDealers = counts.armsDealers;
+				macroBuildSnapshotBase.readyBarracks = counts.barracks;
+				macroBuildSnapshotBase.desiredReadyArmsDealers = desiredReadyArms;
+				macroBuildSnapshotBase.desiredReadyBarracks = desiredReadyBarracks;
+				std::string workerProducerTemplate = inferCommandCenterTemplateForPlayer(player);
+				for (const auto& owned : ownedObjects)
+				{
+					if (owned.object == nullptr || owned.underConstruction || !owned.isStructure || owned.object->getPosition() == nullptr) continue;
+					if (!owned.isSupplyStructure && !owned.object->isKindOf(KINDOF_COMMANDCENTER)) continue;
+					if (AIControlAdapterTemplateInferenceService::InferUnitTemplateForProducer(owned.object, "worker").empty()) continue;
+					for (std::size_t i = 0; i < zones.size(); ++i)
+					{
+						if (static_cast<UnsignedInt>(zones[i].anchorId) != m_autonomy.state.recoveryZoneAnchor) continue;
+						const Real dx = owned.object->getPosition()->x - zones[i].center.x, dy = owned.object->getPosition()->y - zones[i].center.y;
+						if (dx * dx + dy * dy <= m_autonomy.state.zoneRadius * m_autonomy.state.zoneRadius)
+						{ ++macroBuildSnapshotBase.coreWorkerProducers; break; }
+					}
+				}
+				macroBuildSnapshotBase.workerProducersInProgress = static_cast<int>(m_autonomy.taskReservationManager.findBuildTasks("CommandCenter").size());
 				const bool remoteZoneHasStash = macroBuildSnapshotBase.remoteZoneHasStash;
 				const bool shouldThrottleExtraStashGrowth = macroBuildSnapshotBase.shouldThrottleExtraStashGrowth;
 				const bool shouldPreserveReserve = macroBuildSnapshotBase.shouldPreserveReserve;
@@ -3591,7 +4068,7 @@ namespace
 				const bool allowUrgentExpansionDespiteReserve = macroExpansion.allowUrgentExpansionDespiteReserve;
 				const bool zoneExpansionIsUrgent = macroExpansion.zoneExpansionUrgent;
 				AIControlAdapterStrategicSpendEconomyFacts macroSpendEconomy;
-				macroSpendEconomy.money = money;
+				macroSpendEconomy.money = availableAutonomyCash(player);
 				macroSpendEconomy.reserveCash = reserveCash;
 				macroSpendEconomy.completedMarkets = static_cast<int>(completedBlackMarkets);
 				macroSpendEconomy.healthyMarketsInProgress = static_cast<int>(inProgressBlackMarkets);
@@ -3615,6 +4092,7 @@ namespace
 					strategicSpendSnapshotBuilder.BuildBase(macroSpendEconomy, macroSpendZones, macroSpendArmy);
 				auto trySupplyExpansionBuild = [&](std::string& outReason) -> bool
 				{
+					if (!requireAutonomyRule("zone_expansion", outReason)) return false;
 					nlohmann::json args = nlohmann::json::object();
 					const AIControlAdapterRemoteSupplyStageDecision& remoteSupplyStage = macroBuildPolicyDecisions.remoteSupplyStage;
 					if (remoteSupplyStage.allowRemote && hasMainZoneForFootprint)
@@ -3631,14 +4109,30 @@ namespace
 					return tryCommand("auto_macro", "Game.BuildSupplyStashSmart", args, outReason);
 				};
 				AIControlAdapterStrategicSpendSnapshotOverrides macroSpendOverrides;
-				macroSpendOverrides.expansionUrgent = zoneExpansionIsUrgent;
+				macroSpendOverrides.profilePlan = m_autonomy.state.profileSpendPlan;
+				// A throttled/capped expansion cannot win spending arbitration.
+				macroSpendOverrides.expansionUrgent = zoneExpansionIsUrgent
+					&& macroBuildPolicyDecisions.expansionDecision.shouldAttemptExpansion;
 				macroSpendOverrides.incomeCritical = completedBlackMarkets == 0u;
 				macroSpendOverrides.reserveDepleted = money < reserveCash;
 				const AIControlAdapterStrategicSpendSnapshot macroSpendSnapshot =
 					strategicSpendSnapshotBuilder.Build(macroSpendBase, macroSpendOverrides);
 				const AIControlAdapterStrategicSpendManager strategicSpendManager;
-				const AIControlAdapterStrategicSpendPlan macroSpendPlan =
+				AIControlAdapterStrategicSpendPlan macroSpendPlan =
 					strategicSpendManager.EvaluateMacroPlan(macroSpendSnapshot, 1800u, blackMarketCost, blackMarketCost, 5000u, 1200u);
+				const auto armsSpend = strategicSpendManager.Evaluate(macroSpendSnapshot,
+					survivalRecovery && counts.armsDealers < 2 ? StrategicSpendCategory::ProducerRecovery : StrategicSpendCategory::ProductionGrowth, 2500u);
+				const auto barracksSpend = strategicSpendManager.Evaluate(macroSpendSnapshot,
+					survivalRecovery && counts.barracks < 1 ? StrategicSpendCategory::ProducerRecovery : StrategicSpendCategory::ProductionGrowth, 600u);
+				const auto workerProducerSpend = strategicSpendManager.Evaluate(macroSpendSnapshot, StrategicSpendCategory::ProducerRecovery, 2000u);
+				macroBuildSnapshotBase.workerProducerSpend = {workerProducerSpend.allowed && !workerProducerTemplate.empty(), workerProducerSpend.reason};
+				macroBuildSnapshotBase.armsCapacitySpend = {armsSpend.allowed, armsSpend.reason};
+				macroBuildSnapshotBase.barracksCapacitySpend = {barracksSpend.allowed, barracksSpend.reason};
+				if (survivalRecovery) {
+					macroSpendPlan.expansion.allowed = false; macroSpendPlan.expansion.reason = "survival_recovery";
+				}
+				m_autonomy.state.survivalPolicyTelemetry["arms_spend_allowed"] = armsSpend.allowed;
+				m_autonomy.state.survivalPolicyTelemetry["arms_spend_reason"] = armsSpend.reason;
 				for (const AIControlAdapterStrategicSpendRecord& spendRecord : macroSpendPlan.records)
 				{
 					const AIControlAdapterStrategicSpendDecision& decision = spendRecord.decision;
@@ -3691,7 +4185,9 @@ namespace
 				const AIControlAdapterMacroBuildSnapshotBuilder macroSnapshotBuilder;
 				AIControlAdapterMacroBuildSnapshot macroBuildSnapshot =
 					macroSnapshotBuilder.ApplyRuntimeInput(macroBuildSnapshotBase, macroRuntimeInput);
+				macroBuildSnapshot.profilePlan = m_autonomy.state.profileSpendPlan;
 				AIControlAdapterMacroBuildPlan macroBuildPlan = macroBuildManager.BuildPlan(macroBuildSnapshot);
+				filterAutonomyMacroRules(macroBuildPlan, totalArmsDealers, totalBarracks);
 				const AIControlAdapterMacroBuildTelemetry& macroBuildTelemetry = macroBuildPlan.telemetry;
 				const AIControlAdapterMacroBuildTelemetrySerializer macroTelemetrySerializer;
 				for (const std::string& line : macroTelemetrySerializer.BuildExpansionLogLines({
@@ -3742,6 +4238,7 @@ namespace
 					const AutonomyZone& zone = zones[zoneIdx];
 					const AutonomyZoneCounts& zc = zoneCounts[zoneIdx];
 					const UnsignedInt zoneAnchor = static_cast<UnsignedInt>(zone.anchorId);
+					if (isConsolidatedSurvivalZone(zoneAnchor, now)) continue;
 					const bool zoneIsActive = hasActiveZone && zoneAnchor == static_cast<UnsignedInt>(activeZone.anchorId);
 					const auto threatIt = m_autonomy.state.zoneThreats.find(zoneAnchor);
 					const bool repeatedAttack = threatIt != m_autonomy.state.zoneThreats.end()
@@ -3771,8 +4268,7 @@ namespace
 					const int staticInProgress = zc.tunnelsInProgress + zc.stingersInProgress + reservedTunnels + reservedStingers;
 					staticDefenseGap += std::max<int>(0, staticPolicy.desiredTunnels - staticPolicy.effectiveTunnels);
 					staticDefenseGap += std::max<int>(0, staticPolicy.desiredStingers - staticPolicy.effectiveStingers);
-					const bool hasLocalStrategicTask = counts.palacesInProgress > 0 &&
-						(zc.palaces > 0 || zc.supplyStashes > 0 || zoneIsActive);
+					const bool hasLocalStrategicTask = hasStrategicBuildNearZone(zone.center.x, zone.center.y);
 					const int desiredLocalWorkers = hasLocalStrategicTask ? 3 : (zoneIsActive ? 2 : (isDeveloped ? 1 : 0));
 					if (desiredLocalWorkers > 0)
 					{
@@ -3829,7 +4325,7 @@ namespace
 					adapterLog("%s", macroTelemetrySerializer.BuildPalaceRedundancyLogLine(palaceTelemetryInput).c_str());
 					m_autonomy.state.palaceRedundancyTelemetry.push_back(
 						macroTelemetrySerializer.BuildPalaceRedundancyTelemetry(palaceTelemetryInput));
-					if (palaceRedundancyZoneIndex < 0)
+					if (!survivalRecovery && palaceRedundancyZoneIndex < 0)
 					{
 						const AIControlAdapterPalaceRedundancyCandidateDecision palaceCandidate =
 							macroBuildManager.EvaluatePalaceRedundancyCandidate({
@@ -3866,68 +4362,6 @@ namespace
 				macroTelemetryInput.spendPlan = &macroSpendPlan;
 				m_autonomy.state.macroBuildTelemetry =
 					macroTelemetrySerializer.BuildTelemetry(macroTelemetryInput);
-				int criticalZoneCount = 0;
-				for (const auto& threatPair : m_autonomy.state.zoneThreats)
-				{
-					const AutonomyZoneThreatState& threat = threatPair.second;
-					if ((now - threat.lastSeenTick) <= 45000u && threat.level == "critical")
-					{
-						++criticalZoneCount;
-					}
-				}
-				int defenseReserveDeficits = 0;
-				for (const auto& reservePair : m_autonomy.state.zoneDefenseReserves)
-				{
-					if (reservePair.second.deficit > 0)
-					{
-						++defenseReserveDeficits;
-					}
-					}
-					const int activeCombatTaskCount = m_autonomy.combatTaskManager.getActiveTaskCount();
-					const int enemyWmdTargetCount = static_cast<int>(m_autonomy.wmdTargetTracker.getAllTargets().size());
-					const int readyScudStormCount = countReadyScudStorms(player);
-					AIControlAdapterSurvivalPolicyInput survivalInput;
-					survivalInput.criticalZoneCount = criticalZoneCount;
-					survivalInput.defenseReserveDeficits = defenseReserveDeficits;
-					survivalInput.activeCombatTasks = activeCombatTaskCount;
-					survivalInput.readyScudStorms = readyScudStormCount;
-					survivalInput.enemyWmdTargets = enemyWmdTargetCount;
-					survivalInput.readyBarracks = counts.barracks;
-					survivalInput.readyArmsDealers = counts.armsDealers;
-					survivalInput.money = static_cast<unsigned int>(money);
-					survivalInput.reserveCash = static_cast<unsigned int>(reserveCash);
-					const AIControlAdapterSurvivalPolicyResult survivalPolicy =
-						AIControlAdapterSurvivalPolicyManager().Evaluate(survivalInput);
-					m_autonomy.state.survivalPolicyTelemetry = nlohmann::json::object({
-						{"state", survivalPolicy.state},
-						{"priority", survivalPolicy.priority},
-						{"reason", survivalPolicy.reason},
-						{"critical_zones", criticalZoneCount},
-						{"defense_reserve_deficits", defenseReserveDeficits},
-						{"active_combat_tasks", activeCombatTaskCount},
-						{"ready_scuds", readyScudStormCount},
-						{"enemy_wmd_targets", enemyWmdTargetCount},
-						{"ready_barracks", counts.barracks},
-						{"ready_arms_dealers", counts.armsDealers},
-					{"money", money},
-					{"reserve", reserveCash},
-					{"cash_float", cashAboveReserve},
-					{"block_exposed_wmd_foundations", survivalPolicy.blockExposedWmdFoundations}
-				});
-				adapterLog(
-					"survival_policy state=%s priority=%s reason=%s critical_zones=%d defense_deficits=%d active_tasks=%d ready_scuds=%d enemy_wmd=%d producers=%d/%d money=%lu reserve=%lu",
-					survivalPolicy.state,
-					survivalPolicy.priority,
-					survivalPolicy.reason,
-						criticalZoneCount,
-						defenseReserveDeficits,
-						activeCombatTaskCount,
-						readyScudStormCount,
-						enemyWmdTargetCount,
-					counts.barracks,
-					counts.armsDealers,
-					static_cast<unsigned long>(money),
-					static_cast<unsigned long>(reserveCash));
 				int garrisonGap = 0;
 				if (m_autonomy.state.garrisonTelemetry.is_array())
 				{
@@ -3979,7 +4413,7 @@ namespace
 				const int expansionGap = std::max<Int>(0, zoneGap);
 				const int normalAttackCount = counts.soldiers + counts.rpg + counts.quads + counts.scorpions;
 				const bool normalAttackReady = normalAttackCount >= m_automation.attackRule.minUnits;
-				const AIControlAdapterBrutalPressureResult brutalPressure = AIControlAdapterChooseBrutalPressurePriority({
+				AIControlAdapterBrutalPressureResult brutalPressure = AIControlAdapterChooseBrutalPressurePriority({
 					expansionGap,
 					mainUnderPressure,
 					staticDefenseGap,
@@ -3992,6 +4426,7 @@ namespace
 					normalAttackReady,
 					emergencyUnitAttack
 				});
+				if (survivalRecovery) { brutalPressure.chosenPriority = "emergency_survival"; brutalPressure.reason = "survival_recovery"; }
 				const AIControlAdapterBrutalPressureTelemetryInput brutalPressureTelemetryInput{
 					expansionGap,
 					mainUnderPressure,
@@ -4023,7 +4458,7 @@ namespace
 						&palaceRecovery,
 						openingInfrastructureReady
 					});
-				if (palaceRecoveryCandidate.shouldAttempt && palaceRecoveryCandidate.command != nullptr)
+				if (!survivalRecovery && palaceRecoveryCandidate.shouldAttempt && palaceRecoveryCandidate.command != nullptr)
 				{
 					chosenCommand = palaceRecoveryCandidate.command;
 					issued = tryMacroBuildWithFallback(palaceRecoveryCandidate.command, false, reason);
@@ -4056,16 +4491,24 @@ namespace
 					}
 
 					chosenCommand = dispatch.command;
+					if (dispatch.category == "worker_producer_recovery") m_autonomy.state.macroBuildTelemetry["worker_producer_template"] = workerProducerTemplate;
 					if (dispatch.kind == AIControlAdapterMacroBuildDispatchKind::SpecificZone
 						&& dispatch.zoneIndex >= 0
 						&& dispatch.zoneIndex < static_cast<int>(zones.size()))
 					{
+						nlohmann::json buildArgs = nlohmann::json::object();
+						if (dispatch.category == "worker_producer_recovery") buildArgs["building_template"] = workerProducerTemplate;
 						issued = trySpecificZoneCommand(
 							dispatch.taskName.c_str(),
 							dispatch.command.c_str(),
 							zones[static_cast<std::size_t>(dispatch.zoneIndex)],
-							nlohmann::json::object(),
+							buildArgs,
 							reason);
+					}
+					else if (survivalRecovery && recoveryZoneIndex >= 0)
+					{
+						issued = trySpecificZoneCommand("auto_survival_recovery", dispatch.command.c_str(),
+							zones[recoveryZoneIndex], nlohmann::json::object(), reason);
 					}
 					else if (dispatch.kind == AIControlAdapterMacroBuildDispatchKind::SupplyExpansion)
 					{
@@ -4097,7 +4540,16 @@ namespace
 					}
 					return true;
 				};
-				if (chosenCommand == "Game.BuildPalaceSmart")
+				if ((survivalRecovery || (macroBuildPlan.choice.category != nullptr
+					&& std::strcmp(macroBuildPlan.choice.category, "producer_recovery") == 0)) && tryMacroBuildIntentScheduler())
+				{
+					// Safe recovery/capacity growth handled this tick.
+				}
+				else if (survivalRecovery)
+				{
+					reason = "survival_recovery_wait";
+				}
+				else if (chosenCommand == "Game.BuildPalaceSmart")
 				{
 					// Emergency Palace recovery intentionally leaves unit production to the production tick.
 				}
@@ -4176,7 +4628,7 @@ namespace
 				const AIControlAdapterNonSupplyFootholdDecision footholdDecision =
 					macroBuildManager.EvaluateNonSupplyFoothold({
 						issued,
-						isSprawlStyle,
+						isSprawlStyle && !survivalRecovery && autonomyRuleEnabled("zone_expansion"),
 						stashZoneCount,
 						desiredZoneCount,
 						allowUrgentExpansionDespiteReserve,
@@ -4220,7 +4672,13 @@ namespace
 							if (footholdDecision.shouldAttemptTunnel)
 							{
 								chosenCommand = "Game.BuildTunnelNetwork";
-								issued = tryMacroBuildWithFallback("Game.BuildTunnelNetwork", true, reason);
+								struct ExpansionPurposeScope
+                                {
+                                    bool& value;
+                                    explicit ExpansionPurposeScope(bool& flag) : value(flag) { value = true; }
+                                    ~ExpansionPurposeScope() { value = false; }
+                                } expansionPurpose(m_ruleExpansionConstructionScope);
+                                issued = tryMacroBuildWithFallback("Game.BuildTunnelNetwork", true, reason);
 								recordBuildAttempt("Game.BuildTunnelNetwork", issued, reason);
 
 								if (issued)
@@ -4231,7 +4689,7 @@ namespace
 									pending.anchorType = footholdType;
 									pending.targetX = footholdCandidate.x;
 									pending.targetY = footholdCandidate.y;
-									pending.createdTick = GetTickCount();
+									pending.createdTick = adapterGameplayTick();
 									pending.buildIssued = true;
 									pending.buildCommand = "Game.BuildTunnelNetwork";
 									pending.reason = "non_supply_expansion";
@@ -4325,6 +4783,7 @@ namespace
 					{"reason", issued ? "ok" : reason},
 					{"tick", static_cast<unsigned int>(now)}
 				});
+				macroIncomeIssued = issued && chosenCommand == "Game.BuildBlackMarketSmart";
 				// Mark zone telemetry as dirty when build command issued (will complete later)
 				if (issued && !chosenCommand.empty())
 				{
@@ -4397,6 +4856,7 @@ namespace
 			const UnsignedInt reserveCash = profilePolicyConfig.reserveCash;
 
 			EconomyManagerInput economyInput;
+			economyInput.profilePlan = m_autonomy.state.profileSpendPlan;
 			economyInput.currentMoney = money;
 			economyInput.smoothedNetCashPerMinute = static_cast<int>(std::floor(m_autonomy.state.smoothedNetCashPerMinute));
 			economyInput.reserveCash = reserveCash;
@@ -4404,6 +4864,7 @@ namespace
 			economyInput.inProgressBlackMarkets = inProgressBlackMarkets;
 			economyInput.hasPalace = counts.palaces > 0;
 			economyInput.profile = profile;
+			economyInput.economicVictory = isBalancedSprawl && m_autonomy.state.economicVictory;
 
 			EconomyPolicy economyPolicy = m_autonomy.economyManager.AssessEconomyPolicy(economyInput);
 
@@ -4486,6 +4947,11 @@ namespace
 
 			// Economy recovery request (Black Market construction during reserve pressure)
 			EconomyRecoveryRequest recoveryRequest = m_autonomy.economyManager.ChooseRecoveryAction(economyInput, economyPolicy);
+			if (macroIncomeIssued) { recoveryRequest.shouldBuildIncome = false; recoveryRequest.reason = "macro_income_issued"; }
+			if (isSurvivalRecoveryActive(now) && m_autonomy.state.recoveryZoneAnchor == 0u)
+				{ recoveryRequest.shouldBuildIncome = false; recoveryRequest.reason = "no_viable_recovery_zone"; }
+			m_autonomy.state.strategicSpendTelemetry["economy_recovery_action"] = recoveryRequest.shouldBuildIncome ? "requested" : "none";
+			m_autonomy.state.strategicSpendTelemetry["economy_recovery_reason"] = recoveryRequest.reason;
 			if (recoveryRequest.shouldBuildIncome)
 			{
 				AIControlAdapterStrategicSpendEconomyFacts recoverySpendEconomy;
@@ -4516,17 +4982,20 @@ namespace
 				const AIControlAdapterStrategicSpendSnapshotBase recoverySpendBase =
 					strategicSpendSnapshotBuilder.BuildBase(recoverySpendEconomy, recoverySpendZones, recoverySpendArmy);
 				AIControlAdapterStrategicSpendSnapshotOverrides recoverySpendOverrides;
+				recoverySpendOverrides.profilePlan = m_autonomy.state.profileSpendPlan;
 				recoverySpendOverrides.incomeCritical = economyPolicy.incomeState == EconomyIncomeState::Critical || completedBlackMarkets == 0u;
 				recoverySpendOverrides.reserveDepleted = economyPolicy.reserveState == EconomyReserveState::Depleted || money < reserveCash;
 				const AIControlAdapterStrategicSpendSnapshot recoverySpendSnapshot =
 					strategicSpendSnapshotBuilder.Build(recoverySpendBase, recoverySpendOverrides);
 				const AIControlAdapterStrategicSpendManager strategicSpendManager;
+				const StrategicSpendCategory incomeSpendCategory = economyPolicy.scalingMode == EconomyScalingMode::Growth
+					? StrategicSpendCategory::EconomyGrowth : StrategicSpendCategory::EconomyRecovery;
 				const AIControlAdapterStrategicSpendDecision recoverySpend =
-					strategicSpendManager.Evaluate(recoverySpendSnapshot, StrategicSpendCategory::EconomyRecovery, 2500u);
+					strategicSpendManager.Evaluate(recoverySpendSnapshot, incomeSpendCategory, 2500u);
 				adapterLog(
 					"%s",
 					strategicSpendTelemetrySerializer.BuildPolicyLogLine({
-						StrategicSpendCategory::EconomyRecovery,
+						incomeSpendCategory,
 						money,
 						reserveCash,
 						&recoverySpend
@@ -4538,7 +5007,7 @@ namespace
 					staleStrategicFoundations);
 				strategicSpendTelemetrySerializer.RecordCategory(
 					m_autonomy.state.strategicSpendTelemetry,
-					StrategicSpendCategory::EconomyRecovery,
+					incomeSpendCategory,
 					2500u,
 					recoverySpend);
 				m_autonomy.state.strategicSpendTelemetry["economy_recovery_action"] =
@@ -4566,6 +5035,18 @@ namespace
 					m_autonomy.state.zoneRadius,
 					completedBlackMarkets);
 
+				if (isSurvivalRecoveryActive(now))
+					for (const auto& zone : zones)
+						if (static_cast<UnsignedInt>(zone.anchorId) == m_autonomy.state.recoveryZoneAnchor)
+						{
+							Real dx = 0.0f, dy = 0.0f; const char* source = "";
+							resolveZoneFrontDirection(zone, dx, dy, source);
+							placement.hasPlacement = true; placement.zoneAnchorId = static_cast<UnsignedInt>(zone.anchorId);
+							placement.zoneCenterX = zone.center.x - dx * m_autonomy.state.zoneRadius * 0.25f;
+							placement.zoneCenterY = zone.center.y - dy * m_autonomy.state.zoneRadius * 0.25f;
+							placement.zoneRadius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius * 0.75f);
+							placement.reason = "safe_survival_income"; break;
+						}
 				// Log strategic placement decision (Phase 5.7: added score and zone_markets)
 				adapterLog(
 					"strategic_placement command=%s template=%s role=income source=%s zone_anchor=%u "
@@ -4578,7 +5059,7 @@ namespace
 					placement.zoneCenterX,
 					placement.zoneCenterY,
 					placement.zoneRadius,
-					0, // Always use strict_zone=false for recovery (Phase 5.5)
+					isSurvivalRecoveryActive(now) ? 1 : 0, // Keep collapse recovery inside the selected core.
 					placement.hasPlacement ? 1 : 0,
 					placement.score,
 					placement.zoneMarketCount,
@@ -4606,8 +5087,8 @@ namespace
 							{"y", placement.zoneCenterY}
 						});
 						args["zone_radius"] = placement.zoneRadius;
-						// Use strict_zone=false to allow worker movement if placement fails
-						args["strict_zone"] = false;
+						// Collapse recovery must retain its selected safe placement.
+						args["strict_zone"] = isSurvivalRecoveryActive(now);
 					}
 
 					return tryCommand("auto_recovery", recoveryRequest.buildingCommand.c_str(), args, resultReason);
@@ -4728,6 +5209,11 @@ namespace
 				for (auto it = m_autonomy.state.zoneDefenseAllocations.begin(); it != m_autonomy.state.zoneDefenseAllocations.end(); )
 				{
 					AutonomyZoneDefenseAllocation& allocation = it->second;
+					if (findZoneByAnchor(allocation.zoneAnchorId) == nullptr || isConsolidatedSurvivalZone(allocation.zoneAnchorId, now))
+					{
+						for (unsigned int id : allocation.taskIds) m_autonomy.combatTaskManager.completeTask(id, "survival_consolidation");
+						it = m_autonomy.state.zoneDefenseAllocations.erase(it); continue;
+					}
 					const auto threatIt = m_autonomy.state.zoneThreats.find(allocation.zoneAnchorId);
 					const bool threatStillFresh = threatIt != m_autonomy.state.zoneThreats.end() && isFreshThreat(threatIt->second);
 					if (threatStillFresh)
@@ -4793,7 +5279,7 @@ namespace
 					const UnsignedInt zoneAnchor = it->first;
 					const AutonomyZoneThreatState& threat = it->second;
 
-					if (!isFreshThreat(threat))
+					if (!isFreshThreat(threat) || findZoneByAnchor(zoneAnchor) == nullptr || isConsolidatedSurvivalZone(zoneAnchor, now))
 					{
 						continue;
 					}
@@ -4930,13 +5416,14 @@ namespace
 							threat != nullptr ? threat->destroyedStructures : 0,
 							quietMs
 						});
-					reserveState.posture = reserve.posture;
-					reserveState.reason = reserve.reason;
+					const bool consolidated = isConsolidatedSurvivalZone(zoneAnchor, now);
+					reserveState.posture = consolidated ? "consolidated" : reserve.posture;
+					reserveState.reason = consolidated ? "survival_consolidation" : reserve.reason;
 					reserveState.resident = residentCount;
-					reserveState.floor = reserve.floor;
-					reserveState.surplus = std::max(0, availableResidents - reserve.floor);
-					reserveState.deficit = std::max(0, reserve.floor - residentCount);
-					reserveState.activeThreat = activeThreat;
+					reserveState.floor = consolidated ? 0 : reserve.floor;
+					reserveState.surplus = std::max(0, availableResidents - reserveState.floor);
+					reserveState.deficit = std::max(0, reserveState.floor - residentCount);
+					reserveState.activeThreat = activeThreat && !consolidated;
 					reserveState.productionNeeded = reserve.productionNeeded && reserveState.deficit > 0;
 					reserveState.donorAllowed = reserveState.surplus > 0;
 					adapterLog(
@@ -5077,7 +5564,7 @@ namespace
 								m_autonomy.state.zoneDefenseAllocations.find(sourceZone) != m_autonomy.state.zoneDefenseAllocations.end(),
 								reserveState.posture == "frontline",
 								reserveState.posture == "contested_front",
-								mainBaseOverride
+								mainBaseOverride || isSurvivalRecoveryActive(now)
 							});
 						adapterLog(
 							"zone_defense_donor_floor source_zone=%u target_zone=%u available=%d floor=%d requested=%d allowed=%d blocked=%d reason=%s",
@@ -5229,7 +5716,7 @@ namespace
 						isFrontierZone,
 						isActiveZone,
 						activeCriticalAllocations > 0,
-						mainBaseOverride.active
+						mainBaseOverride.active || isSurvivalRecoveryActive(now)
 					});
 
 					AIControlAdapterZoneDefenseAllocationResult allocationDecision = AIControlAdapterEvaluateZoneDefenseAllocation({
@@ -5382,6 +5869,7 @@ namespace
 						message["type"] = "SessionCommand";
 						message["cmd"] = "Game.AttackMove.DefendZoneSmart";
 						message["args"] = nlohmann::json::object();
+						message["args"]["player_index"] = player->getPlayerIndex();
 						message["args"]["target_x"] = threatPositionX;
 						message["args"]["target_y"] = threatPositionY;
 						message["args"]["zone_anchor"] = threatenedZoneAnchor;
@@ -5520,9 +6008,6 @@ namespace
 			AIControlAdapterGlaUsaStrategyResult glaUsaStrategy;
 			if (productionDue)
 			{
-				const Int armyCount = std::max<Int>(0, counts.mobileUnits - counts.workers);
-				const bool surplusProductionPressure = isBalancedSprawl && money >= 100000u;
-
 				// Prepare owned producers for zone selection
 				std::vector<ProductionProducerSnapshot> producerSnapshots;
 				producerSnapshots.reserve(ownedObjects.size());
@@ -5548,6 +6033,22 @@ namespace
 					}
 					producerSnapshots.push_back(snapshot);
 				}
+
+				Int queuedMobileCombat = counts.queuedQuads + counts.queuedScorpions + counts.queuedRocketBuggies + counts.queuedScudLaunchers;
+				for (const auto& producer : producerSnapshots)
+				{
+					if (!producer.isBarracks || producer.object == nullptr || producer.underConstruction) continue;
+					auto* queue = producer.object->getProductionUpdateInterface();
+					if (queue == nullptr) continue;
+					for (const auto& name : {inferRpgTemplateForProducer(producer.object), inferSoldierTemplateForPlayer(player, producer.object)})
+					{
+						const auto* templ = name.empty() ? nullptr : TheThingFactory->findTemplate(AsciiString(name.c_str()), false);
+						if (templ != nullptr) queuedMobileCombat += static_cast<int>(queue->countUnitTypeInQueue(templ));
+					}
+				}
+				const Int armyCount = counts.mobileCombatUnits + queuedMobileCombat;
+				if (m_autonomy.state.profileSpendPlan.active) m_autonomy.state.profileArmyObserved = armyCount;
+				const bool surplusProductionPressure = isBalancedSprawl && m_autonomy.state.economicVictory;
 
 				// Gather capability state
 				const ScienceType scudLauncherScience = TheScienceStore != nullptr
@@ -5861,7 +6362,8 @@ namespace
 					counts.barracks,
 					counts.armsDealers,
 					counts.blackMarkets,
-					profilePolicyManager.ResolveCombatArmyCapBase(profilePolicyConfig)
+					profilePolicyManager.ResolveCombatArmyCapBase(profilePolicyConfig),
+					m_autonomy.state.economicVictory
 				});
 				{
 					const int baseArmyCap = profilePolicyManager.ResolveCombatArmyCapBase(profilePolicyConfig);
@@ -5888,6 +6390,7 @@ namespace
 					}
 					const char* capReason =
 						!isBalancedSprawl ? "profile_static" :
+						m_autonomy.state.economicVictory ? "economic_victory_target" :
 						money < 100000u ? "cash_below_surplus" :
 						cashMarketFloor > incomeSupportedCap ? "cash_market_floor" :
 						"income_supported";
@@ -5951,6 +6454,7 @@ namespace
 				const AIControlAdapterStrategicSpendSnapshotBase emergencySpendBase =
 					strategicSpendSnapshotBuilder.BuildBase(emergencySpendEconomy, emergencySpendZones, emergencySpendArmy);
 				AIControlAdapterStrategicSpendSnapshotOverrides emergencySpendOverrides;
+				emergencySpendOverrides.profilePlan = m_autonomy.state.profileSpendPlan;
 				emergencySpendOverrides.activeLocalEnemies = localEnemyCount;
 				emergencySpendOverrides.emergencySurvivalActive = emergencyDecision.active;
 				emergencySpendOverrides.incomeCritical = counts.blackMarkets <= 0;
@@ -6025,6 +6529,7 @@ namespace
 
 				// Build ProductionManager inputs
 				ProductionManagerInputs inputs;
+				inputs.economicVictory = m_autonomy.state.economicVictory;
 				inputs.money = money;
 				inputs.incomePerMinute = static_cast<int>(std::floor(m_autonomy.state.smoothedNetCashPerMinute));
 				inputs.reserveCash = reserveCash;
@@ -6178,12 +6683,22 @@ namespace
 					activeScoutAssignments
 				});
 				int scoutPoolProducerId = -1;
+				int scoutPoolQueueDepth = 9999;
+				std::string scoutPoolTemplate;
 				for (const ProductionProducerSnapshot& producer : producerSnapshots)
 				{
-					if (producer.isWarFactoryLike && !producer.underConstruction && producer.objectId > 0)
+					if (!producer.isWarFactoryLike || producer.underConstruction || producer.object == nullptr) continue;
+					const std::string technical = AIControlAdapterTemplateInferenceService::InferTechnicalTemplateForProducer(producer.object);
+					ProductionUpdateInterface* production = producer.object->getProductionUpdateInterface();
+					if (technical.empty() || production == nullptr) continue;
+					int depth = static_cast<int>(production->getProductionCount());
+					for (const PendingUnitQueue& pending : m_pendingUnitQueues)
+						if (pending.producerId == producer.object->getID()) ++depth;
+					if (depth < scoutPoolQueueDepth)
 					{
 						scoutPoolProducerId = producer.objectId;
-						break;
+						scoutPoolQueueDepth = depth;
+						scoutPoolTemplate = technical;
 					}
 				}
 				adapterLog(
@@ -6203,9 +6718,10 @@ namespace
 					m_autonomy.state.scoutingTelemetry["scout_pool_queued"] = counts.queuedTechnicals;
 					m_autonomy.state.scoutingTelemetry["scout_pool_assigned"] = activeScoutAssignments;
 				}
-				if (!emergencyDecision.active
+				if (autonomyRuleEnabled("scouting") && !emergencyDecision.active
 					&& scoutPoolDecision.productionNeeded
 					&& scoutPoolProducerId > 0
+					&& scoutPoolQueueDepth < 2
 					&& (!prodIntent.shouldProduce
 						|| prodIntent.commandName == "Game.QueueQuadsAllWarFactories"
 						|| prodIntent.commandName == "Game.QueueScorpionsAllWarFactories"))
@@ -6214,11 +6730,12 @@ namespace
 					prodIntent.commandName = "Game.QueueUnit";
 					prodIntent.producerKind = "arms_dealer";
 					prodIntent.producerObjectId = scoutPoolProducerId;
-					prodIntent.unitTemplate = scoutPoolDecision.unitTemplate;
+					prodIntent.unitTemplate = scoutPoolTemplate;
 					prodIntent.reason = scoutPoolDecision.reason;
 				}
 				if (glaUsaStrategy.shuttleTechnicalProductionNeeded
 					&& scoutPoolProducerId > 0
+					&& scoutPoolQueueDepth < 2
 					&& (!prodIntent.shouldProduce
 						|| prodIntent.commandName == "Game.QueueQuadsAllWarFactories"
 						|| prodIntent.commandName == "Game.QueueScorpionsAllWarFactories"))
@@ -6347,6 +6864,50 @@ namespace
 					}
 				}
 
+				const auto profileSpendPlan = m_autonomy.state.profileSpendPlan;
+				const bool sharedRefill = isBalancedSprawl;
+				const std::string refillPreferredCommand = prodIntent.commandName;
+				const bool phaseUtilityProduction = prodIntent.shouldProduce && prodIntent.commandName == "Game.QueueUnit"
+					&& prodIntent.producerObjectId > 0 && !prodIntent.unitTemplate.empty()
+					&& (!containsIgnoreCase(prodIntent.unitTemplate, "radarvan") || autonomyRuleEnabled("scouting"));
+				const bool captureUtilityProduction = prodIntent.shouldProduce && prodIntent.reason == "capture_utility_reserve";
+				const bool phaseEmergencyPulse = sharedRefill && emergencyDecision.active && emergencySpend.allowed
+					&& emergencySpend.batchLimit > 0 && money < reserveCash + 3000u;
+				const int refillArmyCap = profileSpendPlan.active ? profileSpendPlan.armyTarget
+					- (!profileSpendPlan.threatResponse && !profileSpendPlan.sustainedOffense
+						&& (!inputs.hasCompletedPalace || !inputs.hasScudLauncherScience) ? 2 : 0) : m_autonomy.state.economicVictory ? 1000
+					: emergencyDecision.active && emergencyDecision.bypassArmyCapBuffer ? std::max(150, prodIntent.effectiveArmyCap)
+					: prodIntent.effectiveArmyCap;
+				if (sharedRefill)
+				{
+					if (m_autonomy.state.economicVictory)
+						prodIntent.shouldProduce = inputs.openingInfrastructureReady && armyCount < refillArmyCap
+							&& (money >= reserveCash + 3000u || phaseEmergencyPulse);
+					if (profileSpendPlan.active)
+					{
+						prodIntent.shouldProduce = inputs.openingInfrastructureReady
+							&& (armyCount < refillArmyCap || phaseUtilityProduction || captureUtilityProduction)
+							&& money > profileSpendPlan.combatProtectedCash;
+						prodIntent.reason = prodIntent.shouldProduce ? profileSpendPlan.reason : "profile_army_or_budget_satisfied";
+					}
+					prodIntent.effectiveArmyCap = refillArmyCap;
+					if (!phaseUtilityProduction) prodIntent.producerObjectId = -1;
+					prodIntent.commandName = m_autonomy.state.economicVictory ? "economic_victory_refill" : "adaptive_shallow_refill";
+					if (prodIntent.shouldProduce) prodIntent.reason = phaseEmergencyPulse ? "bounded_emergency_pulse" : prodIntent.commandName;
+				}
+
+				m_autonomy.state.productionTelemetry = nlohmann::json::object({
+					{"mobile_combat_units", counts.mobileCombatUnits},
+					{"contained_combat_units", counts.containedCombatUnits},
+					{"queued_mobile_combat", queuedMobileCombat},
+					{"army_count", armyCount},
+					{"army_cap", prodIntent.effectiveArmyCap},
+					{"command", prodIntent.shouldProduce ? prodIntent.commandName : "none"},
+					{"reason", prodIntent.reason},
+					{"scout_producer_id", scoutPoolProducerId},
+					{"scout_producer_queue_depth", scoutPoolProducerId > 0 ? scoutPoolQueueDepth : -1}
+				});
+
 				// Always submit production intent to scheduler (even for hold states)
 				Intent schedulerIntent;
 				schedulerIntent.category = IntentCategory::PRODUCTION;
@@ -6365,7 +6926,36 @@ namespace
 					const std::string emergencyReason = emergencyDecision.reason != nullptr ? emergencyDecision.reason : "";
 					const int emergencyBatchLimitForLog = emergencySpend.batchLimit;
 					// Capture production execution logic in callback
-					schedulerIntent.executeFunc = [&, prodIntent, producerSnapshots, emergencyProductionLog, emergencyReserveSpend, emergencyArmyCapOverride, emergencyReason, emergencyBatchLimitForLog](std::string& resultReason) -> bool {
+					schedulerIntent.executeFunc = [&, prodIntent, inputs, producerSnapshots, sharedRefill, refillPreferredCommand, refillArmyCap, captureUtilityProduction, phaseEmergencyPulse, phaseUtilityProduction, glaUsaStrategy, emergencyProductionLog, emergencyReserveSpend, emergencyArmyCapOverride, emergencyReason, emergencyBatchLimitForLog](std::string& resultReason) -> bool {
+						if (sharedRefill)
+						{
+							std::string utility = phaseUtilityProduction && !phaseEmergencyPulse ? prodIntent.unitTemplate : "";
+							Int utilityProducer = prodIntent.producerObjectId;
+							if (captureUtilityProduction && !phaseEmergencyPulse)
+							{
+								int bestDepth = 2;
+								for (const auto& producer : producerSnapshots)
+								{
+									if (!producer.isBarracks || producer.underConstruction || producer.object == nullptr) continue;
+									auto* production = producer.object->getProductionUpdateInterface();
+									if (production == nullptr) continue;
+									int depth = static_cast<int>(production->getProductionCount());
+									for (const auto& pending : m_pendingUnitQueues) if (pending.producerId == producer.object->getID()) ++depth;
+									if (depth >= bestDepth) continue;
+									const std::string candidate = inferSoldierTemplateForPlayer(player, producer.object);
+									if (candidate.empty()) continue;
+									bestDepth = depth; utility = candidate; utilityProducer = producer.objectId;
+								}
+								if (utility.empty()) { resultReason = "capture_queues_full"; return false; }
+							}
+
+							return refillAutonomyProduction(player, inputs, producerSnapshots, resultReason,
+								m_autonomy.state.profileSpendPlan.active ? (inputs.economicVictory ? 64 : 16)
+									: phaseEmergencyPulse ? std::min(3, emergencyBatchLimitForLog) : inputs.economicVictory ? 64 : 16,
+								phaseEmergencyPulse && !m_autonomy.state.profileSpendPlan.active, utility, utilityProducer, refillArmyCap, refillPreferredCommand,
+								glaUsaStrategy.active ? glaUsaStrategy.quadFloor : emergencyProductionLog ? 12 : 0,
+								glaUsaStrategy.active ? glaUsaStrategy.scorpionFloor : emergencyProductionLog ? 8 : 0);
+						}
 						if (prodIntent.producerObjectId == -1)
 						{
 							// Use "all" command (all eligible producers)
@@ -6438,22 +7028,8 @@ namespace
 
 							if (!unitTemplate.empty())
 							{
-								nlohmann::json queuedMessage = {
-									{"type", "SessionCommand"},
-									{"request_id", "auto_prod_zone"},
-									{"cmd", "Game.QueueUnit"},
-									{"args", nlohmann::json::object({
-										{"producer_kind", prodIntent.producerKind},
-										{"unit_template", unitTemplate},
-										{"producer_object_id", prodIntent.producerObjectId}
-									})}
-								};
-								if (m_autonomy.state.hasExplicitPlayerIndex)
-								{
-									queuedMessage["args"]["player_index"] = m_autonomy.state.playerIndex;
-								}
-
-								bool issued = executeGameQueueUnit(queuedMessage, resultReason);
+								bool issued = queueUnit(player, referenceProducer, unitTemplate, 1,
+									prodIntent.producerKind, resultReason, captureUtilityProduction ? "capture" : "");
 
 								// Fallback to "all" command if zone producer failed
 								if (!issued && resultReason != "no_money" && prodIntent.commandName != "Game.QueueUnit")
@@ -6502,7 +7078,7 @@ namespace
 				schedulerHasIntents = true;
 			}
 
-			if (techDue)
+			if (techDue && autonomyRuleEnabled("tech_upgrades"))
 			{
 				const AIControlAdapterProfilePolicyManager profilePolicyManager;
 				if (profilePolicyManager.UsesTechRetryPolicy(resolveAutonomyProfilePolicyConfig()))
@@ -6769,7 +7345,8 @@ namespace
 							counts.barracks,
 							counts.armsDealers,
 							counts.blackMarkets,
-							AIControlAdapterProfilePolicyManager().ResolveCombatArmyCapBase(profilePolicyConfig)
+							AIControlAdapterProfilePolicyManager().ResolveCombatArmyCapBase(profilePolicyConfig),
+							m_autonomy.state.economicVictory
 						});
 
 						const std::string actionName = result.commandName.empty() ? "none" : result.commandName;
@@ -6835,7 +7412,7 @@ namespace
 				if (combatCount > 0)
 				{
 					std::string reason;
-					const bool guarded = tryCommand("auto_guard", "Game.GuardAllIdleGroundCombat", nlohmann::json::object(), reason);
+					const bool guarded = autonomyRuleEnabled("idle_guard") && tryCommand("auto_guard", "Game.GuardAllIdleGroundCombat", nlohmann::json::object(), reason);
 					m_autonomy.state.nextGuardTick = now + (guarded ? cadenceMs : 4000u);
 				}
 				else
@@ -6872,6 +7449,10 @@ namespace
 				return false;
 			}
 
+			if (!validateAutonomyConfigurePatch(*argsIt, reason)) return false;
+			const Int priorPlayer = m_autonomy.state.playerIndex;
+			const bool priorExplicitPlayer = m_autonomy.state.hasExplicitPlayerIndex;
+
 			const auto profileIt = argsIt->find("profile");
 			if (profileIt != argsIt->end())
 			{
@@ -6888,10 +7469,18 @@ namespace
 					&& profile != "tech"
 					&& profile != "builtin_passthrough"
 					&& profile != "sprawl"
-					&& profile != "sprawl_balanced")
+					&& profile != "sprawl_balanced"
+					&& profile != "sprawl_economic")
 				{
 					reason = "invalid_profile";
 					return false;
+				}
+				if (profile != m_autonomy.state.profile)
+				{
+					if (m_autonomy.state.economicVictoryReason == "income_capacity") resetEconomicVictory();
+					m_autonomy.state.profileSpendPlan = {};
+					m_autonomy.state.profileThreatUntilTick = 0u;
+					m_autonomy.state.profileOffenseFundedSinceTick = 0u;
 				}
 				m_autonomy.state.profile = profile;
 			}
@@ -7035,7 +7624,58 @@ namespace
 				m_autonomy.state.allowSuperweapons = superIt->get<bool>();
 			}
 
-			const auto playerIndexIt = argsIt->find("player_index");
+				const auto simCommandsIt = argsIt->find("sim_commands_enabled");
+				if (simCommandsIt != argsIt->end())
+				{
+				if (!simCommandsIt->is_boolean())
+				{
+					reason = "invalid_sim_commands_enabled";
+					return false;
+				}
+				m_autonomy.state.simCommandsEnabled = simCommandsIt->get<bool>();
+				m_autonomy.state.hasExplicitSimCommandsEnabled = true;
+					adapterLog("config_autonomy sim_commands_enabled=%d", m_autonomy.state.simCommandsEnabled ? 1 : 0);
+				}
+
+				const auto workerShuttlesIt = argsIt->find("worker_shuttles_enabled");
+				if (workerShuttlesIt != argsIt->end())
+				{
+					if (!workerShuttlesIt->is_boolean())
+					{
+						reason = "invalid_worker_shuttles_enabled";
+						return false;
+					}
+					m_autonomy.state.workerShuttlesEnabled = workerShuttlesIt->get<bool>();
+					adapterLog("config_autonomy worker_shuttles_enabled=%d", m_autonomy.state.workerShuttlesEnabled ? 1 : 0);
+				}
+
+				const auto garrisonsIt = argsIt->find("garrisons_enabled");
+				if (garrisonsIt != argsIt->end())
+				{
+					if (!garrisonsIt->is_boolean())
+					{
+						reason = "invalid_garrisons_enabled";
+						return false;
+					}
+					m_autonomy.state.garrisonsEnabled = garrisonsIt->get<bool>();
+					adapterLog("config_autonomy garrisons_enabled=%d", m_autonomy.state.garrisonsEnabled ? 1 : 0);
+				}
+
+				const auto technicalScoutShuttlesIt = argsIt->find("technical_scout_shuttles_enabled");
+				if (technicalScoutShuttlesIt != argsIt->end())
+				{
+					if (!technicalScoutShuttlesIt->is_boolean())
+					{
+						reason = "invalid_technical_scout_shuttles_enabled";
+						return false;
+					}
+					m_autonomy.state.technicalScoutShuttlesEnabled = technicalScoutShuttlesIt->get<bool>();
+					adapterLog(
+						"config_autonomy technical_scout_shuttles_enabled=%d",
+						m_autonomy.state.technicalScoutShuttlesEnabled ? 1 : 0);
+				}
+
+				const auto playerIndexIt = argsIt->find("player_index");
 			if (playerIndexIt != argsIt->end())
 			{
 				if (!playerIndexIt->is_number_integer())
@@ -7058,6 +7698,16 @@ namespace
 				m_autonomy.state.hasExplicitTargetPlayerIndex = true;
 				m_autonomy.state.targetPlayerIndex = targetPlayerIt->get<Int>();
 			}
+
+			if (priorExplicitPlayer != m_autonomy.state.hasExplicitPlayerIndex || priorPlayer != m_autonomy.state.playerIndex)
+			{
+				m_autonomy.state.ruleOverrides.clear();
+				m_autonomy.state.ruleBlocks.clear();
+				++m_autonomy.state.ruleRevision;
+				m_autonomy.state.ruleChangedTick = adapterGameplayTick();
+			}
+			applyAutonomyRulePatch(*argsIt, getJsonString(message, "request_id"));
+			m_autonomy.state.profileSpendPlan.deferIncomeUnderThreat = autonomyRuleEnabled("defer_income_under_threat");
 
 			if (isAutonomyModeActive())
 			{
@@ -7111,6 +7761,9 @@ namespace
 
 		nlohmann::json buildMatchOutcome(Player* localPlayer, DWORD now)
 		{
+			// Durable records use one perspective, regardless of the query caller.
+			Player* controlledPlayer = resolveAutonomyPlayer();
+			if (controlledPlayer != nullptr) localPlayer = controlledPlayer;
 			if (m_autonomy.state.matchOutcomeStartTick == 0u)
 			{
 				m_autonomy.state.matchOutcomeStartTick = now;
@@ -7120,9 +7773,9 @@ namespace
 			const Int localTeam = localSlot != nullptr ? localSlot->getTeamNumber() : -1;
 			const Int localPlayerIndex = localPlayer != nullptr ? localPlayer->getPlayerIndex() : -1;
 			const bool victoryConditionsAvailable = TheVictoryConditions != nullptr && localPlayer != nullptr;
-			const bool alliedVictory = victoryConditionsAvailable ? TheVictoryConditions->isLocalAlliedVictory() : false;
-			const bool alliedDefeat = victoryConditionsAvailable ? TheVictoryConditions->isLocalAlliedDefeat() : false;
-			const bool localDefeat = victoryConditionsAvailable ? TheVictoryConditions->isLocalDefeat() : false;
+			const bool alliedVictory = victoryConditionsAvailable ? TheVictoryConditions->hasAchievedVictory(localPlayer) : false;
+			const bool alliedDefeat = victoryConditionsAvailable ? TheVictoryConditions->hasBeenDefeated(localPlayer) : false;
+			const bool localDefeat = victoryConditionsAvailable ? TheVictoryConditions->hasSinglePlayerBeenDefeated(localPlayer) : false;
 			const UnsignedInt endFrame = victoryConditionsAvailable ? TheVictoryConditions->getEndFrame() : 0u;
 			const AIControlAdapterMatchOutcomePolicyResult policy = AIControlAdapterClassifyMatchOutcome({
 				victoryConditionsAvailable,
@@ -7319,7 +7972,7 @@ namespace
 				winnerTeam = localTeam;
 			}
 
-			const UnsignedInt elapsedMs = now >= m_autonomy.state.matchOutcomeStartTick
+			UnsignedInt elapsedMs = now >= m_autonomy.state.matchOutcomeStartTick
 				? static_cast<UnsignedInt>(now - m_autonomy.state.matchOutcomeStartTick)
 				: 0u;
 			int zoneCount = 0;
@@ -7459,7 +8112,8 @@ namespace
 			std::vector<Object*> availableCombatForSnapshot;
 			collectCombatUnitsForRaid(localPlayer, availableCombatForSnapshot);
 			const int availableIdleCombat = static_cast<int>(availableCombatForSnapshot.size());
-			const std::string currentIdentity = mapName + "|" + std::to_string(localPlayerIndex) + "|" + std::to_string(localTeam);
+			// Actual match resets clear this state; an observer/player change is not a new match.
+			const std::string currentIdentity = mapName;
 			const bool meaningfulContext =
 				includedLocalParticipants > 0 &&
 				includedParticipants >= 2 &&
@@ -7495,7 +8149,12 @@ namespace
 				m_autonomy.state.finalMatchOutcome = nlohmann::json();
 				m_autonomy.state.loggedTerminalMatchOutcomeState.clear();
 				m_autonomy.state.loggedFinalSnapshotIdentity.clear();
+				resetEconomicVictory();
+				m_autonomy.state.ruleOverrides.clear();
+				m_autonomy.state.ruleBlocks.clear();
+				applyAutonomyRules();
 				m_autonomy.state.matchOutcomeStartTick = now;
+				elapsedMs = 0u;
 			}
 			if (meaningfulContext)
 			{
@@ -7813,14 +8472,23 @@ namespace
 		nlohmann::json buildAutonomyStatus()
 		{
 			nlohmann::json result = nlohmann::json::object();
-			const DWORD statusNow = ::GetTickCount();
+			const DWORD statusNow = adapterGameplayTick();
+			result["clock"] = "simulation";
 			result["mode"] = m_autonomy.state.mode;
 			result["profile"] = m_autonomy.state.profile;
+			result["rule_controls"] = buildAutonomyRuleState();
+			result["match_generation"] = m_recordingJournal.generation;
 			result["paused"] = m_autonomy.state.paused;
 			result["active"] = isAutonomyModeActive();
 			result["capture_tech"] = m_autonomy.state.captureTech;
 			result["allow_superweapons"] = m_autonomy.state.allowSuperweapons;
-			result["attack_enabled"] = m_automation.attackRule.enabled;
+				result["sim_commands_enabled"] = areAutonomySimCommandsEnabled();
+				result["sim_commands_configured"] = m_autonomy.state.hasExplicitSimCommandsEnabled;
+				result["sim_commands_requested"] = m_autonomy.state.simCommandsEnabled;
+				result["worker_shuttles_enabled"] = m_autonomy.state.workerShuttlesEnabled;
+				result["technical_scout_shuttles_enabled"] = m_autonomy.state.technicalScoutShuttlesEnabled;
+				result["garrisons_enabled"] = m_autonomy.state.garrisonsEnabled;
+				result["attack_enabled"] = m_automation.attackRule.enabled;
 			result["economy_bias"] = m_autonomy.state.economyBias;
 			result["aggression_bias"] = m_autonomy.state.aggressionBias;
 			result["defense_bias"] = m_autonomy.state.defenseBias;
@@ -7831,6 +8499,15 @@ namespace
 			result["target_player_index"] = m_autonomy.state.hasExplicitTargetPlayerIndex ? m_autonomy.state.targetPlayerIndex : -1;
 			const AIControlAdapterProfilePolicyConfig policyConfig = resolveAutonomyProfilePolicyConfig();
 			const AIControlAdapterProfilePolicyManager profilePolicyManager;
+			result["economic_victory"] = nlohmann::json::object({
+				{"achieved", m_autonomy.state.economicVictory},
+				{"achieved_tick", m_autonomy.state.economicVictoryTick},
+				{"activation_reason", m_autonomy.state.economicVictoryReason},
+				{"threshold", 100000}, {"army_target", 1000}, {"market_target", 120},
+				{"assault_ready", economicAssaultReady(adapterGameplayTick())},
+				{"reason", !m_autonomy.state.economicVictory ? "economic_threshold_pending"
+					: economicAssaultReady(adapterGameplayTick()) ? "sustained_assault" : "defense_pressure"}
+			});
 			result["profile_policy"] = nlohmann::json::object({
 				{"profile", policyConfig.profile},
 				{"is_aggressive", policyConfig.isAggressive},
@@ -7838,6 +8515,25 @@ namespace
 				{"is_defensive", policyConfig.isDefensive},
 				{"is_tech", policyConfig.isTech},
 				{"is_balanced_sprawl", policyConfig.isBalancedSprawl},
+				{"economy_first_sprawl", policyConfig.isEconomyFirstSprawl},
+				{"spending_plan", {
+					{"active", m_autonomy.state.profileSpendPlan.active},
+					{"reason", m_autonomy.state.profileSpendPlan.reason},
+					{"threat_response", m_autonomy.state.profileSpendPlan.threatResponse},
+					{"response_until_tick", m_autonomy.state.profileThreatUntilTick},
+					{"sustained_offense", m_autonomy.state.profileSpendPlan.sustainedOffense},
+					{"army_target", m_autonomy.state.profileSpendPlan.armyTarget},
+					{"worker_limit", m_autonomy.state.profileSpendPlan.workerLimit},
+					{"growth_protected_cash", m_autonomy.state.profileSpendPlan.growthProtectedCash},
+					{"combat_protected_cash", m_autonomy.state.profileSpendPlan.combatProtectedCash},
+					{"worker_protected_cash", m_autonomy.state.profileSpendPlan.workerProtectedCash},
+					{"max_concurrent_markets", m_autonomy.state.profileSpendPlan.maxConcurrentMarkets},
+					{"available_cash", m_autonomy.state.profileAvailableCash},
+					{"construction_committed_cash", m_autonomy.state.profileConstructionCommittedCash},
+					{"unit_committed_cash", m_autonomy.state.profileUnitCommittedCash},
+					{"funded_since_tick", m_autonomy.state.profileOffenseFundedSinceTick},
+					{"plan_tick", m_autonomy.state.profilePlanTick}
+				}},
 				{"is_sprawl_style", policyConfig.isSprawlStyle},
 				{"reserve_cash", policyConfig.reserveCash},
 				{"reserve_cash_with_garrison_floor", profilePolicyManager.ResolveReserveCashWithFloor(policyConfig, 5000u)},
@@ -8016,10 +8712,12 @@ namespace
 		nlohmann::json buildAutonomyTelemetry()
 		{
 			nlohmann::json result = buildAutonomyStatus();
-			const DWORD telemetryNow = ::GetTickCount();
+			const DWORD telemetryNow = adapterGameplayTick();
 			result["telemetry_tick"] = static_cast<UnsignedInt>(telemetryNow);
 			result["zones"] = m_autonomy.state.telemetryZones.is_array() ? m_autonomy.state.telemetryZones : nlohmann::json::array();
-			result["recent_events"] = m_autonomy.state.telemetryEvents.is_array() ? m_autonomy.state.telemetryEvents : nlohmann::json::array();
+			result["recent_events"] = buildRecentRecordingEvents();
+			result["clock"] = "simulation";
+			result["match_generation"] = m_recordingJournal.generation;
 			result["enemy_memory"] = m_autonomy.enemyMemory.buildTelemetry(telemetryNow);
 
 			// Phase 6.1: Task reservation counts
@@ -8172,7 +8870,7 @@ namespace
 
 			// Phase 6.2: Active capture task details
 			nlohmann::json captureTasks = nlohmann::json::array();
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			std::vector<SpecialTaskReservation*> activeCaptureTasks = m_autonomy.taskReservationManager.findCaptureTasks();
 			for (const SpecialTaskReservation* task : activeCaptureTasks)
 			{
@@ -8259,7 +8957,7 @@ namespace
 			result["capture_tasks"] = captureTasks;
 
 			// Phase 6.3: Capture source capacity tracking
-			Player* player = ThePlayerList != nullptr ? ThePlayerList->getLocalPlayer() : nullptr;
+			Player* player = resolveAutonomyPlayer();
 			if (player != nullptr)
 			{
 				// Count live capture sources
@@ -8336,6 +9034,13 @@ namespace
 				{
 					continue;
 				}
+				int liveScudLaunchers = 0;
+				for (unsigned int id : task->raidScudLauncherUnitIds)
+				{
+					if (std::find(task->assignedUnitIds.begin(), task->assignedUnitIds.end(), id) == task->assignedUnitIds.end()) continue;
+					Object* unit = TheGameLogic != nullptr ? TheGameLogic->findObjectByID(static_cast<ObjectID>(id)) : nullptr;
+					if (unit != nullptr && !unit->isEffectivelyDead()) ++liveScudLaunchers;
+				}
 				nlohmann::json waypoints = nlohmann::json::array();
 				for (std::size_t waypointIndex = 0; waypointIndex < task->waypoints.size(); ++waypointIndex)
 				{
@@ -8358,6 +9063,7 @@ namespace
 					{"arrived_count", task->arrivedCount},
 					{"missing_count", task->missingCount},
 					{"confirmed_dead_count", task->confirmedDeadCount},
+					{"retreating", task->type == CombatTaskType::Attack && task->owner == "autonomous_attack" && task->state == CombatTaskState::Reassessing},
 					{"required_quorum_count", task->requiredQuorumCount},
 					{"infantry_count", task->infantryCount},
 					{"infantry_arrived_count", task->infantryArrivedCount},
@@ -8368,6 +9074,19 @@ namespace
 					{"degraded_from", task->degradedFrom},
 					{"degrade_reason", task->degradeReason},
 					{"group_spread", task->groupSpread},
+					{"raid_progress_age_ms", task->raidLastProgressTick > 0u ? static_cast<UnsignedInt>(telemetryNow - task->raidLastProgressTick) : 0u},
+					{"raid_combat_age_ms", task->raidLastCombatTick > 0u ? nlohmann::json(static_cast<UnsignedInt>(telemetryNow - task->raidLastCombatTick)) : nlohmann::json(nullptr)},
+					{"raid_quorum_distance", task->raidQuorumDistance},
+					{"raid_recovery_attempts", task->raidRecoveryAttempts},
+					{"target_object_id", task->targetObjectId},
+					{"assault_target_template", task->assaultTargetTemplate},
+					{"assault_target_age_ms", task->assaultTargetStartTick > 0u ? telemetryNow - task->assaultTargetStartTick : 0u},
+					{"assault_damage_age_ms", task->assaultLastDamageTick > 0u ? telemetryNow - task->assaultLastDamageTick : 0u},
+					{"raid_engaged_unit_count", task->raidEngagedUnitCount},
+					{"raid_desired_scud_launchers", task->raidDesiredScudLaunchers},
+					{"raid_initial_scud_launchers", static_cast<int>(task->raidScudLauncherUnitIds.size())},
+					{"raid_live_scud_launchers", liveScudLaunchers},
+					{"raid_scud_launcher_unit_ids", task->raidScudLauncherUnitIds},
 					{"current_waypoint_index", task->currentWaypointIndex},
 					{"waypoints", waypoints},
 					{"probe_state", combatTaskProbeStateName(task->probeState)},
@@ -8403,6 +9122,8 @@ namespace
 				{"total_assigned_units", m_autonomy.combatTaskManager.getTotalAssignedUnitCount()},
 				{"details", combatTaskDetails}
 			});
+			result["worker_liquidity"] = m_autonomy.state.workerLiquidityTelemetry;
+			result["production"] = m_autonomy.state.productionTelemetry;
 			result["scouting"] = m_autonomy.state.scoutingTelemetry.is_object()
 				? m_autonomy.state.scoutingTelemetry
 				: nlohmann::json::object();
@@ -8426,30 +9147,24 @@ namespace
 				}));
 			}
 
-			// Phase 7.4: SCUD reserve telemetry
-			// Count live and queued SCUDs
-			int liveScuds = 0;
-			int queuedScuds = 0;
+			// Mobile siege mix counts reuse the existing owned-object telemetry pass.
+			reconcilePendingUnitQueues();
+			struct MobileScudTelemetryContext { int live = 0; int queued = 0; const ThingTemplate* templ = nullptr; } mobileScuds;
+			const std::string scudTemplate = AIControlAdapterTemplateInferenceService::InferScudLauncherTemplate(player);
+			mobileScuds.templ = scudTemplate.empty() || TheThingFactory == nullptr ? nullptr : TheThingFactory->findTemplate(AsciiString(scudTemplate.c_str()), false);
 			player->iterateObjects([](Object* obj, void* userData)
 			{
-				if (obj == nullptr || obj->isEffectivelyDead() || userData == nullptr)
-				{
-					return;
-				}
-
-				int* scudCount = static_cast<int*>(userData);
-				const ThingTemplate* tt = obj->getTemplate();
-				const std::string name = tt != nullptr ? tt->getName().str() : "";
-
-				if (containsIgnoreCase(name, "scudlauncher"))
-				{
-					++(*scudCount);
-				}
-			}, &liveScuds);
-
-			// For queued SCUDs, use the count already computed in macro counts
-			// (avoids API issues with getProductionUpdate/getPlayer in this context)
-			queuedScuds = 0; // Will be approximated from production telemetry if needed
+				if (obj == nullptr || obj->isEffectivelyDead() || userData == nullptr) return;
+				auto* ctx = static_cast<MobileScudTelemetryContext*>(userData);
+				const auto* tt = obj->getTemplate();
+				if (tt != nullptr && containsIgnoreCase(tt->getName().str(), "scudlauncher")) ++ctx->live;
+				if (obj->isKindOf(KINDOF_STRUCTURE) && ctx->templ != nullptr)
+					if (auto* queue = obj->getProductionUpdateInterface()) ctx->queued += static_cast<int>(queue->countUnitTypeInQueue(ctx->templ));
+			}, &mobileScuds);
+			const int liveScuds = mobileScuds.live;
+			int queuedScuds = mobileScuds.queued;
+			for (const auto& pending : m_pendingUnitQueues)
+				if (pending.playerIndex == player->getPlayerIndex() && containsIgnoreCase(pending.templateName, "scudlauncher")) ++queuedScuds;
 
 			// Count SCUD counterbattery tasks
 			int scudCounterbatteryTasks = 0;
@@ -8466,12 +9181,12 @@ namespace
 			}
 
 			// Phase 7.5: Mobile SCUD Launcher trucks are normal vehicle-mix units,
-			// not a standing counter-WMD reserve.
+			// with bounded baseline siege coverage; WMD-specific extra reserve remains zero.
 			const bool hasWMDThreat = m_autonomy.wmdTargetTracker.hasActiveWMDThreat();
-			const int baselineDesired = 0;
+			const int baselineDesired = isAutonomyModeActive() ? m_autonomy.state.productionTelemetry.value("refill_desired_scuds", 0) : 0;
 			const int wmdDesired = 0;
-			const int totalDesired = 0;
-			const bool productionNeeded = false;
+			const int totalDesired = baselineDesired;
+			const bool productionNeeded = liveScuds + queuedScuds < totalDesired;
 
 			// Phase 7.5: Count stationary SCUD Storms separately
 			struct ScudStormTelemetryContext {
@@ -8524,7 +9239,7 @@ namespace
 			const int liveScudStorms = scudStormTelCtx.liveCount;
 			const int readyScudStorms = scudStormTelCtx.readyCount;
 			const int inProgressScudStorms = scudStormTelCtx.healthyUnderConstructionCount + scudStormBuildTasks;
-			const int desiredScudStorms = 10;
+			const int desiredScudStorms = m_autonomy.state.allowSuperweapons ? 10 : 0;
 			const int effectiveScudStorms = readyScudStorms + inProgressScudStorms;
 			const AIControlAdapterStrategicFoundationSurvivalManager foundationSurvivalManager;
 			int recoverableScudFoundations = 0;
@@ -8536,24 +9251,8 @@ namespace
 				{
 					continue;
 				}
-				AIControlAdapterStrategicFoundationFact fact;
-				fact.foundationId = pair.first;
-				fact.templateName = state.templateName;
-				fact.x = state.x;
-				fact.y = state.y;
-				fact.lastHealth = state.lastHealth;
-				fact.maxHealth = state.maxHealth;
-				fact.nowTick = telemetryNow;
-				fact.firstSeenTick = state.firstSeenTick;
-				fact.lastSeenTick = state.lastSeenTick;
-				fact.lastProgressTick = state.lastProgressTick;
-				fact.recoveryAttempts = state.recoveryAttempts;
-				fact.stopIssued = state.stopIssued;
-				fact.tombstoned = m_autonomy.taskReservationManager.isFoundationTombstoned(
-					static_cast<unsigned int>(pair.first),
-					telemetryNow);
-				fact.activeWmdThreat = hasWMDThreat;
-				fact.reason = state.reason;
+				const AIControlAdapterStrategicFoundationFact fact =
+					observeStrategicFoundation(player, pair.first, state, telemetryNow, hasWMDThreat);
 				const AIControlAdapterStrategicFoundationClassification classification =
 					foundationSurvivalManager.Classify(fact);
 				if (classification.recoverable)
@@ -8624,6 +9323,7 @@ namespace
 				{"enemy_wmd_targets", wmdTargetsArray},
 				{"scud_storms", nlohmann::json::object({
 					{"desired", desiredScudStorms},
+					{"enabled", m_autonomy.state.allowSuperweapons},
 					{"live", liveScudStorms},
 					{"complete", readyScudStorms},
 					{"in_progress", inProgressScudStorms},
@@ -8632,9 +9332,9 @@ namespace
 					{"recoverable", recoverableScudFoundations},
 					{"tombstoned", tombstonedScudFoundations},
 					{"destroyed", 0},
-					{"production_needed", effectiveScudStorms < desiredScudStorms},
+					{"production_needed", m_autonomy.state.allowSuperweapons && effectiveScudStorms < desiredScudStorms},
 					{"strategic_target", scudStormStrategicTargetTelemetry},
-					{"reason", hasWMDThreat ? "enemy_wmd_detected" : "defensive_baseline"}
+					{"reason", !m_autonomy.state.allowSuperweapons ? "superweapons_disabled" : (hasWMDThreat ? "enemy_wmd_detected" : "defensive_baseline")}
 				})},
 				{"mobile_scud_launchers", nlohmann::json::object({
 					{"live", liveScuds},
@@ -8646,32 +9346,10 @@ namespace
 			for (const auto& pair : m_autonomy.state.strategicFoundationHealth)
 			{
 				const AutonomyStrategicFoundationState& state = pair.second;
-				AIControlAdapterStrategicFoundationFact fact;
-				fact.foundationId = pair.first;
-				fact.templateName = state.templateName;
-				fact.x = state.x;
-				fact.y = state.y;
-				fact.lastHealth = state.lastHealth;
-				fact.maxHealth = state.maxHealth;
-				fact.nowTick = telemetryNow;
-				fact.firstSeenTick = state.firstSeenTick;
-				fact.lastSeenTick = state.lastSeenTick;
-				fact.lastProgressTick = state.lastProgressTick;
-				fact.recoveryAttempts = state.recoveryAttempts;
-				fact.stopIssued = state.stopIssued;
-				fact.tombstoned = m_autonomy.taskReservationManager.isFoundationTombstoned(
-					static_cast<unsigned int>(pair.first),
-					telemetryNow);
-				fact.activeWmdThreat = m_autonomy.wmdTargetTracker.hasActiveWMDThreat();
-				fact.reason = state.reason;
+				const AIControlAdapterStrategicFoundationFact fact =
+					observeStrategicFoundation(player, pair.first, state, telemetryNow, m_autonomy.wmdTargetTracker.hasActiveWMDThreat());
 				const AIControlAdapterStrategicFoundationClassification classification =
 					foundationSurvivalManager.Classify(fact);
-				adapterLog(
-					"strategic_foundation_survival template=%s foundation=%u state=%s reason=%s",
-					state.templateName.c_str(),
-					static_cast<unsigned int>(pair.first),
-					classification.state,
-					classification.reason);
 				strategicFoundations.push_back(nlohmann::json::object({
 					{"foundation_id", pair.first},
 					{"template", state.templateName},
@@ -8706,7 +9384,7 @@ namespace
 				{"queued", queuedScuds},
 				{"assigned_counterbattery", scudCounterbatteryUnits},
 				{"production_needed", productionNeeded},
-				{"reason", hasWMDThreat ? "wmd_threat" : "baseline_reserve"}
+				{"reason", productionNeeded ? "launcher_mix_deficit" : "launcher_mix_satisfied"}
 			});
 			result["scud_counterbattery"] = nlohmann::json::object({
 				{"active_tasks", scudCounterbatteryTasks},
@@ -8951,7 +9629,7 @@ namespace
 
 			nlohmann::json zones = nlohmann::json::array();
 			const Real defaultRadius = std::max<Real>(160.0f, m_autonomy.state.zoneRadius);
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 
 			if (m_autonomy.state.telemetryZones.is_array())
 			{
@@ -9021,6 +9699,7 @@ namespace
 						{"terrain_limited", zone.value("terrain_limited", false)},
 						{"terrain_reason", zone.value("terrain_reason", "")},
 						{"terrain_entrance_id", zone.value("terrain_entrance_id", "")},
+						{"front_direction_source", zone.value("front_direction_source", std::string("unknown"))},
 						{"front_point", nlohmann::json::object({
 							{"x", zone.value("front_point_x", 0.0f)},
 							{"y", zone.value("front_point_y", 0.0f)}
@@ -9112,7 +9791,8 @@ namespace
 				{
 					continue;
 				}
-				if (obj->isKindOf(KINDOF_STRUCTURE))
+				if (obj->isKindOf(KINDOF_PROJECTILE) || (!obj->isKindOf(KINDOF_VEHICLE) && !obj->isKindOf(KINDOF_INFANTRY)
+					&& !obj->isKindOf(KINDOF_STRUCTURE) && !obj->isKindOf(KINDOF_AIRCRAFT)))
 				{
 					continue;
 				}
@@ -9819,21 +10499,32 @@ namespace
 			return result;
 		}
 
-		void evaluateGarrisonManagement(Player* player)
-		{
-			if (!isAutonomyModeActive() || player == nullptr || TheGameLogic == nullptr)
+			void evaluateGarrisonManagement(Player* player)
 			{
-				return;
-			}
-			const DWORD now = ::GetTickCount();
-			if (AIControlAdapterIsTickInFuture(m_autonomy.state.nextGarrisonTick, now))
-			{
-				return;
-			}
-			m_autonomy.state.nextGarrisonTick = now + 6000u;
-			m_autonomy.state.garrisonTelemetry = nlohmann::json::array();
+				if (!isAutonomyModeActive() || player == nullptr || TheGameLogic == nullptr)
+				{
+					return;
+				}
+				const DWORD now = adapterGameplayTick();
+				if (AIControlAdapterIsTickInFuture(m_autonomy.state.nextGarrisonTick, now))
+				{
+					return;
+				}
+				m_autonomy.state.nextGarrisonTick = now + 6000u;
+				m_autonomy.state.garrisonTelemetry = nlohmann::json::array();
+				if (!m_autonomy.state.garrisonsEnabled && m_autonomy.state.ruleOverrides.count("garrisons") == 0u)
+				{
+					m_autonomy.state.garrisonAssignments.clear();
+					m_autonomy.state.garrisonTelemetry.push_back(nlohmann::json::object({
+						{"type", "garrison_policy"},
+						{"enabled", false},
+						{"reason", "feature_disabled"}
+					}));
+					adapterLog("garrison_policy enabled=0 reason=feature_disabled");
+					return;
+				}
 
-			for (auto it = m_autonomy.state.garrisonAssignments.begin(); it != m_autonomy.state.garrisonAssignments.end(); )
+				for (auto it = m_autonomy.state.garrisonAssignments.begin(); it != m_autonomy.state.garrisonAssignments.end(); )
 			{
 				AutonomyGarrisonAssignment& assignment = it->second;
 				Object* structure = TheGameLogic->findObjectByID(static_cast<ObjectID>(assignment.structureId));
@@ -10431,6 +11122,7 @@ namespace
 
 			for (const GarrisonCandidate& candidate : candidates)
 			{
+				if (!autonomyRuleEnabled("garrisons")) break;
 				if (structuresAssignedThisCycle >= throughputDecision.maxAssignmentsThisCycle)
 				{
 					policyReason = throughputDecision.maxAssignmentsThisCycle <= 1 ? "normal_assignment_budget" : "assignment_budget_reached";
@@ -10609,24 +11301,19 @@ namespace
 					{
 						continue;
 					}
-					const int currentProducerId = static_cast<int>(producer->getID());
-					const std::string unitTemplate = inferRpgTemplateForProducer(producer);
-					nlohmann::json message = {
-						{"type", "SessionCommand"},
-						{"request_id", "garrison_tunnel_defender"},
-						{"cmd", "Game.QueueUnit"},
-						{"args", nlohmann::json::object({
-							{"producer_kind", "barracks"},
-							{"unit_template", unitTemplate.empty() ? std::string(productionDecision.unitTemplate) : unitTemplate},
-							{"producer_object_id", currentProducerId}
-						})}
-					};
-					if (m_autonomy.state.hasExplicitPlayerIndex)
+					if (resolveAutonomyProfilePolicyConfig().isBalancedSprawl)
 					{
-						message["args"]["player_index"] = m_autonomy.state.playerIndex;
+						auto* queue = producer->getProductionUpdateInterface();
+						if (queue == nullptr) continue;
+						int depth = static_cast<int>(queue->getProductionCount());
+						for (const auto& pending : m_pendingUnitQueues) if (pending.producerId == producer->getID()) ++depth;
+						if (depth >= 2) { productionReason = "shallow_queue_full"; continue; }
 					}
+					const std::string unitTemplate = inferRpgTemplateForProducer(producer);
 					std::string issueReason = productionDecision.reason;
-					const bool issued = executeGameQueueUnit(message, issueReason);
+					const bool issued = queueUnit(player, producer,
+						unitTemplate.empty() ? std::string(productionDecision.unitTemplate) : unitTemplate,
+						1, "barracks", issueReason);
 					if (issued)
 					{
 						++productionIssuedCount;
@@ -10842,16 +11529,33 @@ namespace
 
 		void evaluateAutomationRules()
 		{
-			evaluateAutonomyMacro();
-			evaluateStashWorkerAutomationRule();
-			evaluateLocalWorkerLiquidity();
-			evaluateWorkerAutomationRule();
-			evaluateRadarVanAutomationRule();
-			evaluateAttackAutomationRule();
-			evaluateCaptureAutomationRule();
+			Player* player = resolveAutonomyPlayer();
+			reconcileStrategicFoundations(player, adapterGameplayTick());
+
+			const bool simCommandsEnabled = areAutonomySimCommandsEnabled();
+			struct AutomaticSpendScope
+			{
+				bool& value; bool previous;
+				explicit AutomaticSpendScope(bool& flag, bool enabled) : value(flag), previous(flag) { value = enabled; }
+				~AutomaticSpendScope() { value = previous; }
+			} scope(m_profileAutomaticSpendScope, simCommandsEnabled);
+			if (simCommandsEnabled)
+			{
+				evaluateAutonomyMacro();
+				evaluateStashWorkerAutomationRule();
+				evaluateLocalWorkerLiquidity();
+				evaluateWorkerAutomationRule();
+				evaluateRadarVanAutomationRule();
+				evaluateAttackAutomationRule();
+				evaluateCaptureAutomationRule();
+			}
+			else if (isAutonomyModeActive())
+			{
+				clearAutonomyManagedRules();
+				adapterLog("autonomy_command_gate active=1 reason=sim_commands_disabled");
+			}
 
 			// Phase 6.1: Update special task reservations and construction lifecycle
-			Player* player = resolveAutonomyPlayer();
 			updateSpecialTaskReservations(player);
 
 			// Phase 9.0: Update combat task lifecycle
@@ -10862,6 +11566,12 @@ namespace
 
 			// Phase 8.1: Update structured enemy map memory for telemetry/UI.
 			updateEnemyMemory(player);
+
+			if (!simCommandsEnabled)
+			{
+				drawDebugZones();
+				return;
+			}
 
 			// Phase 9.2: Dedicated fast scouting refreshes map memory while raids wait.
 			evaluateDedicatedScouting(player);
@@ -11064,7 +11774,7 @@ namespace
 			};
 			std::string commandReason;
 			const bool ok = executeGameAttackMove(message, commandReason);
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			adapterLog(
 				"raid_probe_launch task=%u units=%d waypoint=%d x=%.1f y=%.1f reason=%s",
 				task.taskId,
@@ -11154,12 +11864,20 @@ namespace
 			};
 			std::string commandReason;
 			const bool ok = executeGameAttackMove(message, commandReason);
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			if (ok)
 			{
 				m_autonomy.combatTaskManager.updateTaskCommand(task.taskId, now);
-				m_autonomy.combatTaskManager.updateTaskState(task.taskId, CombatTaskState::MovingToStage, reason);
-				task.currentWaypointStartTick = now;
+				const bool refresh = reason == "refresh_stage_command" || reason == "refresh_attack_command";
+				if (task.state != CombatTaskState::Attacking)
+					m_autonomy.combatTaskManager.updateTaskState(task.taskId, CombatTaskState::MovingToStage, reason);
+				if (!refresh || task.currentWaypointStartTick == 0u)
+				{
+					task.currentWaypointStartTick = now;
+					task.raidLastProgressTick = now;
+					task.raidBestQuorumDistance = -1.0f;
+					if (reason == "created" || reason == "raid_pursue_visible_enemy") task.raidRecoveryAttempts = 0;
+				}
 				task.cohesionReason = reason;
 			}
 			adapterLog(
@@ -11480,11 +12198,15 @@ namespace
 			}
 		}
 
-		bool isScoutPoolTechnicalProtected(Player* player, const AutomationOwnedObjectSnapshot& owned) const
-		{
-			if (player == nullptr || owned.object == nullptr || !owned.isTechnical || owned.isStructure || owned.underConstruction)
+			bool isScoutPoolTechnicalProtected(Player* player, const AutomationOwnedObjectSnapshot& owned) const
 			{
-				return false;
+				if (!m_autonomy.state.workerShuttlesEnabled)
+				{
+					return false;
+				}
+				if (player == nullptr || owned.object == nullptr || !owned.isTechnical || owned.isStructure || owned.underConstruction)
+				{
+					return false;
 			}
 			int liveTechnicals = 0;
 			int queuedTechnicals = 0;
@@ -11515,10 +12237,14 @@ namespace
 			return effectivePool <= std::max(2, pool.desiredTechnicals);
 		}
 
-		int resolveWorkerShuttleProtectedTechnicalCount() const
-		{
-			return m_workerShuttleManager.ResolveProtectedTechnicalCount(m_autonomy.state.glaUsaStrategyTelemetry);
-		}
+			int resolveWorkerShuttleProtectedTechnicalCount() const
+			{
+				if (!m_autonomy.state.workerShuttlesEnabled)
+				{
+					return 0;
+				}
+				return m_workerShuttleManager.ResolveProtectedTechnicalCount(m_autonomy.state.glaUsaStrategyTelemetry);
+			}
 
 		std::string workerShuttleTaskStateName(SpecialTaskState state) const
 		{
@@ -11799,15 +12525,25 @@ namespace
 			it = m_autonomy.state.workerShuttleAssignments.erase(it);
 		}
 
-		void updateWorkerShuttleAssignments(Player* player)
-		{
-			if (player == nullptr || TheGameLogic == nullptr)
+			void updateWorkerShuttleAssignments(Player* player)
 			{
-				return;
-			}
-			const DWORD now = ::GetTickCount();
-			nlohmann::json telemetry = nlohmann::json::array();
-			const int protectedTechnicals = resolveWorkerShuttleProtectedTechnicalCount();
+				if (player == nullptr || TheGameLogic == nullptr)
+				{
+					return;
+				}
+				const DWORD now = adapterGameplayTick();
+				nlohmann::json telemetry = nlohmann::json::array();
+				if (!m_autonomy.state.workerShuttlesEnabled)
+				{
+					for (auto it = m_autonomy.state.workerShuttleAssignments.begin(); it != m_autonomy.state.workerShuttleAssignments.end();)
+					{
+						releaseWorkerShuttleAssignment(it, "feature_disabled");
+					}
+					m_autonomy.state.glaUsaStrategyTelemetry["worker_shuttle_tasks"] = telemetry;
+					adapterLog("worker_shuttle_policy enabled=0 protected=0 active=0 reason=feature_disabled");
+					return;
+				}
+				const int protectedTechnicals = resolveWorkerShuttleProtectedTechnicalCount();
 
 			for (auto it = m_autonomy.state.workerShuttleAssignments.begin(); it != m_autonomy.state.workerShuttleAssignments.end();)
 			{
@@ -12423,7 +13159,7 @@ namespace
 			}
 			const int waypointIndex = std::max(0, std::min(task.currentWaypointIndex, static_cast<int>(task.waypoints.size()) - 1));
 			const CombatTaskWaypoint& waypoint = task.waypoints[static_cast<std::size_t>(waypointIndex)];
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			if (task.scoutShuttle && !task.scoutShuttleLoadIssued)
 			{
 				int issued = 0;
@@ -12553,7 +13289,7 @@ namespace
 			{
 				return false;
 			}
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			const int freshTargets = countFreshScudStrategicTargets(now);
 			if (freshTargets > 0)
 			{
@@ -12672,11 +13408,12 @@ namespace
 
 		void evaluateDedicatedScouting(Player* player)
 		{
+			if (!autonomyRuleEnabled("scouting")) return;
 			if (!isAutonomyModeActive() || player == nullptr || TheGameLogic == nullptr)
 			{
 				return;
 			}
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			if (AIControlAdapterIsTickInFuture(m_autonomy.state.nextScoutTick, now))
 			{
 				return;
@@ -12781,18 +13518,26 @@ namespace
 			const int remoteBuildGap = m_autonomy.state.glaUsaStrategyTelemetry.is_object()
 				? m_autonomy.state.glaUsaStrategyTelemetry.value("worker_mobility", nlohmann::json::object()).value("remote_gap", 0)
 				: 0;
-			AIControlAdapterTechnicalScoutShuttleDecision scoutShuttleDecision =
-				m_workerShuttleManager.EvaluateTechnicalScoutShuttle({
-					readyScuds,
-					scudTargetRefreshNeeded,
-					std::max<int>(static_cast<int>(scoutUnits.size()), scoutPoolLive - activeScoutAssignments),
-					protectedShuttleTechnicals,
-					remoteBuildGap,
-					scoutShuttleWorkers,
-					scoutShuttleRpg,
-					scoutShuttleRebels,
-					activeScouts
-				});
+				AIControlAdapterTechnicalScoutShuttleDecision scoutShuttleDecision =
+					m_autonomy.state.technicalScoutShuttlesEnabled
+					? m_workerShuttleManager.EvaluateTechnicalScoutShuttle({
+							readyScuds,
+							scudTargetRefreshNeeded,
+							std::max<int>(static_cast<int>(scoutUnits.size()), scoutPoolLive - activeScoutAssignments),
+							protectedShuttleTechnicals,
+							remoteBuildGap,
+							scoutShuttleWorkers,
+							scoutShuttleRpg,
+							scoutShuttleRebels,
+							activeScouts
+						})
+					: AIControlAdapterTechnicalScoutShuttleDecision{};
+				if (!m_autonomy.state.technicalScoutShuttlesEnabled)
+				{
+					scoutShuttleDecision.desired = false;
+					scoutShuttleDecision.mode = "pure_scout";
+					scoutShuttleDecision.reason = "feature_disabled";
+				}
 			TechnicalScoutShuttlePassengerPlan scoutShuttlePlan;
 			if (scoutShuttleDecision.desired && objective.objectiveId != 0u)
 			{
@@ -13110,8 +13855,136 @@ namespace
 			issueScoutWaypointCommand(player, *task, "scout_start");
 		}
 
+		void beginRaidRetreat(Player* player, CombatTask& task, const char* reason, DWORD now)
+		{
+			if (!task.hasOriginPosition || task.assignedUnitIds.empty())
+			{
+				m_autonomy.combatTaskManager.failTask(task.taskId, reason);
+				return;
+			}
+			finishRaidProbe(task, CombatTaskProbeState::Cancelled, reason, now, 0.0f);
+			task.state = CombatTaskState::Reassessing;
+			task.reason = reason;
+			task.cohesionReason = reason;
+			task.cohesionWaitStartTick = 0u;
+			task.currentWaypointStartTick = now;
+			task.timeoutTick = now + 60000u;
+			std::string moveReason;
+			const bool issued = moveAutonomyUnits(player, task.assignedUnitIds, task.originPosition, moveReason);
+			if (issued)
+				task.lastCommandTick = now;
+			recordAutonomyTelemetryEvent("attack", "raid_retreat", reason, &task.originPosition, task.taskId);
+			adapterLog("raid_retreat task=%u live=%d initial=%d reason=%s issued=%d",
+				task.taskId, static_cast<int>(task.assignedUnitIds.size()), task.initialUnitCount, reason, issued ? 1 : 0);
+		}
+
+		bool updateRaidRetreat(Player* player, CombatTask& task, DWORD now)
+		{
+			int arrived = 0;
+			for (unsigned int id : task.assignedUnitIds)
+			{
+				Object* unit = TheGameLogic->findObjectByID(static_cast<ObjectID>(id));
+				const Coord3D* pos = unit != nullptr ? unit->getPosition() : nullptr;
+				if (pos == nullptr) continue;
+				const Real dx = pos->x - task.originPosition.x;
+				const Real dy = pos->y - task.originPosition.y;
+				if (dx * dx + dy * dy <= 450.0f * 450.0f) ++arrived;
+			}
+			task.arrivedCount = arrived;
+			task.confirmedDeadCount = std::max(0, task.initialUnitCount - static_cast<int>(task.assignedUnitIds.size()));
+			const bool returned = arrived >= std::max(1, (static_cast<int>(task.assignedUnitIds.size()) * 70 + 99) / 100);
+			if (returned ||
+				!AIControlAdapterIsTickInFuture(task.timeoutTick, now))
+			{
+				const char* reason = returned ? "retreated_to_origin" : "retreat_timeout";
+				m_autonomy.combatTaskManager.failTask(task.taskId, reason);
+				recordAutonomyTelemetryEvent("attack", "raid_retreat_complete", reason, &task.originPosition, task.taskId);
+				return true;
+			}
+			if (now - task.lastCommandTick >= 8000u)
+			{
+				std::string reason;
+				if (moveAutonomyUnits(player, task.assignedUnitIds, task.originPosition, reason)) task.lastCommandTick = now;
+			}
+			return true;
+		}
+
+		void recoverStalledRaid(Player* player, CombatTask& task, const Coord3D& center, DWORD now)
+		{
+			if (task.raidRecoveryAttempts >= 2)
+			{
+				beginRaidRetreat(player, task, "raid_stalled_after_recovery", now);
+				return;
+			}
+			++task.raidRecoveryAttempts;
+			finishRaidProbe(task, CombatTaskProbeState::Cancelled, "recover_stalled_raid", now, 0.0f);
+			// Keep ownership and move toward the objective from the current group
+			// location. The base origin remains available for a real retreat.
+			task.waypoints = buildDirectRaidWaypoints(center, task.targetPosition, 300.0f);
+			task.currentWaypointIndex = 0;
+			task.cohesionWaitStartTick = 0u;
+			task.raidLastProgressTick = now;
+			task.raidBestQuorumDistance = -1.0f;
+			m_autonomy.combatTaskManager.updateTaskState(task.taskId, CombatTaskState::Forming, "recover_stalled_raid");
+			issueRaidWaypointCommand(player, task, "recover_stalled_raid");
+			recordAutonomyTelemetryEvent("attack", "raid_recovery", "recover_stalled_raid", &center, task.taskId);
+			adapterLog("raid_recovery task=%u attempt=%d live=%d x=%.1f y=%.1f",
+				task.taskId, task.raidRecoveryAttempts, static_cast<int>(task.assignedUnitIds.size()), center.x, center.y);
+		}
+
+		bool retargetQuietRaid(Player* player, CombatTask& task, const Coord3D& center, DWORD now)
+		{
+			Object* currentTarget = TheGameLogic->findObjectByID(static_cast<ObjectID>(task.targetObjectId));
+			// Do not alternate objectives every refresh and disguise a pathing stall.
+			if (currentTarget != nullptr && !currentTarget->isEffectivelyDead() && isEnemyControlledObject(player, currentTarget))
+			{
+				const ObjectShroudStatus shroud = currentTarget->getShroudedStatus(player->getPlayerIndex());
+				if (shroud == OBJECTSHROUD_CLEAR || shroud == OBJECTSHROUD_PARTIAL_CLEAR)
+				{
+					// Follow a visible moving objective without renewing the inactivity
+					// budget merely because its position changed.
+					if (currentTarget->getPosition() != nullptr)
+					{
+						task.targetPosition = *currentTarget->getPosition();
+						task.waypoints.back().position = task.targetPosition;
+					}
+					return false;
+				}
+			}
+			Object* target = nullptr;
+			Real bestDistanceSq = 1800.0f * 1800.0f;
+			for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
+			{
+				if (obj->isEffectivelyDead() || obj->getPosition() == nullptr || obj->getContainedBy() != nullptr || !isEnemyControlledObject(player, obj)) continue;
+				if (!obj->isKindOf(KINDOF_STRUCTURE) && !obj->isKindOf(KINDOF_VEHICLE) &&
+					!obj->isKindOf(KINDOF_INFANTRY) && !obj->isKindOf(KINDOF_AIRCRAFT)) continue;
+				const ObjectShroudStatus shroud = obj->getShroudedStatus(player->getPlayerIndex());
+				if (shroud != OBJECTSHROUD_CLEAR && shroud != OBJECTSHROUD_PARTIAL_CLEAR) continue;
+				const Real dx = obj->getPosition()->x - center.x;
+				const Real dy = obj->getPosition()->y - center.y;
+				const Real distanceSq = dx * dx + dy * dy;
+				if (distanceSq < bestDistanceSq || (target != nullptr && distanceSq == bestDistanceSq && obj->getID() < target->getID()))
+				{
+					target = obj;
+					bestDistanceSq = distanceSq;
+				}
+			}
+			if (target == nullptr) return false;
+			finishRaidProbe(task, CombatTaskProbeState::Cancelled, "raid_pursue_visible_enemy", now, 0.0f);
+			task.targetObjectId = static_cast<unsigned int>(target->getID());
+			task.targetPosition = *target->getPosition();
+			task.waypoints.clear();
+			task.waypoints.push_back({task.targetPosition, 320.0f});
+			task.currentWaypointIndex = 0;
+			task.cohesionWaitStartTick = 0u;
+			issueRaidWaypointCommand(player, task, "raid_pursue_visible_enemy");
+			recordAutonomyTelemetryEvent("attack", "raid_retarget", "raid_pursue_visible_enemy", &task.targetPosition, task.taskId, task.targetObjectId);
+			return true;
+		}
+
 		bool updateRaidCohesionTask(Player* player, CombatTask& task)
 		{
+			if (task.owner == "autonomous_assault") return updateEconomicAssaultTask(player, task);
 			if (player == nullptr || TheGameLogic == nullptr || task.type != CombatTaskType::Attack || task.owner != "autonomous_attack")
 			{
 				return false;
@@ -13127,23 +14000,17 @@ namespace
 				const Coord3D origin = task.hasOriginPosition ? task.originPosition : task.targetPosition;
 				task.waypoints = buildDirectRaidWaypoints(origin, task.targetPosition, 300.0f);
 				task.currentWaypointIndex = 0;
-				task.currentWaypointStartTick = ::GetTickCount();
+				task.currentWaypointStartTick = adapterGameplayTick();
 				task.cohesionReason = "waypoints_rebuilt";
 			}
 
-			const DWORD now = ::GetTickCount();
-			if (task.timeoutTick > 0 && now >= task.timeoutTick)
+			const DWORD now = adapterGameplayTick();
+			if (task.state == CombatTaskState::Reassessing) return updateRaidRetreat(player, task, now);
+			const int survivors = static_cast<int>(task.assignedUnitIds.size());
+			task.confirmedDeadCount = std::max(0, task.initialUnitCount - survivors);
+			if (survivors < task.minimumViableCount)
 			{
-				const DWORD taskAge = now - task.createdTick;
-				m_autonomy.combatTaskManager.expireTask(task.taskId, "timeout_exceeded");
-				adapterLog(
-					"combat_task_failed task=%u type=attack reason=timeout_exceeded age_ms=%u",
-					task.taskId,
-					static_cast<unsigned int>(taskAge));
-				adapterLog(
-					"combat_task_release task=%u type=attack units=%d reason=task_expired",
-					task.taskId,
-					static_cast<int>(task.assignedUnitIds.size()));
+				beginRaidRetreat(player, task, "raid_attrition", now);
 				return true;
 			}
 			if (task.state == CombatTaskState::Assembling || task.state == CombatTaskState::Forming)
@@ -13162,6 +14029,8 @@ namespace
 			int infantryArrived = 0;
 			int vehicleLive = 0;
 			int vehicleArrived = 0;
+			int engagedUnits = 0;
+			const UnsignedInt frame = TheGameLogic->getFrame();
 			Real sumX = 0.0f;
 			Real sumY = 0.0f;
 			std::vector<Coord3D> livePositions;
@@ -13181,6 +14050,20 @@ namespace
 					continue;
 				}
 				++liveAssigned;
+				// Attack-state flags include pursuit of unreachable targets. Require
+				// recent firing/damage so such states cannot retain a raid forever.
+				const Weapon* weapon = unit->getCurrentWeapon();
+				const UnsignedInt shotFrame = weapon != nullptr ? weapon->getLastShotFrame() : 0u;
+				const BodyModuleInterface* body = unit->getBodyModule();
+				const UnsignedInt damageFrame = body != nullptr ? body->getLastDamageTimestamp() : 0u;
+				const bool firedRecently = shotFrame > 0u && frame - shotFrame <= 8u * LOGICFRAMES_PER_SECOND;
+				const bool damagedRecently = damageFrame > 0u && frame - damageFrame <= 8u * LOGICFRAMES_PER_SECOND;
+				if (firedRecently || damagedRecently)
+				{
+					++engagedUnits;
+					const UnsignedInt combatFrame = std::max(firedRecently ? shotFrame : 0u, damagedRecently ? damageFrame : 0u);
+					task.raidLastCombatTick = std::max<DWORD>(task.raidLastCombatTick, AIControlAdapterSimulationTick(combatFrame, LOGICFRAMES_PER_SECOND));
+				}
 				retainedAssignedUnitIds.push_back(unitId);
 				sumX += pos->x;
 				sumY += pos->y;
@@ -13231,8 +14114,14 @@ namespace
 				}
 			}
 
-			const bool timeout = task.currentWaypointStartTick > 0 &&
-				now - task.currentWaypointStartTick >= task.stageTimeoutMs;
+			task.raidEngagedUnitCount = engagedUnits;
+			if (task.state != CombatTaskState::Attacking && engagedUnits == 0 &&
+				task.initialUnitCount > 0 && task.confirmedDeadCount * 100 >= task.initialUnitCount * 35)
+			{
+				beginRaidRetreat(player, task, "raid_attrition", now);
+				return true;
+			}
+			const DWORD cohesionWaitMs = task.cohesionWaitStartTick > 0u ? now - task.cohesionWaitStartTick : 0u;
 			const DWORD cohesionWaitMsForMode = task.cohesionWaitStartTick > 0u ? now - task.cohesionWaitStartTick : 0u;
 			const AIControlAdapterRaidModeDecision raidModeDecision =
 				AIControlAdapterRaidManager::evaluateRaidModePolicy(
@@ -13292,6 +14181,37 @@ namespace
 				return true;
 			}
 			const bool requireInfantryQuorum = task.raidMode != "vehicle";
+			const bool finalWaypoint = waypointIndex + 1 >= waypointCount;
+			const int progressQuorum = std::min(std::max(1, (liveAssigned * 70 + 99) / 100),
+				std::max(task.minimumViableCount, std::max(6, (liveAssigned * 40 + 99) / 100)));
+			std::vector<Real> waypointDistances;
+			sumX = 0.0f;
+			sumY = 0.0f;
+			for (unsigned int id : task.assignedUnitIds)
+			{
+				Object* unit = TheGameLogic->findObjectByID(static_cast<ObjectID>(id));
+				if (unit == nullptr || unit->getPosition() == nullptr) continue;
+				sumX += unit->getPosition()->x;
+				sumY += unit->getPosition()->y;
+				const Real dx = unit->getPosition()->x - waypoint.position.x;
+				const Real dy = unit->getPosition()->y - waypoint.position.y;
+				waypointDistances.push_back(std::sqrt(dx * dx + dy * dy));
+			}
+			if (!waypointDistances.empty())
+			{
+				// Track the leading commit-sized cohort: distant stragglers should
+				// not conceal useful forward progress. Commands never reset this.
+				const int commitCount = std::min<int>(static_cast<int>(waypointDistances.size()), progressQuorum);
+				std::nth_element(waypointDistances.begin(), waypointDistances.begin() + commitCount - 1, waypointDistances.end());
+				task.raidQuorumDistance = waypointDistances[commitCount - 1];
+				if (task.raidBestQuorumDistance < 0.0f || task.raidQuorumDistance <= task.raidBestQuorumDistance - 50.0f)
+				{
+					task.raidBestQuorumDistance = task.raidQuorumDistance;
+					task.raidLastProgressTick = now;
+				}
+			}
+			if (engagedUnits > 0 || task.raidLastProgressTick == 0u) task.raidLastProgressTick = now;
+			const bool timeout = now - task.raidLastProgressTick >= task.stageTimeoutMs;
 			const CombatTaskCohesionDecision decision = evaluateCombatTaskCohesion({
 				liveAssigned,
 				arrived,
@@ -13299,7 +14219,14 @@ namespace
 				infantryArrived,
 				task.minimumViableCount,
 				timeout,
-				requireInfantryQuorum
+				requireInfantryQuorum,
+				true,
+				finalWaypoint,
+				static_cast<unsigned int>(cohesionWaitMs),
+				20000u,
+				40,
+				6,
+				true
 			});
 			task.arrivedCount = arrived;
 			task.missingCount = std::max(0, liveAssigned - arrived);
@@ -13316,6 +14243,28 @@ namespace
 
 			if (task.state == CombatTaskState::Attacking)
 			{
+				const Coord3D center = {sumX / std::max(1, liveAssigned), sumY / std::max(1, liveAssigned), 0.0f};
+				const bool quietObjective = engagedUnits == 0 && arrived >= progressQuorum && now - task.raidLastProgressTick >= 30000u;
+				if (engagedUnits == 0 && (now - task.lastCommandTick >= 8000u || quietObjective) && retargetQuietRaid(player, task, center, now)) return true;
+				Object* objective = TheGameLogic->findObjectByID(static_cast<ObjectID>(task.targetObjectId));
+				const bool objectiveVisible = objective != nullptr && !objective->isEffectivelyDead() &&
+					isEnemyControlledObject(player, objective) &&
+					(objective->getShroudedStatus(player->getPlayerIndex()) == OBJECTSHROUD_CLEAR ||
+					 objective->getShroudedStatus(player->getPlayerIndex()) == OBJECTSHROUD_PARTIAL_CLEAR);
+				if (!objectiveVisible && quietObjective)
+				{
+					finishRaidProbe(task, CombatTaskProbeState::Cancelled, "raid_objective_quiet", now, 0.0f);
+					m_autonomy.combatTaskManager.completeTask(task.taskId, "raid_objective_quiet");
+					recordAutonomyTelemetryEvent("attack", "raid_complete", "raid_objective_quiet", &center, task.taskId);
+					return true;
+				}
+				if (timeout)
+				{
+					recoverStalledRaid(player, task, center, now);
+					return true;
+				}
+				if (engagedUnits == 0 && now - task.lastCommandTick >= 8000u)
+					issueRaidWaypointCommand(player, task, "refresh_attack_command");
 				task.cohesionReason = "attacking";
 				if (shouldLogCombatTaskCohesion(task, now))
 				{
@@ -13342,19 +14291,9 @@ namespace
 
 			if (decision.shouldFail)
 			{
-				m_autonomy.combatTaskManager.failTask(task.taskId, decision.reason);
-				adapterLog(
-					"raid_cohesion task=%u state=failed waypoint=%d/%d assigned=%d arrived=%d missing=%d dead=%d spread=%.1f reason=%s",
-					task.taskId,
-					waypointIndex,
-					waypointCount,
-					liveAssigned,
-					arrived,
-					task.missingCount,
-					task.confirmedDeadCount,
-					spread,
-					decision.reason);
-				adapterLog("combat_task_state task=%u type=attack state=failed reason=%s", task.taskId, decision.reason);
+				const Coord3D center = {sumX / std::max(1, liveAssigned), sumY / std::max(1, liveAssigned), 0.0f};
+				if (timeout && liveAssigned >= task.minimumViableCount) recoverStalledRaid(player, task, center, now);
+				else beginRaidRetreat(player, task, decision.reason, now);
 				return true;
 			}
 
@@ -13364,6 +14303,23 @@ namespace
 				if (task.probeState == CombatTaskProbeState::Moving || task.probeState == CombatTaskProbeState::Scouting)
 				{
 					finishRaidProbe(task, CombatTaskProbeState::Cancelled, "main_quorum_reached", now, raidProbeMaxDistanceFromPoint(task, waypoint.position));
+				}
+				if (std::string(decision.reason) == "staged_commit" ||
+					std::string(decision.reason) == "base_entry_commit" ||
+					std::string(decision.reason) == "timeout_advancing")
+				{
+					adapterLog(
+						"attack_commit task=%u waypoint=%d/%d final=%d live=%d arrived=%d required=%d commit_quorum=%d wait_ms=%u reason=%s",
+						task.taskId,
+						waypointIndex,
+						waypointCount,
+						finalWaypoint ? 1 : 0,
+						liveAssigned,
+						arrived,
+						decision.requiredQuorum,
+						decision.commitQuorum,
+						static_cast<unsigned int>(cohesionWaitMs),
+						decision.reason);
 				}
 				task.cohesionWaitStartTick = 0u;
 				if (waypointIndex + 1 >= waypointCount)
@@ -13403,7 +14359,7 @@ namespace
 				{
 					task.cohesionWaitStartTick = now;
 				}
-				if (now - task.lastCommandTick >= 8000u)
+				if (engagedUnits == 0 && now - task.lastCommandTick >= 8000u)
 				{
 					issueRaidWaypointCommand(player, task, "refresh_stage_command");
 				}
@@ -13528,7 +14484,7 @@ namespace
 				return;
 			}
 
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			std::vector<CombatTask*> activeTasks = m_autonomy.combatTaskManager.findActiveTasks();
 
 			for (std::size_t i = 0; i < activeTasks.size(); ++i)
@@ -13570,6 +14526,13 @@ namespace
 						combatTaskStateName(task->state),
 						static_cast<int>(deadUnits.size()),
 						static_cast<int>(task->assignedUnitIds.size()));
+				}
+
+				if (task->type == CombatTaskType::Attack &&
+					(task->owner == "autonomous_attack" || task->owner == "autonomous_assault"))
+				{
+					updateRaidCohesionTask(player, *task);
+					continue;
 				}
 
 				// 2. Fail task if below minimum viable count
@@ -13614,11 +14577,6 @@ namespace
 					continue;
 				}
 
-				if (task->type == CombatTaskType::Attack && task->owner == "autonomous_attack")
-				{
-					updateRaidCohesionTask(player, *task);
-					continue;
-				}
 				if (task->type == CombatTaskType::Scout && task->owner == "dedicated_scouting")
 				{
 					updateScoutTaskLifecycle(player, *task);
@@ -13690,6 +14648,12 @@ namespace
 				if (task->owner == "artillery_counterbattery" && task->targetObjectId > 0)
 				{
 					Object* targetObj = TheGameLogic->findObjectByID(static_cast<ObjectID>(task->targetObjectId));
+					if (targetObj != nullptr && (!targetObj->isKindOf(KINDOF_VEHICLE)
+						|| targetObj->isKindOf(KINDOF_PROJECTILE) || !isEnemyControlledObject(player, targetObj)))
+					{
+						m_autonomy.combatTaskManager.completeTask(task->taskId, "invalid_siege_target");
+						continue;
+					}
 					if (targetObj == nullptr || targetObj->isEffectivelyDead())
 					{
 						m_autonomy.combatTaskManager.completeTask(task->taskId, "target_destroyed");
@@ -13755,7 +14719,7 @@ namespace
 				return;
 			}
 
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			m_autonomy.wmdTargetTracker.updateWMDTargets(player, now);
 		}
 
@@ -13766,7 +14730,7 @@ namespace
 				return;
 			}
 
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			m_autonomy.enemyMemory.beginUpdate(now);
 
 			for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
@@ -13775,7 +14739,9 @@ namespace
 				{
 					continue;
 				}
-				if (obj->isKindOf(KINDOF_ALWAYS_VISIBLE) || obj->isKindOf(KINDOF_REBUILD_HOLE))
+				if (obj->isKindOf(KINDOF_ALWAYS_VISIBLE) || obj->isKindOf(KINDOF_REBUILD_HOLE)
+					|| obj->isKindOf(KINDOF_PROJECTILE)
+					|| (!obj->isKindOf(KINDOF_STRUCTURE) && !obj->isKindOf(KINDOF_VEHICLE) && !obj->isKindOf(KINDOF_INFANTRY) && !obj->isKindOf(KINDOF_AIRCRAFT)))
 				{
 					continue;
 				}
@@ -13832,6 +14798,57 @@ namespace
 			m_autonomy.enemyMemory.finishUpdate(now);
 		}
 
+		AIControlAdapterStrategicFoundationFact observeStrategicFoundation(
+			Player* player, UnsignedInt id, const AutonomyStrategicFoundationState& state,
+			DWORD now, bool activeWmdThreat) const
+		{
+			AIControlAdapterStrategicFoundationFact fact;
+			fact.foundationId = id;
+			fact.templateName = state.templateName;
+			fact.x = state.x;
+			fact.y = state.y;
+			fact.lastHealth = state.lastHealth;
+			fact.maxHealth = state.maxHealth;
+			fact.nowTick = now;
+			fact.firstSeenTick = state.firstSeenTick;
+			fact.lastSeenTick = state.lastSeenTick;
+			fact.lastProgressTick = state.lastProgressTick;
+			fact.recoveryAttempts = state.recoveryAttempts;
+			fact.stopIssued = state.stopIssued;
+			fact.tombstoned = m_autonomy.taskReservationManager.isFoundationTombstoned(id, now);
+			fact.activeWmdThreat = activeWmdThreat;
+			fact.reason = state.reason;
+			fact.currentObserved = player != nullptr && TheGameLogic != nullptr;
+			Object* object = TheGameLogic != nullptr ? TheGameLogic->findObjectByID(static_cast<ObjectID>(id)) : nullptr;
+			fact.currentExists = object != nullptr && !object->isEffectivelyDead();
+			fact.currentOwned = fact.currentExists && object->getControllingPlayer() == player;
+			fact.currentUnderConstruction = fact.currentExists && object->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION);
+			return fact;
+		}
+
+		void reconcileStrategicFoundations(Player* player, DWORD now)
+		{
+			if (player == nullptr || TheGameLogic == nullptr) return;
+			for (auto it = m_autonomy.state.strategicFoundationHealth.begin();
+				it != m_autonomy.state.strategicFoundationHealth.end();)
+			{
+				const auto fact = observeStrategicFoundation(player, it->first, it->second, now, false);
+				const bool released = fact.currentExists && (!fact.currentOwned || !fact.currentUnderConstruction);
+				const bool expiredHistory = !fact.currentExists && (now - fact.lastSeenTick) > 300000u;
+				if (released || expiredHistory)
+				{
+					m_autonomy.taskReservationManager.clearFoundationTombstone(it->first);
+					it = m_autonomy.state.strategicFoundationHealth.erase(it);
+				}
+				else
+				{
+					if (fact.currentExists && fact.currentOwned && fact.currentUnderConstruction)
+						updateStrategicFoundationProgress(TheGameLogic->findObjectByID(static_cast<ObjectID>(it->first)), it->second, now);
+					++it;
+				}
+			}
+		}
+
 		// Phase 7.5: Defensive SCUD Storm Construction and Firing
 		bool isStoppedStrategicFoundation(UnsignedInt foundationId) const
 		{
@@ -13840,6 +14857,8 @@ namespace
 			{
 				return false;
 			}
+			const auto fact = observeStrategicFoundation(resolveAutonomyPlayer(), foundationId, it->second, adapterGameplayTick(), false);
+			if (!fact.currentExists || !fact.currentOwned || !fact.currentUnderConstruction) return false;
 			return it->second.stopIssued ||
 				it->second.reason == "stopped_stale_no_progress" ||
 				it->second.reason == "stopped_no_builder_timeout" ||
@@ -13847,7 +14866,7 @@ namespace
 				((it->second.reason == "no_active_builder" || it->second.reason == "worker_dead") &&
 				 it->second.recoveryAttempts >= 1 &&
 				 it->second.lastProgressTick != 0u &&
-				 (::GetTickCount() - it->second.lastProgressTick) >= 60000u);
+				 (adapterGameplayTick() - it->second.lastProgressTick) >= 60000u);
 		}
 
 		int countHealthyScudStormBuildTasks(const std::set<UnsignedInt>& countedFoundationIds)
@@ -13870,6 +14889,10 @@ namespace
 				const UnsignedInt targetId = static_cast<UnsignedInt>(task->targetObjectId);
 				if (targetId != 0u)
 				{
+					Object* foundation = TheGameLogic != nullptr ? TheGameLogic->findObjectByID(static_cast<ObjectID>(targetId)) : nullptr;
+					if (foundation == nullptr || foundation->isEffectivelyDead() ||
+						foundation->getControllingPlayer() != resolveAutonomyPlayer() ||
+						!foundation->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION)) continue;
 					if (countedFoundationIds.find(targetId) != countedFoundationIds.end())
 					{
 						continue;
@@ -13886,20 +14909,17 @@ namespace
 
 		void evaluateDefensiveScudStorm(Player* player)
 		{
-			if (player == nullptr || TheGameLogic == nullptr)
+			if (player == nullptr || TheGameLogic == nullptr || !m_autonomy.state.allowSuperweapons)
 			{
 				return;
 			}
 
-			const DWORD now = ::GetTickCount();
-			static DWORD s_nextScudStormEvaluationTick = 0u;
-			static DWORD s_nextScudStormBuildTick = 0u;
-			static DWORD s_nextScudStormFireTick = 0u;
-			if (AIControlAdapterIsTickInFuture(s_nextScudStormEvaluationTick, now))
+			const DWORD now = adapterGameplayTick();
+			if (AIControlAdapterIsTickInFuture(m_nextScudStormEvaluationTick, now))
 			{
 				return;
 			}
-			s_nextScudStormEvaluationTick = now + 2000u;
+			m_nextScudStormEvaluationTick = now + 2000u;
 
 			// Check prerequisites
 			const bool hasWMDThreat = m_autonomy.wmdTargetTracker.hasActiveWMDThreat();
@@ -13961,7 +14981,7 @@ namespace
 
 			// Maintain a standing defensive SCUD Storm baseline. Firing still
 			// requires a known WMD target, but production should not wait for one.
-			const int desiredScudStorms = 10;
+			const int desiredScudStorms = m_autonomy.state.allowSuperweapons ? 10 : 0;
 			const std::string reason = hasWMDThreat ? "enemy_wmd_detected" : "defensive_baseline";
 
 			const bool productionNeeded = effectiveScudStorms < desiredScudStorms;
@@ -13987,7 +15007,8 @@ namespace
 			}
 
 			const Money* wallet = player->getMoney();
-			const UnsignedInt currentMoney = wallet != nullptr ? wallet->countMoney() : 0u;
+			const UnsignedInt currentMoney = m_autonomy.state.profileSpendPlan.active ? availableAutonomyCash(player)
+				: wallet != nullptr ? wallet->countMoney() : 0u;
 			const AIControlAdapterProfilePolicyManager profilePolicyManager;
 			const AIControlAdapterProfilePolicyConfig profilePolicyConfig = resolveAutonomyProfilePolicyConfig();
 			const UnsignedInt reserveCash = profilePolicyConfig.reserveCash;
@@ -14013,15 +15034,18 @@ namespace
 			AIControlAdapterStrategicSpendEconomyFacts scudSpendEconomy;
 			scudSpendEconomy.money = currentMoney;
 			scudSpendEconomy.reserveCash = reserveCash;
+			scudSpendEconomy.completedMarkets = m_autonomy.state.profileSpendPlan.active ? m_autonomy.state.profileCompletedMarkets : 0;
 			scudSpendEconomy.activeWmdThreats = hasWMDThreat ? 1 : 0;
 			AIControlAdapterStrategicSpendZoneFacts scudSpendZones;
 			scudSpendZones.currentZones = currentZoneCount;
 			scudSpendZones.desiredZones = desiredZoneCount;
-			const AIControlAdapterStrategicSpendArmyFacts scudSpendArmy;
+			AIControlAdapterStrategicSpendArmyFacts scudSpendArmy;
+			scudSpendArmy.armySize = m_autonomy.state.profileArmyObserved;
 			const AIControlAdapterStrategicSpendSnapshotBuilder strategicSpendSnapshotBuilder;
 			const AIControlAdapterStrategicSpendSnapshotBase scudSpendBase =
 				strategicSpendSnapshotBuilder.BuildBase(scudSpendEconomy, scudSpendZones, scudSpendArmy);
 			AIControlAdapterStrategicSpendSnapshotOverrides scudSpendOverrides;
+			scudSpendOverrides.profilePlan = m_autonomy.state.profileSpendPlan;
 			scudSpendOverrides.expansionUrgent = buildPolicy.zoneExpansionUrgent;
 			scudSpendOverrides.incomeCritical = currentZoneCount <= 1;
 			scudSpendOverrides.reserveDepleted = currentMoney < reserveCash;
@@ -14033,10 +15057,12 @@ namespace
 					scudSpendSnapshot,
 					hasWMDThreat ? StrategicSpendCategory::DefensiveWmd : StrategicSpendCategory::LuxuryBaseline,
 					5000u);
-			const bool scudSpendAllowed = buildPolicy.spendAllowed && centralScudSpend.allowed;
+			const bool profileScudGate = m_autonomy.state.profileSpendPlan.active;
+			const bool scudSpendAllowed = centralScudSpend.allowed && (profileScudGate
+				? inProgressScudStorms < 1 : buildPolicy.spendAllowed);
 			const std::string policyReason =
 				scudSpendAllowed && !buildPolicy.highCashOverride ? reason :
-					(buildPolicy.spendAllowed ? centralScudSpend.reason : buildPolicy.reason);
+					(profileScudGate || buildPolicy.spendAllowed ? centralScudSpend.reason : buildPolicy.reason);
 			int recoverableScudFoundations = 0;
 			int staleScudFoundations = 0;
 			int tombstonedScudFoundations = 0;
@@ -14048,24 +15074,8 @@ namespace
 				{
 					continue;
 				}
-				AIControlAdapterStrategicFoundationFact fact;
-				fact.foundationId = foundationPair.first;
-				fact.templateName = state.templateName;
-				fact.x = state.x;
-				fact.y = state.y;
-				fact.lastHealth = state.lastHealth;
-				fact.maxHealth = state.maxHealth;
-				fact.nowTick = now;
-				fact.firstSeenTick = state.firstSeenTick;
-				fact.lastSeenTick = state.lastSeenTick;
-				fact.lastProgressTick = state.lastProgressTick;
-				fact.recoveryAttempts = state.recoveryAttempts;
-				fact.stopIssued = state.stopIssued;
-				fact.tombstoned = m_autonomy.taskReservationManager.isFoundationTombstoned(
-					static_cast<unsigned int>(foundationPair.first),
-					now);
-				fact.activeWmdThreat = hasWMDThreat;
-				fact.reason = state.reason;
+				const AIControlAdapterStrategicFoundationFact fact =
+					observeStrategicFoundation(player, foundationPair.first, state, now, hasWMDThreat);
 				const AIControlAdapterStrategicFoundationClassification classification =
 					foundationSurvivalManager.Classify(fact);
 				if (classification.recoverable)
@@ -14133,8 +15143,12 @@ namespace
 			strategicCandidates =
 				AIControlAdapterScudStormManager::buildStrategicTargetCandidates(scudStormMemorySnapshots, now);
 
-			const bool scudStormFireCooldownActive = AIControlAdapterIsTickInFuture(s_nextScudStormFireTick, now);
-			if (readyScudStorm == nullptr)
+			const bool scudStormFireCooldownActive = AIControlAdapterIsTickInFuture(m_nextScudStormFireTick, now);
+			if (!autonomyRuleEnabled("storm_firing"))
+			{
+				// Construction may remain enabled independently.
+			}
+			else if (readyScudStorm == nullptr)
 			{
 				adapterLog("scud_storm_target_policy mode=hold reason=no_ready_scud_storm");
 			}
@@ -14149,7 +15163,7 @@ namespace
 						wmdTarget->templateName.c_str());
 					if (!scudStormFireCooldownActive)
 					{
-						s_nextScudStormFireTick = now + 10000u;
+						m_nextScudStormFireTick = now + 10000u;
 
 						char requestIdBuffer[96];
 						sprintf_s(requestIdBuffer, "scud_storm_wmd_%08X", static_cast<unsigned int>(wmdTarget->objectId));
@@ -14167,7 +15181,7 @@ namespace
 
 						if (m_autonomy.state.hasExplicitPlayerIndex)
 						{
-							message["args"]["player"] = player->getPlayerIndex();
+							message["args"]["player_index"] = player->getPlayerIndex();
 						}
 
 						std::string fireReason;
@@ -14209,7 +15223,7 @@ namespace
 						strategicTarget.ageMs,
 						strategicTarget.reason);
 
-					s_nextScudStormFireTick = now + 10000u;
+					m_nextScudStormFireTick = now + 10000u;
 					char requestIdBuffer[96];
 					sprintf_s(requestIdBuffer, "scud_storm_siege_%08X", static_cast<unsigned int>(strategicTarget.objectId));
 
@@ -14227,7 +15241,7 @@ namespace
 
 					if (m_autonomy.state.hasExplicitPlayerIndex)
 					{
-						message["args"]["player"] = player->getPlayerIndex();
+						message["args"]["player_index"] = player->getPlayerIndex();
 					}
 
 					std::string fireReason;
@@ -14248,7 +15262,8 @@ namespace
 			}
 
 				// Build defensive SCUD Storms up to the standing baseline.
-				if (productionNeeded && AIControlAdapterIsTickInFuture(s_nextScudStormBuildTick, now))
+				if (!autonomyRuleEnabled("storm_construction")) return;
+				if (productionNeeded && AIControlAdapterIsTickInFuture(m_nextScudStormBuildTick, now))
 				{
 					if (hasWMDThreat)
 					{
@@ -14263,7 +15278,7 @@ namespace
 				}
 				if (productionNeeded && !scudSpendAllowed)
 				{
-					s_nextScudStormBuildTick = now + 10000u;
+					m_nextScudStormBuildTick = now + 10000u;
 					if (hasWMDThreat)
 					{
 						adapterLog(
@@ -14301,7 +15316,7 @@ namespace
 							m_autonomy.state.zoneRadius);
 					if (!placement.hasPlacement)
 					{
-						s_nextScudStormBuildTick = now + 10000u;
+						m_nextScudStormBuildTick = now + 10000u;
 						if (hasWMDThreat)
 						{
 							adapterLog(
@@ -14327,24 +15342,8 @@ namespace
 				for (const auto& foundationPair : m_autonomy.state.strategicFoundationHealth)
 				{
 					const AutonomyStrategicFoundationState& state = foundationPair.second;
-					AIControlAdapterStrategicFoundationFact fact;
-					fact.foundationId = foundationPair.first;
-					fact.templateName = state.templateName;
-					fact.x = state.x;
-					fact.y = state.y;
-					fact.lastHealth = state.lastHealth;
-					fact.maxHealth = state.maxHealth;
-					fact.nowTick = now;
-					fact.firstSeenTick = state.firstSeenTick;
-					fact.lastSeenTick = state.lastSeenTick;
-					fact.lastProgressTick = state.lastProgressTick;
-					fact.recoveryAttempts = state.recoveryAttempts;
-					fact.stopIssued = state.stopIssued;
-					fact.tombstoned = m_autonomy.taskReservationManager.isFoundationTombstoned(
-						static_cast<unsigned int>(foundationPair.first),
-						now);
-					fact.activeWmdThreat = hasWMDThreat;
-					fact.reason = state.reason;
+					const AIControlAdapterStrategicFoundationFact fact =
+						observeStrategicFoundation(player, foundationPair.first, state, now, hasWMDThreat);
 					foundationFacts.push_back(fact);
 				}
 				const bool collapseImminent =
@@ -14388,7 +15387,7 @@ namespace
 					static_cast<unsigned int>(now));
 					if (rebuildBlock.blocked)
 					{
-						s_nextScudStormBuildTick = now + 15000u;
+						m_nextScudStormBuildTick = now + 15000u;
 						if (hasWMDThreat)
 						{
 							adapterLog(
@@ -14439,7 +15438,7 @@ namespace
 
 				std::string buildReason;
 				const bool buildIssued = executeGameBuildScudStormSmart(message, buildReason);
-				s_nextScudStormBuildTick = now + (buildIssued ? 15000u : 10000u);
+				m_nextScudStormBuildTick = now + (buildIssued ? 15000u : 10000u);
 
 					adapterLog(
 						"scud_storm_build command=Game.BuildScudStormSmart issued=%d desired=%d live=%d in_progress=%d reason=%s",
@@ -14469,11 +15468,12 @@ namespace
 
 		void evaluateBattlefieldCounterbattery(Player* player)
 		{
+			if (!autonomyRuleEnabled("counterbattery")) return;
 			if (player == nullptr || TheGameLogic == nullptr || ThePlayerList == nullptr)
 			{
 				return;
 			}
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			if (AIControlAdapterIsTickInFuture(m_autonomy.state.nextCounterbatteryTick, now))
 			{
 				return;
@@ -14490,7 +15490,8 @@ namespace
 			std::vector<ArtilleryThreat> threats;
 			for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
 			{
-				if (obj == nullptr || obj->isEffectivelyDead() || obj->isKindOf(KINDOF_STRUCTURE))
+				if (obj == nullptr || obj->isEffectivelyDead() || !obj->isKindOf(KINDOF_VEHICLE)
+					|| obj->isKindOf(KINDOF_PROJECTILE))
 				{
 					continue;
 				}
@@ -14607,6 +15608,8 @@ namespace
 			int liveMobileScuds = 0;
 			int liveRocketBuggies = 0;
 			int queuedRocketBuggies = 0;
+			int queuedMobileScuds = 0;
+			reconcilePendingUnitQueues();
 			int armsDealers = 0;
 			int palaces = 0;
 			for (const AutomationOwnedObjectSnapshot& owned : ownedObjects)
@@ -14636,6 +15639,9 @@ namespace
 					ProductionUpdateInterface* production = owned.object->getProductionUpdateInterface();
 					if (production != nullptr && TheThingFactory != nullptr)
 					{
+						const std::string launcherName = AIControlAdapterTemplateInferenceService::InferScudLauncherTemplate(player);
+						const ThingTemplate* launcher = launcherName.empty() ? nullptr : TheThingFactory->findTemplate(AsciiString(launcherName.c_str()), false);
+						if (launcher != nullptr) queuedMobileScuds += static_cast<int>(production->countUnitTypeInQueue(launcher));
 						const std::string buggyTemplateName = AIControlAdapterTemplateInferenceService::InferRocketBuggyTemplateForProducer(owned.object);
 						if (!buggyTemplateName.empty())
 						{
@@ -14692,7 +15698,12 @@ namespace
 				&& player->hasScience(scudLauncherScience);
 			const Money* wallet = player->getMoney();
 			const UnsignedInt money = wallet != nullptr ? wallet->countMoney() : 0u;
-			const int queuedMobileScuds = 0;
+			for (const auto& pending : m_pendingUnitQueues)
+				if (pending.playerIndex == player->getPlayerIndex())
+				{
+					if (containsIgnoreCase(pending.templateName, "scudlauncher")) ++queuedMobileScuds;
+					else if (containsIgnoreCase(pending.templateName, "rocketbuggy")) ++queuedRocketBuggies;
+				}
 			const int maxCounterbatteryMobileScuds = 2;
 			const bool hasBuggyPrerequisites = armsDealers > 0 && palaces > 0 && money >= 900u;
 			const bool hasScudProductionPrerequisites =
@@ -14760,22 +15771,9 @@ namespace
 			{
 				const bool preferBuggy = buggyMix.productionNeeded;
 				const std::string unitTemplateName = preferBuggy ? "GLAVehicleRocketBuggy" : AIControlAdapterTemplateInferenceService::InferScudLauncherTemplate(player);
-				nlohmann::json message = {
-					{"type", "SessionCommand"},
-					{"request_id", preferBuggy ? std::string("mobile_siege_rocket_buggy") : std::string("counterbattery_scud_launcher")},
-					{"cmd", "Game.QueueUnit"},
-					{"args", nlohmann::json::object({
-						{"producer_kind", "arms_dealer"},
-						{"unit_template", unitTemplateName},
-						{"count", 1}
-					})}
-				};
-				if (m_autonomy.state.hasExplicitPlayerIndex)
-				{
-					message["args"]["player"] = player->getPlayerIndex();
-				}
 				std::string productionReason;
-				const bool issued = executeGameQueueUnit(message, productionReason);
+				const bool issued = queueCombatUnitAtWarFactory(player,
+					preferBuggy ? "rocketbuggy" : "scudlauncher", 1, productionReason, 2);
 				m_autonomy.state.nextCounterbatteryProductionTick = now + (issued ? 20000u : 8000u);
 				adapterLog(
 					"vehicle_mix_policy scorpions=%d quads=%d buggies=%d queued_buggies=%d desired_buggies=%d reason=%s",
@@ -15032,7 +16030,7 @@ namespace
 			if (commandIssued)
 			{
 				m_autonomy.combatTaskManager.updateTaskState(taskId, CombatTaskState::Moving, "attack_command_issued");
-				m_autonomy.combatTaskManager.updateTaskCommand(taskId, ::GetTickCount());
+				m_autonomy.combatTaskManager.updateTaskCommand(taskId, adapterGameplayTick());
 
 				adapterLog(
 					"scud_counterbattery_command task=%u target=%u issued=1 scuds=%d reason=attack_move_to_wmd",
@@ -15167,7 +16165,7 @@ namespace
 			if (commandIssued)
 			{
 				m_autonomy.combatTaskManager.updateTaskState(taskId, CombatTaskState::Moving, "attack_command_issued");
-				m_autonomy.combatTaskManager.updateTaskCommand(taskId, ::GetTickCount());
+				m_autonomy.combatTaskManager.updateTaskCommand(taskId, adapterGameplayTick());
 
 				adapterLog(
 					"wmd_direct_strike_command task=%u target=%u issued=1 units=%d reason=attack_move_to_wmd",
@@ -15191,7 +16189,8 @@ namespace
 			Player* player,
 			std::vector<Object*>& outUnits,
 			bool includeScoutPoolTechnicals = false,
-			const std::string& raidMode = "mixed_local")
+			const std::string& raidMode = "mixed_local",
+			bool logReservationSkips = true)
 		{
 			outUnits.clear();
 			if (player == nullptr)
@@ -15213,7 +16212,7 @@ namespace
 				}
 				if (raidMode == "vehicle" && owned.isInfantry)
 				{
-					const DWORD now = ::GetTickCount();
+					const DWORD now = adapterGameplayTick();
 					const std::string logKey =
 						std::string("raid_infantry_skip:") +
 						std::to_string(static_cast<unsigned int>(owned.object != nullptr ? owned.object->getID() : 0u)) +
@@ -15244,6 +16243,7 @@ namespace
 						owned.isAircraft ||
 						owned.isQuad ||
 						owned.isScorpion ||
+						owned.isScudLauncher ||
 						containsIgnoreCase(owned.name, "rocketbuggy") ||
 						owned.isTechnical ||
 						(owned.isVehicle && owned.object->isAbleToAttack());
@@ -15254,7 +16254,8 @@ namespace
 				}
 				if (owned.object != nullptr && isGarrisonReservedUnit(static_cast<UnsignedInt>(owned.object->getID())))
 				{
-					const DWORD now = ::GetTickCount();
+					if (!logReservationSkips) continue;
+					const DWORD now = adapterGameplayTick();
 					const std::string logKey =
 						std::string("garrison:combat:") +
 						std::to_string(static_cast<unsigned int>(owned.object->getID())) +
@@ -15270,6 +16271,7 @@ namespace
 				// Phase 6.2: Exclude units reserved for capture tasks
 				if (owned.object != nullptr && m_autonomy.taskReservationManager.isObjectReserved(owned.object->getID()))
 				{
+					if (!logReservationSkips) continue;
 					const SpecialTaskReservation* reservation = findActiveCaptureReservationForObject(owned.object->getID());
 					if (reservation != nullptr)
 					{
@@ -15285,8 +16287,9 @@ namespace
 				// Phase 9.0: Exclude units reserved for combat tasks
 				if (owned.object != nullptr && m_autonomy.combatTaskManager.isUnitReserved(owned.object->getID()))
 				{
+					if (!logReservationSkips) continue;
 					// Find which task owns this unit for logging
-					const DWORD now = ::GetTickCount();
+					const DWORD now = adapterGameplayTick();
 					const std::vector<CombatTask*> activeTasks = m_autonomy.combatTaskManager.findActiveTasks();
 					for (std::size_t j = 0; j < activeTasks.size(); ++j)
 					{
@@ -15323,7 +16326,8 @@ namespace
 				}
 				if (!includeScoutPoolTechnicals && isWorkerShuttleTechnicalProtected(player, owned))
 				{
-					const DWORD now = ::GetTickCount();
+					if (!logReservationSkips) continue;
+					const DWORD now = adapterGameplayTick();
 					const std::string logKey =
 						std::string("worker_shuttle:") +
 						std::to_string(static_cast<unsigned int>(owned.object->getID())) +
@@ -15338,7 +16342,7 @@ namespace
 				}
 				if (!includeScoutPoolTechnicals && isScoutPoolTechnicalProtected(player, owned))
 				{
-					const DWORD now = ::GetTickCount();
+					const DWORD now = adapterGameplayTick();
 					const std::string logKey =
 						std::string("pool:") +
 						std::to_string(static_cast<unsigned int>(owned.object->getID())) +
@@ -15441,12 +16445,11 @@ namespace
 		void collectCaptureSourcesForPlayer(Player* player, bool preferIdle, std::vector<Object*>& outSources)
 		{
 			outSources.clear();
-			static DWORD s_nextCaptureSourceSearchLogTick = 0u;
-			const DWORD now = ::GetTickCount();
-			const bool shouldLogSearch = AIControlAdapterHasTickElapsed(s_nextCaptureSourceSearchLogTick, now);
+			const DWORD now = adapterGameplayTick();
+			const bool shouldLogSearch = AIControlAdapterHasTickElapsed(m_nextCaptureSourceSearchLogTick, now);
 			if (shouldLogSearch)
 			{
-				s_nextCaptureSourceSearchLogTick = now + 5000u;
+				m_nextCaptureSourceSearchLogTick = now + 5000u;
 				adapterLog("collect_capture_sources_enter player=%d prefer_idle=%d",
 					player != nullptr ? player->getPlayerIndex() : -1, preferIdle ? 1 : 0);
 			}
@@ -15547,7 +16550,7 @@ namespace
 			{
 				// fall through and still prune pending sources
 			}
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			for (auto it = m_automation.captureRule.pendingTargetsUntilTick.begin(); it != m_automation.captureRule.pendingTargetsUntilTick.end(); )
 			{
 				if (AIControlAdapterHasTickElapsed(it->second, now))
@@ -15579,7 +16582,7 @@ namespace
 				return;
 			}
 
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			if (AIControlAdapterIsTickInFuture(m_automation.workerRule.nextAllowedTick, now))
 			{
 				return;
@@ -15599,6 +16602,13 @@ namespace
 			{
 				m_automation.workerRule.nextAllowedTick = now + m_automation.workerRule.cooldownMs;
 				adapterLog("automation_worker_rule_skip reason=player_not_found");
+				return;
+			}
+
+			// The safe, shallow recovery allocator owns worker production during collapse.
+			if (player == resolveAutonomyPlayer() && isSurvivalRecoveryActive(now))
+			{
+				m_automation.workerRule.nextAllowedTick = now + m_automation.workerRule.cooldownMs;
 				return;
 			}
 
@@ -15662,7 +16672,7 @@ namespace
 			{
 				return;
 			}
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			if (AIControlAdapterIsTickInFuture(m_autonomy.state.nextLocalWorkerLiquidityTick, now))
 			{
 				return;
@@ -15675,13 +16685,19 @@ namespace
 				return;
 			}
 
+			m_autonomy.state.workerLiquidityTelemetry["recovery_active"] = isSurvivalRecoveryActive(now);
+			m_autonomy.state.workerLiquidityTelemetry["recovery_issued"] = 0;
 			const Money* wallet = player->getMoney();
 			const UnsignedInt money = wallet != nullptr ? wallet->countMoney() : 0u;
 			const AIControlAdapterProfilePolicyManager profilePolicyManager;
 			const UnsignedInt reserve =
 				profilePolicyManager.ResolveReserveCashWithFloor(resolveAutonomyProfilePolicyConfig(), 5000u);
 			const UnsignedInt cashFloat = money > reserve ? money - reserve : 0u;
-			const int workerCap = 80;
+			const bool incomeBuildFunded = m_autonomy.state.strategicSpendTelemetry.is_object()
+				&& m_autonomy.state.strategicSpendTelemetry.value("healthy_market_foundations", 0) > 0;
+			const bool workerRecovery = (isEconomicVictoryPhase() || isSurvivalRecoveryActive(now))
+				&& availableAutonomyCash(player) >= (incomeBuildFunded ? 600u : 3100u);
+			const int workerCap = m_autonomy.state.profileSpendPlan.active ? m_autonomy.state.profileSpendPlan.workerLimit : 80;
 			int globalWorkers = 0;
 			std::vector<Object*> producers;
 			std::vector<Object*> workers;
@@ -15729,12 +16745,26 @@ namespace
 				cashFloat >= 3000u ? "cash_healthy" : "cash_reserved");
 
 			const AIControlAdapterEconomyManager economyManager;
-			const AIControlAdapterLocalWorkerLiquidityResult globalWorkerPolicy =
-				economyManager.ChooseGlobalWorkerLiquidityPass(globalWorkers, workerCap, cashFloat);
-			if (std::string(globalWorkerPolicy.reason) == "cash_reserved" ||
-				std::string(globalWorkerPolicy.reason) == "worker_cap_reached")
+			if (evacuateExposedBuilders(player, now))
 			{
-				m_autonomy.state.nextLocalWorkerLiquidityTick = now + 12000u;
+				m_autonomy.state.nextLocalWorkerLiquidityTick = now + 3000u;
+				return;
+			}
+			if (queueSurvivalWorkers(player, producers, workers, now))
+			{
+				m_autonomy.state.nextLocalWorkerLiquidityTick = now + 3000u;
+				return;
+			}
+			if (redistributeIdleWorkers(player, workers, now))
+			{
+				m_autonomy.state.nextLocalWorkerLiquidityTick = now + 3000u;
+				return;
+			}
+
+			if (isSurvivalRecoveryActive(now))
+			{
+				// Recovery refill above is the sole worker queue allocator during this hold.
+				m_autonomy.state.nextLocalWorkerLiquidityTick = now + 3000u;
 				return;
 			}
 
@@ -15746,13 +16776,18 @@ namespace
 					continue;
 				}
 				const UnsignedInt zoneId = zone.value("anchor_id", 0u);
+				if (isConsolidatedSurvivalZone(zoneId, now)) continue;
 				const Real zx = zone.value("center_x", 0.0f);
 				const Real zy = zone.value("center_y", 0.0f);
 				const bool developed = zone.value("developed", false);
 				const bool active = zone.value("active", false);
-				const bool hasLocalStrategicTask = strategicTasks > 0 &&
-					(zone.value("palaces", 0) > 0 || zone.value("supply_stashes", 0) > 0 || active);
+				const bool hasLocalStrategicTask = hasStrategicBuildNearZone(zx, zy);
+				const auto workerThreat = m_autonomy.state.zoneThreats.find(zoneId);
+				if (workerThreat != m_autonomy.state.zoneThreats.end()
+					&& now - workerThreat->second.lastSeenTick <= 10000u
+					&& workerThreat->second.localEnemyCount > 0) continue;
 				LocalWorkerZoneInput workerInput;
+				workerInput.allowReserveRecovery = workerRecovery;
 				workerInput.developed = developed;
 				workerInput.active = active;
 				workerInput.hasLocalStrategicTask = hasLocalStrategicTask;
@@ -15781,6 +16816,9 @@ namespace
 						++localIdle;
 					}
 				}
+
+				for (const auto& transfer : m_autonomy.state.workerTransfers)
+					if (transfer.second.zoneId == zoneId) ++localIdle;
 
 				std::vector<Object*> localProducers;
 				for (Object* producer : producers)
@@ -15816,6 +16854,8 @@ namespace
 				}
 
 				Object* producer = localProducers.front();
+				ProductionUpdateInterface* workerQueue = producer->getProductionUpdateInterface();
+				if (workerQueue == nullptr || workerQueue->getProductionCount() >= 2) continue;
 				nlohmann::json args = {
 					{"count", 1},
 					{"producer_kind", "any"},
@@ -15855,7 +16895,7 @@ namespace
 				return;
 			}
 
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			if (AIControlAdapterIsTickInFuture(m_automation.stashWorkerRule.nextAllowedTick, now))
 			{
 				return;
@@ -15874,6 +16914,13 @@ namespace
 			{
 				m_automation.stashWorkerRule.nextAllowedTick = now + m_automation.stashWorkerRule.cooldownMs;
 				adapterLog("automation_stash_worker_rule_skip reason=player_not_found");
+				return;
+			}
+
+			// The safe, shallow recovery allocator owns worker production during collapse.
+			if (player == resolveAutonomyPlayer() && isSurvivalRecoveryActive(now))
+			{
+				m_automation.stashWorkerRule.nextAllowedTick = now + m_automation.stashWorkerRule.cooldownMs;
 				return;
 			}
 
@@ -15977,7 +17024,15 @@ namespace
 				return;
 			}
 
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
+			if (resolveAutonomyProfilePolicyConfig().isEconomyFirstSprawl && !isEconomicVictoryPhase()) return;
+			if (isEconomicVictoryPhase())
+			{
+				if (!autonomyRuleEnabled("sustained_assaults")) return;
+				evaluateEconomicAssault(now);
+				return;
+			}
+			if (isAutonomyModeActive() && !autonomyRuleEnabled("raids")) return;
 			if (AIControlAdapterIsTickInFuture(m_automation.attackRule.nextAllowedTick, now))
 			{
 				return;
@@ -16055,13 +17110,26 @@ namespace
 			const bool ok = executeGameAttackMoveRaidSmart(message, reason, &attackResult);
 			m_automation.attackRule.nextAllowedTick = now + m_automation.attackRule.cooldownMs;
 
-			const bool hasEquivalentActiveTask =
-				ok &&
-				!attackResult.assignedUnitIds.empty() &&
-				m_autonomy.combatTaskManager.hasEquivalentActiveTask(
-					CombatTaskType::Attack,
-					attackResult.targetPosition,
-					500.0f);
+			// Suppress duplicate assembling waves, but allow ready reinforcements
+			// once the existing wave is attacking. Long-lived combat must not lock
+			// all later launches out of the same enemy base.
+			bool hasEquivalentActiveTask = false;
+			if (ok && !attackResult.assignedUnitIds.empty())
+			{
+				for (const CombatTask* active : m_autonomy.combatTaskManager.findActiveTasks())
+				{
+					if (active == nullptr || active->type != CombatTaskType::Attack) continue;
+					if (active->owner == "autonomous_attack" &&
+						(active->state == CombatTaskState::Attacking || active->state == CombatTaskState::Reassessing)) continue;
+					const Real dx = active->targetPosition.x - attackResult.targetPosition.x;
+					const Real dy = active->targetPosition.y - attackResult.targetPosition.y;
+					if (dx * dx + dy * dy <= 500.0f * 500.0f)
+					{
+						hasEquivalentActiveTask = true;
+						break;
+					}
+				}
+			}
 			const AIControlAdapterAttackTaskCreationDecision taskCreationDecision =
 				AIControlAdapterRaidManager::evaluateAttackTaskCreation(
 					ok,
@@ -16094,13 +17162,18 @@ namespace
 					attackResult.targetPosition,
 					"autonomous_attack",
 					"auto_attack_rule",
-					120000); // 2 minute timeout
+					0); // Raid watchdog owns progress/combat inactivity; no lifetime recall.
 				CombatTask* attackTask = m_autonomy.combatTaskManager.findTask(attackTaskId);
 				if (attackTask != nullptr)
 				{
 					attackTask->originPosition = attackResult.originPosition;
 					attackTask->hasOriginPosition = true;
-					attackTask->waypoints = buildDirectRaidWaypoints(attackResult.originPosition, attackResult.targetPosition, 300.0f);
+					attackTask->manageTimeoutExternally = true;
+					attackTask->timeoutTick = 0u;
+					attackTask->raidLastProgressTick = now;
+					attackTask->raidDesiredScudLaunchers = attackResult.desiredScudLaunchers;
+					attackTask->raidScudLauncherUnitIds = attackResult.scudLauncherUnitIds;
+					attackTask->waypoints = buildDirectRaidWaypoints(attackResult.rallyPosition, attackResult.targetPosition, 300.0f);
 					attackTask->currentWaypointIndex = 0;
 					attackTask->currentWaypointStartTick = now;
 					attackTask->stageTimeoutMs = 45000u;
@@ -16120,6 +17193,17 @@ namespace
 
 				if (attackTask != nullptr)
 				{
+					recordAutonomyTelemetryEvent("attack", "raid_composition", attackResult.compositionReason.c_str(),
+						&attackTask->targetPosition, attackTaskId);
+					for (unsigned int id : attackTask->raidScudLauncherUnitIds)
+					{
+						recordAutonomyTelemetryEvent("attack", "raid_siege_assigned", "scud_launcher",
+							&attackTask->targetPosition, attackTaskId, id);
+					}
+					adapterLog("raid_composition task=%u desired_scuds=%d selected_scuds=%d units=%d reason=%s",
+						attackTaskId, attackTask->raidDesiredScudLaunchers,
+						static_cast<int>(attackTask->raidScudLauncherUnitIds.size()),
+						static_cast<int>(attackTask->assignedUnitIds.size()), attackResult.compositionReason.c_str());
 					issueRaidWaypointCommand(player, *attackTask, "created");
 				}
 			}
@@ -16154,7 +17238,7 @@ namespace
 				return;
 			}
 
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			if (AIControlAdapterIsTickInFuture(m_automation.radarVanRule.nextAllowedTick, now))
 			{
 				return;
@@ -16304,7 +17388,7 @@ namespace
 		 */
 		void updateCaptureTaskLifecycle()
 		{
-			const DWORD now = ::GetTickCount();
+			const DWORD now = adapterGameplayTick();
 			std::vector<SpecialTaskReservation*> captureTasks = m_autonomy.taskReservationManager.findCaptureTasks();
 
 			for (SpecialTaskReservation* task : captureTasks)
@@ -16400,7 +17484,7 @@ namespace
 						task->taskId,
 						task->sourceObjectId);
 					const Coord3D* targetPos = target->getPosition();
-					recordAutonomyTelemetryEvent("capture_task_complete", "target_captured", "building_captured", targetPos);
+					recordAutonomyTelemetryEvent("capture_task_complete", "target_captured", "building_captured", targetPos, task->taskId, task->targetObjectId);
 					continue;
 				}
 
@@ -16560,21 +17644,22 @@ namespace
 
 		void evaluateCaptureAutomationRule()
 		{
+			// Existing capture reservations still complete/release while new missions are disabled.
+			updateCaptureTaskLifecycle();
 			if (!m_automation.captureRule.enabled)
 			{
 				if (!m_automation.captureRule.disabledLogEmitted)
 				{
 					m_automation.captureRule.disabledLogEmitted = true;
-					m_automation.captureRule.nextAllowedTick = ::GetTickCount() + std::max<DWORD>(m_automation.captureRule.cooldownMs, 4000u);
+					m_automation.captureRule.nextAllowedTick = adapterGameplayTick() + std::max<DWORD>(m_automation.captureRule.cooldownMs, 4000u);
 					adapterLog("automation_capture_rule_disabled");
 				}
 				return;
 			}
 			m_automation.captureRule.disabledLogEmitted = false;
 
-			const DWORD now = ::GetTickCount();
-			// Phase 6.2: Update capture task lifecycle instead of pruning simple pending maps
-			updateCaptureTaskLifecycle();
+			const DWORD now = adapterGameplayTick();
+			// Capture lifecycle was reconciled before the rule gate.
 			if (AIControlAdapterIsTickInFuture(m_automation.captureRule.nextAllowedTick, now))
 			{
 				return;
@@ -17464,12 +18549,12 @@ namespace
 
 		const GameSlot* findSlotForPlayer(const Player* player) const
 		{
-			if (player == nullptr || TheGameInfo == nullptr)
+			if (player == nullptr || TheGameInfo == nullptr || ThePlayerList == nullptr)
 			{
 				return nullptr;
 			}
 
-			const Int idx = player->getPlayerIndex();
+			const Int idx = ThePlayerList->getSlotIndex(player->getPlayerIndex());
 			if (idx >= 0 && idx < MAX_SLOTS)
 			{
 				return TheGameInfo->getConstSlot(idx);
@@ -17582,6 +18667,8 @@ namespace
 			mapPos["source"] = "unknown";
 			return mapPos;
 		}
+
+		#include "AIControlAdapterEconomicAssault.inl"
 
 		#include "AIControlAdapterGameActions.inl"
 

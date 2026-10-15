@@ -36,6 +36,10 @@ struct AIControlAdapterProfilePolicyRequest
 class AIControlAdapterProfilePolicyManager
 {
 public:
+	AIControlAdapterProfileSpendPlan ResolveSpendPlan(
+		const AIControlAdapterProfilePolicyConfig& config,
+		unsigned int availableCash, int completedMarkets,
+		int localEnemies, bool threatResponse, bool sustainedOffense) const;
 	AIControlAdapterProfilePolicyConfig Resolve(const AIControlAdapterProfilePolicyRequest& request) const;
 	int ResolveStrategicSpendDesiredZoneCount(
 		const AIControlAdapterProfilePolicyConfig& config,

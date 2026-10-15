@@ -59,6 +59,7 @@ AIControlAdapterStrategicSpendSnapshot AIControlAdapterStrategicSpendSnapshotBui
 {
 	AIControlAdapterStrategicSpendSnapshot snapshot;
 	snapshot.money = base.money;
+	snapshot.profilePlan = overrides.profilePlan;
 	snapshot.reserveCash = base.reserveCash;
 	snapshot.currentZones = base.currentZones;
 	snapshot.developedZones = base.developedZones;

@@ -526,6 +526,13 @@ Bool MapCache::loadMapsFromMapCacheINI( const AsciiString &mapDir )
 	AsciiString fname;
 	fname.format("%s\\%s", mapDir.str(), m_mapCacheName);
 
+	// Stock game archives provide MapCache.ini instead of MapCacheGO.ini.
+	// Prefer the Generals Online cache when available, but support stock installs.
+	if (!TheFileSystem->doesFileExist(fname.str()))
+	{
+		fname.format("%s\\MapCache.ini", mapDir.str());
+	}
+
 	if (TheFileSystem->doesFileExist(fname.str()))
 	{
 		// a partial or unreadable cache must not abort startup, the disk scan re-caches the maps and rewrites it
@@ -1401,4 +1408,3 @@ void findDrawPositions( Int startX, Int startY, Int width, Int height, Region3D 
 	lr->y += startY;
 
 }
-

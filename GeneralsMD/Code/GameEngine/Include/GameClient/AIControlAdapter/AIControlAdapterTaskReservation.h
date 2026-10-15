@@ -1,4 +1,5 @@
 #pragma once
+#include "GameClient/AIControlAdapter/AIControlAdapterRecordingJournal.h"
 
 #include <string>
 #include <vector>
@@ -78,6 +79,9 @@ class AIControlAdapterTaskReservationManager
 {
 public:
 	AIControlAdapterTaskReservationManager();
+	// Inject the gameplay clock; standalone consumers retain their default clock.
+	void setClock(unsigned int (*clock)()) { m_clock = clock; }
+	void setRecordingSink(AIControlAdapterRecordingSink sink, void* context) { m_recordingSink = sink; m_recordingContext = context; }
 
 	// Create a new task reservation
 	unsigned int createReservation(
@@ -164,6 +168,9 @@ public:
 	int getCaptureTaskCount() const;
 
 private:
+	unsigned int (*m_clock)() = nullptr;
+	AIControlAdapterRecordingSink m_recordingSink = nullptr;
+	void* m_recordingContext = nullptr;
 	unsigned int nextTaskId = 1;
 	std::map<unsigned int, SpecialTaskReservation> reservations;
 	std::map<unsigned int, StoppedFoundationTombstone> stoppedFoundationTombstones;

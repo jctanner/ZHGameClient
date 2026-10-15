@@ -1,4 +1,5 @@
 #pragma once
+#include "GameClient/AIControlAdapter/AIControlAdapterRecordingJournal.h"
 
 #include <string>
 #include <vector>
@@ -67,6 +68,13 @@ struct CombatTaskCohesionInput
 	int minimumViable = 1;
 	bool timeout = false;
 	bool requireInfantryQuorum = true;
+	bool allowPartialCommit = false;
+	bool finalWaypoint = false;
+	unsigned int cohesionWaitMs = 0;
+	unsigned int minPartialCommitWaitMs = 20000;
+	int partialCommitPercent = 40;
+	int partialCommitMinArrived = 6;
+	bool retreatOnTimeout = false;
 };
 
 struct CombatTaskCohesionDecision
@@ -75,6 +83,7 @@ struct CombatTaskCohesionDecision
 	bool shouldFail = false;
 	int requiredQuorum = 0;
 	int infantryRequiredQuorum = 0;
+	int commitQuorum = 0;
 	const char* reason = "waiting_for_cohesion";
 };
 
@@ -276,6 +285,7 @@ struct CombatTask
 	DWORD lastCommandTick = 0;                  // Last time a command was issued
 	DWORD lastProgressTick = 0;                 // Last time progress was observed
 	DWORD timeoutTick = 0;
+	bool manageTimeoutExternally = false;      // Engine adapter owns retreat/expiry for staged raids
 
 	int initialUnitCount = 0;                   // For tracking casualties
 	int minimumViableCount = 0;                 // Fail if below this many units
@@ -284,6 +294,22 @@ struct CombatTask
 	int currentWaypointIndex = 0;
 	DWORD currentWaypointStartTick = 0;
 	DWORD stageTimeoutMs = 45000;
+	// Raid watchdog observes movement/fire, independently of command refreshes.
+	DWORD assaultNextEvaluationTick = 0u;
+	DWORD assaultTargetStartTick = 0u;
+	DWORD assaultLastDamageTick = 0u;
+	Real assaultTargetHealth = -1.0f;
+	std::string assaultTargetTemplate;
+	DWORD raidLastProgressTick = 0;
+	DWORD raidLastCombatTick = 0;
+	Real raidBestQuorumDistance = -1.0f;
+	Real raidQuorumDistance = 0.0f;
+	int raidRecoveryAttempts = 0;
+	int raidEngagedUnitCount = 0;
+	int raidDesiredScudLaunchers = 0;
+	// Initial membership survives pruning so telemetry can distinguish losses
+	// from a wave that never included launchers.
+	std::vector<unsigned int> raidScudLauncherUnitIds;
 	int arrivedCount = 0;
 	int missingCount = 0;
 	int confirmedDeadCount = 0;
@@ -396,6 +422,9 @@ class AIControlAdapterCombatTaskManager
 {
 public:
 	AIControlAdapterCombatTaskManager();
+	// Inject the gameplay clock; standalone consumers retain their default clock.
+	void setClock(unsigned int (*clock)()) { m_clock = clock; }
+	void setRecordingSink(AIControlAdapterRecordingSink sink, void* context) { m_recordingSink = sink; m_recordingContext = context; }
 
 	// Create a new combat task
 	unsigned int createTask(
@@ -471,6 +500,9 @@ public:
 	int getTotalAssignedUnitCount() const;
 
 private:
+	unsigned int (*m_clock)() = nullptr;
+	AIControlAdapterRecordingSink m_recordingSink = nullptr;
+	void* m_recordingContext = nullptr;
 	unsigned int nextTaskId = 1;
 	std::map<unsigned int, CombatTask> tasks;
 };

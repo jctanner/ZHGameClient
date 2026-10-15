@@ -15,7 +15,7 @@ unsigned int AIControlAdapterTaskReservationManager::createReservation(
 	unsigned int timeoutMs)
 {
 	const unsigned int taskId = nextTaskId++;
-	const DWORD now = ::GetTickCount();
+	const DWORD now = (m_clock != nullptr ? m_clock() : ::GetTickCount());
 
 	SpecialTaskReservation reservation;
 	reservation.taskId = taskId;
@@ -33,6 +33,7 @@ unsigned int AIControlAdapterTaskReservationManager::createReservation(
 	reservation.reason = "assigned";
 
 	reservations[taskId] = reservation;
+	if (m_recordingSink) m_recordingSink(m_recordingContext, "special", "task_created", taskId, reservation.targetObjectId, "assigned", owner.c_str(), reservation.expectedTemplate.c_str());
 	return taskId;
 }
 
@@ -43,7 +44,7 @@ unsigned int AIControlAdapterTaskReservationManager::createCaptureReservation(
 	unsigned int timeoutMs)
 {
 	const unsigned int taskId = nextTaskId++;
-	const DWORD now = ::GetTickCount();
+	const DWORD now = (m_clock != nullptr ? m_clock() : ::GetTickCount());
 
 	SpecialTaskReservation reservation;
 	reservation.taskId = taskId;
@@ -66,6 +67,7 @@ unsigned int AIControlAdapterTaskReservationManager::createCaptureReservation(
 	reservation.commandReissueCount = 0;
 
 	reservations[taskId] = reservation;
+	if (m_recordingSink) m_recordingSink(m_recordingContext, "special", "task_created", taskId, reservation.targetObjectId, "assigned", owner.c_str(), reservation.expectedTemplate.c_str());
 	return taskId;
 }
 
@@ -159,9 +161,18 @@ bool AIControlAdapterTaskReservationManager::updateTaskState(
 		return false;
 	}
 
+	const bool changed = task->state != newState || task->reason != reason;
 	task->state = newState;
 	task->reason = reason;
-	task->lastUpdateTick = ::GetTickCount();
+	if (changed && m_recordingSink)
+	{
+		const char* state = newState == SpecialTaskState::Complete ? "complete" :
+			(newState == SpecialTaskState::Failed ? "failed" : (newState == SpecialTaskState::Expired ? "expired" : "active"));
+		const char* label = newState == SpecialTaskState::Complete ? "task_complete" :
+			(newState == SpecialTaskState::Failed || newState == SpecialTaskState::Expired ? "task_failed" : "task_state");
+		m_recordingSink(m_recordingContext, "special", label, taskId, task->targetObjectId, state, task->owner.c_str(), reason.c_str());
+	}
+	task->lastUpdateTick = (m_clock != nullptr ? m_clock() : ::GetTickCount());
 	return true;
 }
 
@@ -173,8 +184,10 @@ bool AIControlAdapterTaskReservationManager::setTaskTargetObject(unsigned int ta
 		return false;
 	}
 
+	if (task->targetObjectId != targetObjectId && m_recordingSink)
+		m_recordingSink(m_recordingContext, "special", "task_target_bound", taskId, targetObjectId, "active", task->owner.c_str(), task->expectedTemplate.c_str());
 	task->targetObjectId = targetObjectId;
-	task->lastUpdateTick = ::GetTickCount();
+	task->lastUpdateTick = (m_clock != nullptr ? m_clock() : ::GetTickCount());
 	return true;
 }
 
@@ -222,7 +235,7 @@ void AIControlAdapterTaskReservationManager::pruneExpiredTasks(DWORD currentTick
 			task.state == SpecialTaskState::Expired)
 		{
 			// Keep terminal tasks for a short window for telemetry
-			if (currentTick > task.lastUpdateTick + 5000) // 5 seconds
+			if ((currentTick - task.lastUpdateTick) > 5000) // 5 seconds
 			{
 				toRemove.push_back(task.taskId);
 			}
@@ -231,9 +244,10 @@ void AIControlAdapterTaskReservationManager::pruneExpiredTasks(DWORD currentTick
 
 		// Expire tasks past timeout
 		// Phase 6.2: Skip CaptureStructure tasks - they manage their own expiry in updateCaptureTaskLifecycle()
-		if (task.type != SpecialTaskType::CaptureStructure && currentTick >= task.timeoutTick)
+		if (task.type != SpecialTaskType::CaptureStructure && static_cast<int>(currentTick - task.timeoutTick) >= 0)
 		{
 			task.state = SpecialTaskState::Expired;
+				if (m_recordingSink) m_recordingSink(m_recordingContext, "special", "task_failed", task.taskId, task.targetObjectId, "expired", task.owner.c_str(), "timeout");
 			task.reason = "timeout";
 			task.lastUpdateTick = currentTick;
 		}
@@ -248,7 +262,7 @@ void AIControlAdapterTaskReservationManager::pruneExpiredTasks(DWORD currentTick
 	for (const auto& pair : stoppedFoundationTombstones)
 	{
 		const StoppedFoundationTombstone& tombstone = pair.second;
-		if (currentTick >= tombstone.expiresTick)
+		if (static_cast<int>(currentTick - tombstone.expiresTick) >= 0)
 		{
 			tombstonesToRemove.push_back(pair.first);
 		}
@@ -301,7 +315,7 @@ bool AIControlAdapterTaskReservationManager::isFoundationTombstoned(
 	}
 
 	const StoppedFoundationTombstone& tombstone = it->second;
-	if (currentTick >= tombstone.expiresTick)
+	if (static_cast<int>(currentTick - tombstone.expiresTick) >= 0)
 	{
 		return false;
 	}
@@ -330,7 +344,7 @@ bool AIControlAdapterTaskReservationManager::getFoundationTombstone(
 	}
 
 	const StoppedFoundationTombstone& found = it->second;
-	if (currentTick >= found.expiresTick)
+	if (static_cast<int>(currentTick - found.expiresTick) >= 0)
 	{
 		return false;
 	}
@@ -358,11 +372,11 @@ bool AIControlAdapterTaskReservationManager::shouldLogFoundationTombstoneSkip(
 	}
 
 	StoppedFoundationTombstone& tombstone = it->second;
-	if (currentTick >= tombstone.expiresTick)
+	if (static_cast<int>(currentTick - tombstone.expiresTick) >= 0)
 	{
 		return false;
 	}
-	if (tombstone.lastSkipLogTick != 0u && currentTick < tombstone.lastSkipLogTick + throttleMs)
+	if (tombstone.lastSkipLogTick != 0u && (currentTick - tombstone.lastSkipLogTick) < throttleMs)
 	{
 		return false;
 	}
@@ -384,7 +398,7 @@ int AIControlAdapterTaskReservationManager::getActiveFoundationTombstoneCount(
 	for (const auto& pair : stoppedFoundationTombstones)
 	{
 		const StoppedFoundationTombstone& tombstone = pair.second;
-		if (currentTick >= tombstone.expiresTick)
+		if (static_cast<int>(currentTick - tombstone.expiresTick) >= 0)
 		{
 			continue;
 		}

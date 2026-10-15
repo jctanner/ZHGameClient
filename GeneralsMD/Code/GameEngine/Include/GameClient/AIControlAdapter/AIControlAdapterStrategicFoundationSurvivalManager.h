@@ -26,6 +26,11 @@ struct AIControlAdapterStrategicFoundationFact
 	bool tombstoned = false;
 	bool activeWmdThreat = false;
 	std::string reason;
+	// Current engine observations override historical recovery state.
+	bool currentObserved = false;
+	bool currentExists = false;
+	bool currentOwned = false;
+	bool currentUnderConstruction = false;
 };
 
 struct AIControlAdapterStrategicFoundationClassification

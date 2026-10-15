@@ -164,6 +164,7 @@ public:
 	virtual void cancelAndRefundAllProduction() = 0;
 
 	virtual UnsignedInt getProductionCount() const = 0;
+	virtual UnsignedInt getMaxProductionCount() const = 0;
 
 	virtual const ProductionEntry *firstProduction() const = 0;
 	virtual const ProductionEntry *nextProduction( const ProductionEntry *p ) const = 0;
@@ -219,6 +220,7 @@ public:
 
 	virtual void cancelAndRefundAllProduction() override;									///< cancel and refund anything in the production queue
 
+	virtual UnsignedInt getMaxProductionCount() const override { return getProductionUpdateModuleData()->m_maxQueueEntries; }
 	virtual UnsignedInt getProductionCount() const override { return m_productionCount; }    ///< return # of things in the production queue
 
 	// walking the production list from outside

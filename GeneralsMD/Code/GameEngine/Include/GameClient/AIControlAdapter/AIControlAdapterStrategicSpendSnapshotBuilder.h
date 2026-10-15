@@ -78,6 +78,7 @@ struct AIControlAdapterStrategicSpendArmyFacts
 
 struct AIControlAdapterStrategicSpendSnapshotOverrides
 {
+	AIControlAdapterProfileSpendPlan profilePlan;
 	int activeLocalEnemies = 0;
 	bool emergencySurvivalActive = false;
 	bool expansionUrgent = false;

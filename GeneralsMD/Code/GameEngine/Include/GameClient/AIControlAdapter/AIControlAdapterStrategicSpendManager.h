@@ -14,6 +14,7 @@
 
 struct AIControlAdapterStrategicSpendSnapshot
 {
+	AIControlAdapterProfileSpendPlan profilePlan;
 	unsigned int money = 0u;
 	unsigned int reserveCash = 0u;
 	int currentZones = 0;

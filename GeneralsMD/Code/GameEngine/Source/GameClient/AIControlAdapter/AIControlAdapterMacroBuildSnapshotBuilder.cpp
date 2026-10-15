@@ -35,7 +35,7 @@ AIControlAdapterMacroBuildSnapshot AIControlAdapterMacroBuildSnapshotBuilder::Bu
 		&& activeZoneIsDeveloped;
 	const bool shouldPreserveReserve =
 		policy.isBalancedSprawl
-		&& (input.money < policy.reserveCash || input.inProgressBlackMarkets > 0)
+		&& input.money < policy.reserveCash
 		&& input.hasCompletedPalace
 		&& input.effectiveTotalBlackMarkets > 0;
 

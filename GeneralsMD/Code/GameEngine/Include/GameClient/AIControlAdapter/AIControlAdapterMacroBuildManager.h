@@ -50,9 +50,21 @@ struct AIControlAdapterRemoteSupplyStageDecision
 
 struct AIControlAdapterMacroBuildSnapshot
 {
+	AIControlAdapterProfileSpendPlan profilePlan;
 	bool isSprawlStyle = false;
 	bool isBalancedSprawl = false;
 	bool hasActiveZone = false;
+	bool survivalRecovery = false;
+	int recoveryZoneIndex = -1;
+	int desiredReadyArmsDealers = 0;
+	int desiredReadyBarracks = 0;
+	int readyArmsDealers = 0;
+	int readyBarracks = 0;
+	AIControlAdapterMacroBuildSpendGate armsCapacitySpend;
+	AIControlAdapterMacroBuildSpendGate barracksCapacitySpend;
+	int coreWorkerProducers = 0;
+	int workerProducersInProgress = 0;
+	AIControlAdapterMacroBuildSpendGate workerProducerSpend;
 
 	unsigned int money = 0u;
 	unsigned int reserveCash = 0u;

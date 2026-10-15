@@ -51,6 +51,7 @@ struct ProductionIntent
 	std::string commandName;        // Command name for logging (e.g., "Game.QueueQuadsAllWarFactories")
 	std::string reason;             // Why production chosen or skipped (e.g., "ok", "army_cap_reached", "no_money")
 	bool shouldProduce;             // True if production should be attempted
+	int effectiveArmyCap = 0;       // Computed by the manager, shared with telemetry
 
 	ProductionIntent()
 		: producerObjectId(-1)
@@ -93,13 +94,14 @@ struct ProductionProducerSnapshot
  */
 struct ProductionManagerInputs
 {
+	bool economicVictory = false;
 	// Financial state
 	unsigned int money;
 	int incomePerMinute;
 	unsigned int reserveCash;
 
 	// Unit counts
-	int armyCount;           // Total combat units (mobileUnits - workers)
+	int armyCount;           // Uncontained mobile combat units plus queued mobile replacements
 	int soldiers;
 	int rpg;
 	int quads;

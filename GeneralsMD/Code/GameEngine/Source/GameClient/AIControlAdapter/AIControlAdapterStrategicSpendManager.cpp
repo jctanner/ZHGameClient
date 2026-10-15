@@ -37,6 +37,53 @@ AIControlAdapterStrategicSpendDecision AIControlAdapterStrategicSpendManager::Ev
 	StrategicSpendCategory category,
 	unsigned int requestCost) const
 {
+	if (snapshot.profilePlan.active)
+	{
+		const auto& plan = snapshot.profilePlan;
+		AIControlAdapterStrategicSpendDecision decision;
+		decision.protectedCash = plan.growthProtectedCash;
+		decision.batchLimit = 1;
+		bool permitted = true;
+		switch (category)
+		{
+		case StrategicSpendCategory::EconomyRecovery:
+		case StrategicSpendCategory::EconomyGrowth:
+			decision.protectedCash = plan.incomeProtectedCash;
+			permitted = snapshot.healthyMarketsInProgress < plan.maxConcurrentMarkets
+				&& (!plan.threatResponse || !plan.deferIncomeUnderThreat || snapshot.completedMarkets == 0);
+			break;
+		case StrategicSpendCategory::LocalWorkerRecovery:
+			decision.protectedCash = plan.workerProtectedCash;
+			break;
+		case StrategicSpendCategory::ProducerRecovery:
+			decision.protectedCash = 1000u;
+			break;
+		case StrategicSpendCategory::EmergencyDefenseUnits:
+		case StrategicSpendCategory::CounterbatteryUnits:
+			decision.protectedCash = plan.combatProtectedCash;
+			permitted = snapshot.armySize < plan.armyTarget;
+			decision.batchLimit = plan.threatResponse ? 3 : 1;
+			break;
+		case StrategicSpendCategory::DefensiveWmd:
+			// Preserve money for local counters when the standing defense is thin.
+			permitted = snapshot.activeWmdThreats > 0 && (!plan.threatResponse || snapshot.armySize >= 12);
+			break;
+		case StrategicSpendCategory::StaticDefense:
+			permitted = !plan.threatResponse || snapshot.armySize >= 12;
+			break;
+		case StrategicSpendCategory::ProductionGrowth:
+		case StrategicSpendCategory::Expansion:
+		case StrategicSpendCategory::TechPrerequisite:
+		case StrategicSpendCategory::LuxuryBaseline:
+			permitted = !plan.threatResponse;
+			break;
+		}
+		decision.spendBudget = snapshot.money > decision.protectedCash ? snapshot.money - decision.protectedCash : 0u;
+		decision.allowed = permitted && requestCost <= decision.spendBudget;
+		decision.reason = !permitted ? "profile_response_priority"
+			: decision.allowed ? plan.reason : "profile_reserve_protected";
+		return decision;
+	}
 	return AIControlAdapterEvaluateStrategicSpend(category, BuildInput(snapshot, requestCost));
 }
 

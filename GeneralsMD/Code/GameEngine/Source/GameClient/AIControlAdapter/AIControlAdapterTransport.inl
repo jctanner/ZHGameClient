@@ -256,6 +256,11 @@
 
 			for (std::size_t i = 0; i < m_tcpClients.size();)
 			{
+				if (m_tcpClients[i].writeBuffer.size() + line.size() > 2u * 1024u * 1024u)
+				{
+					closeTcpClientAt(i, "tcp_write_backlog_limit");
+					continue;
+				}
 				m_tcpClients[i].writeBuffer.append(line);
 				if (!flushTcpClient(m_tcpClients[i]))
 				{

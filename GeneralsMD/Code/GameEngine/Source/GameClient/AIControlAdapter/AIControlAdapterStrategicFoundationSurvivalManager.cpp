@@ -29,6 +29,25 @@ AIControlAdapterStrategicFoundationClassification AIControlAdapterStrategicFound
 	result.reason = fact.reason.empty() ? "healthy_in_progress" : fact.reason.c_str();
 	result.tombstoned = fact.tombstoned;
 
+	if (fact.currentObserved)
+	{
+		if (fact.currentExists && (!fact.currentOwned || !fact.currentUnderConstruction))
+		{
+			result.state = fact.currentOwned ? "completed" : "ownership_changed";
+			result.reason = fact.currentOwned ? "structure_finished" : "no_longer_owned";
+			result.tombstoned = false;
+			return result;
+		}
+		if (!fact.currentExists)
+		{
+			result.state = "destroyed";
+			result.reason = "foundation_missing";
+			result.failed = true;
+			result.rebuildBlocked = containsScudStorm(fact.templateName);
+			return result;
+		}
+	}
+
 	if (fact.reason == "destroyed")
 	{
 		result.state = "destroyed";
@@ -67,7 +86,7 @@ AIControlAdapterStrategicFoundationClassification AIControlAdapterStrategicFound
 		result.failed = fact.recoveryAttempts >= 2;
 		return result;
 	}
-	if (fact.lastProgressTick != 0u && fact.nowTick >= fact.lastProgressTick + 60000u)
+	if (fact.lastProgressTick != 0u && (fact.nowTick - fact.lastProgressTick) >= 60000u)
 	{
 		if (containsScudStorm(fact.templateName) && fact.activeWmdThreat && isSubstantialFoundationProgress(fact))
 		{
@@ -108,7 +127,7 @@ AIControlAdapterScudStormRebuildBlockResult AIControlAdapterStrategicFoundationS
 			continue;
 		}
 		const unsigned int lastSeenTick = fact.lastSeenTick != 0u ? fact.lastSeenTick : fact.firstSeenTick;
-		if (lastSeenTick == 0u || input.nowTick > lastSeenTick + input.recentFailureMs)
+		if (lastSeenTick == 0u || (input.nowTick - lastSeenTick) > input.recentFailureMs)
 		{
 			continue;
 		}

@@ -21,7 +21,7 @@ namespace
 			result.reason = "worker_cap_reached";
 			return result;
 		}
-		if (inputs.cashFloat < 3000u)
+		if (inputs.cashFloat < 3000u && !inputs.allowReserveRecovery)
 		{
 			result.reason = "cash_reserved";
 			return result;
@@ -83,6 +83,41 @@ EconomyPolicy AIControlAdapterEconomyManager::AssessEconomyPolicy(const EconomyM
 		input.inProgressBlackMarkets,
 		policy.maxBlackMarkets);
 
+	// Cash-flow samples are net of spending. After the milestone, an ample
+	// spendable balance supports refill even when that sample becomes negative.
+	if (input.economicVictory)
+	{
+		policy.maxBlackMarkets = 120u;
+		policy.desiredBlackMarkets = 120u;
+		policy.baselineScalingMarkets = 120u;
+		if (input.currentMoney >= input.reserveCash + 15000u)
+		{
+			policy.scalingMode = EconomyScalingMode::Growth;
+			policy.economyPressure = std::max(policy.economyPressure, 50);
+			policy.maxInProgressMarkets = 4u;
+			policy.scalingReason = "economic_victory_growth";
+		}
+		else
+		{
+			// The milestone is not proof that the remaining income supports the
+			// new army. Rebuild capacity even during a positive net-cash sample.
+			policy.scalingMode = EconomyScalingMode::Recovery;
+			policy.maxInProgressMarkets = 1u;
+		}
+		if (input.currentMoney >= input.reserveCash + 3000u)
+			policy.combatSpendingMode = CombatSpendingMode::Normal;
+	}
+
+	if (input.profilePlan.active)
+	{
+		policy.maxInProgressMarkets = static_cast<unsigned int>(input.profilePlan.maxConcurrentMarkets);
+		policy.maxBlackMarkets = input.economicVictory ? 120u : 24u;
+		policy.desiredBlackMarkets = policy.maxBlackMarkets;
+		policy.scalingMode = EconomyScalingMode::Growth;
+		policy.combatSpendingMode = CombatSpendingMode::Normal;
+		policy.scalingReason = input.profilePlan.reason;
+	}
+
 	// Determine recovery priorities
 	const bool incomeNeedsRecovery = (policy.incomeState == EconomyIncomeState::Weak ||
 									  policy.incomeState == EconomyIncomeState::Critical ||
@@ -93,8 +128,9 @@ EconomyPolicy AIControlAdapterEconomyManager::AssessEconomyPolicy(const EconomyM
 
 	// In Recovery mode, prioritize and allow emergency builds
 	// In Growth mode, continue at normal priority
-	policy.prioritizeIncomeBuild = (policy.scalingMode == EconomyScalingMode::Recovery) && incomeNeedsRecovery && reserveAllowsEmergency;
-	policy.allowEmergencyIncomeBuild = (policy.scalingMode == EconomyScalingMode::Recovery) && incomeNeedsRecovery && reserveAllowsEmergency;
+	const bool phaseNeedsRecovery = input.economicVictory && policy.scalingMode == EconomyScalingMode::Recovery;
+	policy.prioritizeIncomeBuild = phaseNeedsRecovery || ((policy.scalingMode == EconomyScalingMode::Recovery) && incomeNeedsRecovery && reserveAllowsEmergency);
+	policy.allowEmergencyIncomeBuild = policy.prioritizeIncomeBuild;
 
 	// Generate reason
 	if (policy.incomeState == EconomyIncomeState::Healthy && policy.reserveState == EconomyReserveState::Protected)
@@ -174,6 +210,16 @@ EconomyPolicy AIControlAdapterEconomyManager::AssessEconomyPolicy(const EconomyM
 		}
 	}
 
+	if (input.economicVictory && input.currentMoney >= input.reserveCash + 15000u)
+	{
+		policy.reason = "economic_victory_growth";
+			policy.scalingReason = "economic_victory_growth";
+	}
+	else if (phaseNeedsRecovery)
+	{
+		policy.reason = "economic_victory_income_recovery";
+		policy.scalingReason = "economic_victory_income_recovery";
+	}
 	return policy;
 }
 
@@ -206,7 +252,7 @@ EconomyRecoveryRequest AIControlAdapterEconomyManager::ChooseRecoveryAction(
 	}
 
 	// Income sufficient check (Phase 5.6: only stop in Growth mode if we've reached baseline)
-	if (policy.incomeState == EconomyIncomeState::Healthy &&
+	if (!policy.prioritizeIncomeBuild && policy.incomeState == EconomyIncomeState::Healthy &&
 	    policy.scalingMode != EconomyScalingMode::Growth)
 	{
 		request.shouldBuildIncome = false;
@@ -236,11 +282,12 @@ EconomyRecoveryRequest AIControlAdapterEconomyManager::ChooseRecoveryAction(
 	}
 
 	// Money check (but allow emergency spending if policy allows)
-	const unsigned int blackMarketCost = 1500u; // GLA Black Market cost
-	if (input.currentMoney < blackMarketCost)
+	const unsigned int blackMarketCost = 2500u; // Actual template cost is checked on execution.
+	const unsigned int minimumRecoveryCash = blackMarketCost + (input.economicVictory ? 600u : 0u);
+	if (input.currentMoney < minimumRecoveryCash)
 	{
 		request.shouldBuildIncome = false;
-		request.reason = "no_money";
+		request.reason = input.currentMoney < blackMarketCost ? "no_money" : "recovery_worker_allowance";
 		return request;
 	}
 
@@ -322,7 +369,8 @@ LocalWorkerZoneDecision AIControlAdapterEconomyManager::ChooseLocalWorkerLiquidi
 		input.cashFloat,
 		input.localIdleWorkers,
 		decision.desiredLocalWorkers,
-		input.hasLocalProducer
+		input.hasLocalProducer,
+		input.allowReserveRecovery
 	});
 	return decision;
 }

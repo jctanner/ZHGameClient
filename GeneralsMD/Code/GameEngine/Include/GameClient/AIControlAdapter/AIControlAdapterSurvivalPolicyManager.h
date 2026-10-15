@@ -17,6 +17,7 @@ struct AIControlAdapterSurvivalPolicyInput
 	int readyArmsDealers = 0;
 	unsigned int money = 0u;
 	unsigned int reserveCash = 0u;
+	bool allowSuperweapons = true;
 };
 
 struct AIControlAdapterSurvivalPolicyResult

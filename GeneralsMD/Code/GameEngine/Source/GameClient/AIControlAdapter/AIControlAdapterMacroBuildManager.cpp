@@ -214,6 +214,23 @@ AIControlAdapterMacroBuildPolicyDecisions AIControlAdapterMacroBuildManager::Res
 		&& snapshot.money >= (snapshot.isBalancedSprawl ? (snapshot.reserveCash + snapshot.blackMarketCost) : snapshot.blackMarketCost)
 		&& (!snapshot.isBalancedSprawl || snapshot.inProgressBlackMarkets < 1)
 		&& snapshot.effectiveTotalBlackMarkets < decisions.sprawlDesiredMarketCount;
+	if (snapshot.survivalRecovery)
+	{
+		decisions.macroExpansion.zoneExpansionUrgent = false;
+		decisions.macroExpansion.allowUrgentExpansionDespiteReserve = false;
+		decisions.macroExpansion.preferRemoteSupplyExpansion = false;
+		decisions.macroExpansion.expansionMode = "hold";
+		decisions.macroExpansion.expansionReason = "survival_recovery";
+		decisions.expansionDecision.shouldAttemptExpansion = false;
+		decisions.expansionDecision.isUrgent = false;
+		decisions.expansionDecision.command = nullptr;
+		decisions.expansionDecision.reason = "survival_recovery";
+		decisions.macroExpansion.arbitration = decisions.expansionDecision;
+		decisions.zoneSeedDecision.command = nullptr;
+		decisions.zoneSeedDecision.reason = "survival_recovery";
+		decisions.remoteSupplyStage.allowRemote = false;
+		decisions.remoteSupplyStage.reason = "survival_recovery";
+	}
 	return decisions;
 }
 
@@ -301,6 +318,48 @@ AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 	plan.telemetry.zoneSeedReason = zoneSeedDecision.reason != nullptr ? zoneSeedDecision.reason : "no_remote_stash";
 	plan.telemetry.zoneSeedPriority = zoneSeedDecision.priority;
 	plan.telemetry.activeZoneThreatened = snapshot.activeZoneThreatened;
+	if (snapshot.recoveryZoneIndex >= 0 && snapshot.isBalancedSprawl)
+	{
+		if (snapshot.survivalRecovery)
+			AddIntent(plan, "worker_producer_recovery", "Game.BuildBarracksSmart", 134,
+				snapshot.coreWorkerProducers == 0, "safe_command_center_recovery", 0u,
+				snapshot.workerProducersInProgress, 1, snapshot.barracksBuildCooldownReady,
+				snapshot.workerProducerSpend, true, AIControlAdapterMacroBuildExecutor::SpecificZone,
+				snapshot.money, snapshot.recoveryZoneIndex, "auto_worker_producer_recovery");
+		AddIntent(plan, "producer_recovery", "Game.BuildArmsDealerSmart",
+			snapshot.readyArmsDealers == 0 ? 130 : snapshot.profilePlan.active && snapshot.completedBlackMarkets >= 3 ? 116 : 112,
+			snapshot.totalArmsDealers < snapshot.desiredReadyArmsDealers,
+			"safe_arms_capacity", 0u, snapshot.armsDealersInProgress, 1,
+			snapshot.armsDealerBuildCooldownReady, snapshot.armsCapacitySpend,
+			true, AIControlAdapterMacroBuildExecutor::SpecificZone, snapshot.money,
+			snapshot.recoveryZoneIndex, "auto_producer_recovery");
+		AddIntent(plan, "producer_recovery", "Game.BuildBarracksSmart",
+			snapshot.readyBarracks == 0 ? 131 : snapshot.profilePlan.active && snapshot.completedBlackMarkets >= 3 ? 116 : 111,
+			snapshot.totalBarracks < snapshot.desiredReadyBarracks,
+			"safe_barracks_capacity", 0u, snapshot.barracksInProgress, 1,
+			snapshot.barracksBuildCooldownReady, snapshot.barracksCapacitySpend,
+			true, AIControlAdapterMacroBuildExecutor::SpecificZone, snapshot.money,
+			snapshot.recoveryZoneIndex, "auto_producer_recovery");
+		if (snapshot.survivalRecovery && snapshot.hasCompletedPalace)
+			AddIntent(plan, "eco_recovery", "Game.BuildBlackMarketSmart", 105,
+				snapshot.effectiveTotalBlackMarkets < snapshot.sprawlMarketCap,
+				"safe_survival_income", snapshot.blackMarketCost, snapshot.inProgressBlackMarkets, 1,
+				snapshot.blackMarketBuildCooldownReady, snapshot.marketRecoverySpend,
+				true, AIControlAdapterMacroBuildExecutor::SpecificZone, snapshot.money,
+				snapshot.recoveryZoneIndex, "auto_survival_income");
+	}
+
+	if (snapshot.profilePlan.active && snapshot.hasCompletedPalace)
+	{
+		// Income growth competes in the existing macro intent plan. Missing
+		// essential producers retain higher priority; funded capacity grows next.
+		AddIntent(plan, "profile_income", "Game.BuildBlackMarketSmart", 115,
+			snapshot.effectiveTotalBlackMarkets < snapshot.sprawlMarketCap,
+			"profile_income_growth", snapshot.blackMarketCost,
+			snapshot.inProgressBlackMarkets, snapshot.profilePlan.maxConcurrentMarkets,
+			snapshot.blackMarketBuildCooldownReady, snapshot.marketGrowthSpend,
+			true, AIControlAdapterMacroBuildExecutor::MacroBuild, snapshot.money);
+	}
 
 	if (snapshot.isSprawlStyle && snapshot.stashZoneCount < snapshot.desiredZoneCount)
 	{
@@ -315,7 +374,7 @@ AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 			snapshot.supplyStashesInProgress,
 			effectiveExpansionCap,
 			snapshot.supplyBuildCooldownReady,
-			{ true, "allowed" },
+			snapshot.expansionSpend,
 			false,
 			AIControlAdapterMacroBuildExecutor::SupplyExpansion,
 			snapshot.money);
@@ -325,6 +384,8 @@ AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 	{
 		const char* seedCommand = zoneSeedDecision.command;
 		const unsigned int seedMinCash = GetZoneSeedMinCash(snapshot, seedCommand);
+		const bool defensiveSeed = std::strcmp(seedCommand, "Game.BuildStingerSite") == 0
+			|| std::strcmp(seedCommand, "Game.BuildTunnelNetwork") == 0;
 		AddIntent(
 			plan,
 			"zone_seed",
@@ -332,17 +393,17 @@ AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 			zoneSeedDecision.priority,
 			seedMinCash > 0u,
 			zoneSeedDecision.reason,
-			seedMinCash,
+			snapshot.reserveCash + seedMinCash,
 			GetZoneSeedInProgress(snapshot, seedCommand),
 			1,
 			snapshot.zoneSeedCooldownReady,
-			{ true, "allowed" },
+			defensiveSeed ? snapshot.staticDefenseSpend : snapshot.expansionSpend,
 			zoneSeedDecision.preferZone,
 			AIControlAdapterMacroBuildExecutor::MacroBuild,
 			snapshot.money);
 	}
 
-	if (decisions.shouldForceEcoRecovery && ecoRecoveryBuild != nullptr)
+	if (!snapshot.survivalRecovery && decisions.shouldForceEcoRecovery && ecoRecoveryBuild != nullptr)
 	{
 		if (std::strcmp(ecoRecoveryBuild, "Game.BuildBlackMarketSmart") == 0)
 		{
@@ -481,7 +542,7 @@ AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 			"auto_palace_redundancy");
 	}
 
-	if (!snapshot.shouldPreserveReserve && snapshot.canScaleMilitaryProduction && snapshot.isSprawlStyle)
+	if (!snapshot.survivalRecovery && !snapshot.shouldPreserveReserve && snapshot.canScaleMilitaryProduction && snapshot.isSprawlStyle)
 	{
 		AddIntent(
 			plan,
@@ -553,7 +614,7 @@ AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 			snapshot.money);
 	}
 
-	if (!snapshot.shouldPreserveReserve && snapshot.isSprawlStyle)
+	if (!snapshot.survivalRecovery && !snapshot.shouldPreserveReserve && snapshot.isSprawlStyle)
 	{
 		AddIntent(
 			plan,
@@ -589,6 +650,7 @@ AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 
 	if ((!snapshot.shouldPreserveReserve || decisions.macroExpansion.allowUrgentExpansionDespiteReserve)
 		&& snapshot.isSprawlStyle
+		&& !snapshot.survivalRecovery
 		&& !snapshot.shouldThrottleExtraStashGrowth)
 	{
 		AddIntent(

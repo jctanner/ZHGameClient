@@ -34,7 +34,8 @@ int AIControlAdapterProductionManager::CalculateEffectiveArmyCap(const Productio
 		inputs.barracks,
 		inputs.armsDealers,
 		inputs.blackMarkets,
-		baseMaxCap
+		baseMaxCap,
+		inputs.economicVictory
 	});
 }
 
@@ -186,6 +187,7 @@ ProductionIntent AIControlAdapterProductionManager::ChooseProduction(
 
 	// Step 1: Calculate effective army cap
 	const int armyCap = CalculateEffectiveArmyCap(inputs);
+	intent.effectiveArmyCap = armyCap;
 
 	// Step 2: Check if production should be paused
 	const bool shouldPause = ShouldPauseCombatProduction(inputs);

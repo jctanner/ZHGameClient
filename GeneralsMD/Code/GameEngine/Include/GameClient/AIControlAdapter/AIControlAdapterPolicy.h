@@ -100,6 +100,7 @@ struct AIControlAdapterProfilePolicyConfig
 	bool isDefensive = false;
 	bool isTech = false;
 	bool isBalancedSprawl = false;
+	bool isEconomyFirstSprawl = false;
 	bool isSprawlStyle = false;
 	unsigned int reserveCash = 0u;
 
@@ -125,6 +126,30 @@ struct AIControlAdapterProfilePolicyConfig
 	bool allowExpansionBeforeFullRemoteFollowup = false;
 	unsigned int expansionHighCashFloatThreshold = 10000u;
 	unsigned int scudStormHighCashFloatThreshold = 25000u;
+	int quietArmyTarget = 24;
+	int responseArmyFloor = 60;
+	int workerLimit = 80;
+	int offensiveMarketThreshold = 12;
+	unsigned int offensiveCashFloat = 5000u;
+	unsigned int threatHoldMs = 30000u;
+};
+
+// One profile plan feeds construction, workforce and unit production. Cash
+// floors reserve future response/income funding; callers subtract pending orders.
+struct AIControlAdapterProfileSpendPlan
+{
+	bool active = false;
+	bool threatResponse = false;
+	bool deferIncomeUnderThreat = true;
+	bool sustainedOffense = false;
+	int armyTarget = 0;
+	int workerLimit = 80;
+	int maxConcurrentMarkets = 1;
+	unsigned int growthProtectedCash = 0u;
+	unsigned int incomeProtectedCash = 0u;
+	unsigned int workerProtectedCash = 0u;
+	unsigned int combatProtectedCash = 0u;
+	const char* reason = "profile_default";
 };
 
 AIControlAdapterProfilePolicyConfig AIControlAdapterResolveProfilePolicyConfig(
@@ -202,6 +227,7 @@ struct AIControlAdapterEffectiveArmyCapPolicyInputs
 	int armsDealers;             // Count of Arms Dealers
 	int blackMarkets;            // Count of completed Black Markets
 	int baseArmyCap;             // Baseline desired combat unit cap
+	bool economicVictory = false; // Latched match milestone; unaffected by spending
 };
 
 /**
@@ -1055,7 +1081,9 @@ enum class StrategicSpendCategory
 	DefensiveWmd,
 	EmergencyDefenseUnits,
 	CounterbatteryUnits,
-	LuxuryBaseline
+	LuxuryBaseline,
+	ProducerRecovery,
+	ProductionGrowth
 };
 
 const char* AIControlAdapterStrategicSpendCategoryName(StrategicSpendCategory category);
@@ -1506,6 +1534,7 @@ struct AIControlAdapterLocalWorkerLiquidityInputs
 	int localIdleWorkers;
 	int desiredLocalWorkers;
 	bool hasLocalProducer;
+	bool allowReserveRecovery = false;
 };
 
 struct AIControlAdapterLocalWorkerLiquidityResult

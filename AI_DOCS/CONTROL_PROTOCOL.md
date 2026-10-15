@@ -131,6 +131,7 @@ Supported `cmd` values (v1):
 45. `Game.Camera.LookAt`
 46. `Game.Camera.SetZoomLimited`
 47. `Game.Camera.Get`
+48. `Game.Display.Get`
 48. `Autonomy.SetMode`
 49. `Autonomy.Configure`
 50. `Autonomy.Status`
@@ -309,11 +310,20 @@ Supported `cmd` values (v1):
 2. `producer_object_id` (optional int; if omitted, adapter finds matching producer)
 3. `producer_kind` (`command_center|any`, optional; default `command_center`)
 4. `unit_template` (required string)
+5. `count` (optional int, default `1`, clamped `1..9`)
+
+Queue requests share the same executor as autonomous production. Pending unit
+commands reserve their cost and producer queue slots until the production ID is
+observed in the engine queue, the producer is lost, or five seconds of simulated
+gameplay elapse. A successful acknowledgement means at least one command was
+submitted; engine execution can still reject a command. Construction and upgrade
+spending are outside this pending unit budget.
 
 `Game.BuildWorker` args:
 
 1. Same args as `Game.QueueUnit`
-2. If `unit_template` is omitted, adapter infers faction worker/dozer template.
+2. If `unit_template` is omitted, adapter discovers the worker/dozer offered by each producer.
+3. `count` is applied once per selected producer; supply producer fan-out queues up to that count at each eligible supply building.
 
 `Game.QueueUpgrade` args:
 
@@ -446,13 +456,18 @@ Supported `cmd` values (v1):
 1. Returns `QueryResult` with current camera `x,y,z,angle,pitch,zoom,height_above_ground,zoom_limited`.
 2. Also includes defaults/limits when available: `default_height`, `min_height`, `max_height`.
 
+`Game.Display.Get`:
+
+1. Returns the live renderer `width`, `height`, and `windowed` state.
+2. Also returns `configured_width`, `configured_height`, and `configured_windowed` from global game settings when available.
+
 `Autonomy.SetMode` args:
 
 1. `mode` (required string: `manual|hybrid|autonomous`)
 
 `Autonomy.Configure` args:
 
-1. `profile` (optional string: `sprawl_balanced|standard|aggressive|economic|defensive|tech|sprawl|builtin_passthrough`)
+1. `profile` (optional string: `sprawl_economic|sprawl_balanced|standard|aggressive|economic|defensive|tech|sprawl|builtin_passthrough`)
 2. `player_index` (optional int; defaults to local player)
 3. `target_player_index` (optional int)
 4. `economy_bias` (optional number `0..1`)
@@ -460,19 +475,195 @@ Supported `cmd` values (v1):
 6. `defense_bias` (optional number `0..1`)
 7. `expansion_bias` (optional number `0..1`)
 8. `capture_tech` (optional bool)
-9. `allow_superweapons` (optional bool)
+9. `allow_superweapons` (optional bool, default false): permits autonomous new SCUD Storm construction and automatic firing, including the defensive baseline. Existing structures/foundations and manual commands remain available. Mobile SCUD Launchers are conventional units and are unaffected.
 10. `sprawl_multiplier` (optional number, default `1.0`, adapter-clamped; scales `sprawl` profile expansion caps)
+11. `rule_overrides` (optional object): rule IDs mapped to `true` (enable),
+    `false` (disable), or `null` (inherit). Omitted IDs retain their overrides.
+12. `rule_scope` (optional object): `session_id`, `match_generation`, `player_index`
+    from live Status; a mismatch rejects Configure with `rule_scope_changed`.
+
+### Live rule controls
+
+Read Status/Telemetry `result.rule_controls`: `version`, `session_id`, `revision`,
+`changed_tick` and a `rules` array. Rows contain `id`, `label`, `description`,
+`kind`, `profile_default`, `override`, `effective`, `gate_reason`,
+`last_block_reason` and `last_block_tick`. Effective means selected, not proof
+of issued work. Last-block fields describe historical rejections.
+
+| ID | Scope |
+| --- | --- |
+| `market_growth` | New Black Markets, including income recovery |
+| `zone_expansion` | New supply zones and deliberate non-supply footholds |
+| `capacity_growth` | Additional producers; first-producer recovery remains available |
+| `combat_production` | Conventional combat recruitment, including garrison infantry; siege/capture/scout purchases are separate |
+| `siege_production` | Mobile SCUD Launcher purchases |
+| `worker_recruitment` | All automatic worker purchases |
+| `worker_redistribution` | New idle-worker transfers; transfer cleanup/emergency evacuation continue |
+| `static_defense` | New defensive tunnels/Stingers; footholds use expansion control |
+| `raids` | New limited raids before the economic milestone |
+| `sustained_assaults` | New persistent offensive groups after the milestone |
+| `scouting` | New scout missions and scout/radar recruitment |
+| `capture` | New capture missions, capture-source recruitment and capture upgrades |
+| `garrisons` | New garrison assignments/reinforcements |
+| `counterbattery` | New mobile artillery-response tasks |
+| `storm_construction` / `storm_firing` | Independent automatic Storm build/fire controls |
+| `tech_upgrades` | Palaces, science and automatic upgrades |
+| `idle_guard` | Automatic guard orders to idle ground combat |
+| `defer_income_under_threat` | Economic-profile income restriction during response |
+| `defer_offense_under_threat` | Quiet-pressure requirement for economic qualification and new sustained assaults |
+
+Example via `POST /api/adapter/command`:
+
+```json
+{"cmd":"Autonomy.Configure","args":{"rule_overrides":{"market_growth":true,"defer_income_under_threat":false,"zone_expansion":false,"scouting":true,"capture":false}}}
+```
+
+Read back with `{"cmd":"Autonomy.Status","args":{}}` on that same endpoint.
+The existing backend forwards these fields; the new contract requires the new
+game binary. Zones UI discovers the catalog and supplies the optional scope guard.
+
+Overrides survive pause/resume, reconnection and profile changes within the same
+match/controller. Reset, new match or changed configured player scope clears them.
+Unknown IDs and invalid values reject before Configure mutation; legacy field
+types are prevalidated too. Identical overrides are no-ops. Changes emit compact
+`kind=rule` events with ID, simulation tick, request ID and old/new values.
+
+Disable stops new automatic work; existing queues and construction/combat/capture/
+garrison tasks retain their lifecycles. Manual commands stay explicit actions.
+Funds, prerequisites, targets, legal placement and the global command gate remain
+enforced. Both Storm controls additionally require `allow_superweapons=true`.
+Scout Technicals also transport workers/garrisons; scouting-off does not forbid
+transport purchases. Income deferral applies to the economic profile; disabling
+it retains the income reserve and market concurrency. Offense deferral does not
+remove the cash/asset/milestone requirements.
+
+Expansion-off constrains growth/fallback placement to existing observed zone
+circles. Markets can try other existing safe zones; `no_existing_zone_space`
+reports no permitted placement. Captures, manual builds and previously issued
+construction can still introduce observed zones. Legacy `Automation.*` commands
+remain individual standalone rules; use rule overrides for durable control of
+all autonomous paths. `attack_enabled`, `capture_tech`, `garrisons_enabled` supply
+inherited defaults, with explicit rule overrides taking precedence. Numeric
+targets/reserves/cooldowns retain their existing configuration in this change.
 
 `sprawl_balanced` notes:
 
 1. Intended for normal `$50K` starts rather than debug-max cash.
 2. Applies lower structure caps than `sprawl`, favors earlier market growth, and preserves a larger cash reserve before extra perimeter production.
-3. Sustains combat production up to a soft army cap of about `100` combat units and then replaces losses instead of expanding indefinitely.
-4. Prefers production from the currently selected active zone/perimeter producer when available, then falls back to global producer queueing.
+3. Sustains combat production up to a soft army cap of about `100` mobile combat units and then replaces losses. Contained garrison/transport troops and immobile defenders do not consume this mobile cap; queued combat infantry and Quad/Scorpion/Buggy/SCUD Launcher replacements do. Defense and bounded scout replenishment retain their own policy gates.
+4. Uses one shared shallow allocator across eligible owned producers, before and after the $100K milestone. Actual and pending queue entries count toward a depth of two; pre-milestone passes issue at most 16 orders, and approved low-cash emergency passes at most three. Emergency counter floors, capture/scout utility, prerequisites, reserve and army-cap gates remain active.
+
+`sprawl_economic` reuses adaptive sprawl managers with a shared profile spending
+plan. Other presets keep their existing behavior.
+
+- Quiet target:24 mobile combat units including counted queues, with initial
+  composition floors of six Quads, four Scorpions and four infantry, plus legal
+  mobile SCUD Launcher coverage. Targets do not prove unit completion.
+- Fresh visible mobile enemy memory within max(900,2.5*zone radius) of an owned
+  zone, or recent zone damage/artillery pressure, starts response. Damage is not
+  required. Response persists30 simulation seconds after the last detection and
+  targets60–150 units according to nearby threats. Optional expansion, tech and
+  capacity growth yield to counter/siege production. Quiet periods suppress raids.
+- Quiet construction protects$6K; optional workers/army protect$8.5K including a
+  market allowance. Response army protects$1K. Missing producers/builders and
+  the first income replacement retain bounded recovery. Recruitment shares an
+  80-worker ceiling including queued/pending matching workers; stashes initially
+  recruit two. All automated worker/combat queues stay shallow (depth two).
+- Income has priority over additional sprawl. Allow two concurrent markets when
+  at least three are completed and available cash >=$11K. Funded spare factories
+  grow toward min(8,2+markets/3) without requiring saturated quiet queues.
+- Twelve completed markets plus >=$11K available cash for30 quiet simulation
+  seconds activates existing sustained assault/1000-unit production before$100K.
+  This asset/funding heuristic is not measured gross income. The$100K trigger
+  remains. `economic_victory.activation_reason` distinguishes `income_capacity`
+  from `cash_milestone`; selecting a different profile clears an income-only latch.
+  Once twelve markets are complete, quiet purchases preserve that$11K entry
+  balance so growth cannot continually reset the qualification timer. After entry,
+  normal growth floors resume. During response, the combat target remains1000 if
+  this offensive milestone was already achieved;60–150 applies before it.
+- Pending unit orders and unstarted reserved sites reduce available funds. Site
+  claims release when a native foundation binds or task lifecycle ends. Actual
+  template costs and legal command paths remain enforced. Operator commands
+  outside automation keep normal semantics. Switching profiles does not cancel
+  existing queues, foundations or already committed attacks.
+- Storm permission remains mandatory. This profile uses its shared spend gate
+  instead of the legacy urgent-expansion cash gate, retaining one in-progress
+  Storm and existing prerequisite/placement/survival checks.
+
+`profile_policy.spending_plan` reports active/reason, response/hold deadline,
+offensive phase, army target, worker limit, cash floors and market concurrency.
+`is_balanced_sprawl` denotes the shared adaptive family for both presets;
+`economy_first_sprawl` identifies this specialization.
+
+Idle worker redistribution runs before local worker production, including at the
+80-worker liquidity cap or during low cash. It retains three available workers
+at the main base and one or two at developed/active donor zones, moves at most
+one worker per pass, and tracks incoming workers until arrival or a bounded
+timeout. Active construction/task/transport reservations are respected.
+
+Staged autonomous raids select a nearby group within 1000 map units of a seed,
+exclude allied objectives, and stage from the selected group's center. Their
+base origin remains the retreat destination. Existing raids in their attack or
+retreat phase allow new ready reinforcement waves; assembling waves still
+suppress duplicate launches to the same objective. The whole-raid two-minute deadline
+is removed. A 45-second inactivity watchdog tracks forward movement of a
+commit-sized cohort, recent shots fired and damage received; command refreshes
+do not count as progress. Two local route retries precede a stalled-raid retreat,
+and retries remain counted across waypoint advances. Viable engaged groups keep
+fighting. Quiet final attacks pursue nearby visible enemies (1800 map units),
+or complete at an objective after 30 seconds without activity when the arrival
+quorum is present and no visible objective remains. Completion releases units
+at the front. Retreat still applies below minimum viable strength, or after 35%
+casualties before the final attack when the group is no longer engaged.
+Retreat uses move orders and retains task ownership until 70% return or a
+60-second retreat timeout. Successful partial commits retain the existing policy.
+
+Vehicle/mixed raids reserve `ceil(group_size / 10)` mobile SCUD Launcher seats,
+capped at four and leaving at least one escort. Among equally full local groups,
+selection prefers the group with more launchers up to that budget before using
+distance to the target as a tie-break. Launchers are selected before filling the
+remaining seats with escorts; they remain assigned to the same raid through
+waypoint commands, recovery and retreat. Existing task reservations and the
+1000-unit launch radius apply. Infantry-only and one-unit waves have no launcher
+seats. Waves can launch without siege when no free launchers are in a viable local
+group. This is wave composition; it does not increase the production army cap.
+
+Scout/shuttle Technical replenishment chooses a compatible producer with the
+shortest queue and at most one existing queued item, including pending adapter
+orders. Template inference follows that producer's command set.
 
 `Autonomy.Status`:
 
 1. Returns compact `QueryResult` with current autonomy mode, profile, bias values, active automation rules, local player summary, and asset counts.
+
+`Autonomy.Telemetry` also exposes `worker_liquidity` (available idle workers,
+transfers in progress, last target/reason), `production` (mobile/contained combat
+counts, queued mobile replacements, effective cap, selected intent and scout
+producer queue depth), and `combat_tasks.details[].retreating`. Raid task details
+include `raid_progress_age_ms`, nullable `raid_combat_age_ms`,
+`raid_quorum_distance`, `raid_recovery_attempts`, and `raid_engaged_unit_count`.
+Sequenced events include `raid_recovery`, `raid_retarget`, and `raid_complete`.
+
+Raid details also include `raid_desired_scud_launchers`,
+`raid_initial_scud_launchers`, `raid_live_scud_launchers`, and
+`raid_scud_launcher_unit_ids` (initial assigned IDs, retained after losses).
+The live count is recomputed from surviving assigned units when queried, including
+retreating tasks. A `raid_composition` event records the selection reason once per
+created wave; `raid_siege_assigned` records each initial launcher object ID (at most
+four per wave). Neither assignment nor a live count proves arrival or shots fired.
+
+Match outcome/final snapshot/run summary queries share the configured autonomy
+player's perspective (default local player), independent of the selected player
+in an object/resource query. `match_outcome.local_player_index` identifies this
+perspective. Victory/defeat is evaluated for that player. Changing a query view
+does not create a new match or reset elapsed time; actual game resets do.
+
+Gameplay ticks and task deadlines use simulated milliseconds derived from the
+engine frame number (`clock: "simulation"` in autonomy status/events). They stop
+while the game simulation is paused and advance with game speed. Transport,
+session logging and object-query cache ages retain wall time. `Autonomy.Pause`
+pauses controller decisions; it does not pause the game or task deadlines.
+New-match adapter resets clear tasks, reservations and controller cooldowns.
 
 `Autonomy.Pause` / `Autonomy.Resume`:
 
@@ -752,3 +943,172 @@ Example:
 ```text
 [14:32:11.901] ack s42 ok=true cmd=Chat.Send
 ```
+
+## Recorded match observation (v1)
+
+Capability: `recording_snapshot_v1`. Read-only commands:
+
+```json
+{"id":"record-1","cmd":"Autonomy.RecordingSnapshot","args":{"after_sequence":0,"max_events":512,"match_generation":0}}
+{"id":"record-2","cmd":"Autonomy.RecordingEvents","args":{"after_sequence":512,"max_events":512,"match_generation":1}}
+```
+
+Both return version, simulation clock, match generation, bounded `events` and
+`recording_health`. A supplied generation that differs from the game journal
+resets the requested cursor to zero. Limits clamp to 1–512; invalid/negative
+arguments are rejected. These reads do not generate command receipt events.
+Persist received events before advancing a consumer cursor. Sequence gaps indicate
+retention loss; duplicate delivery after a recorder restart is possible.
+
+`RecordingSnapshot` additionally returns telemetry, controlled-player outcome,
+status, retained final snapshot/run summary, map, frame, match activity and
+collection start/end simulation ticks. Its world observation is cached for one
+wall second. `telemetry.worker_observation` gives actual observed idle/contained
+workers and observation tick; it is separate from old diagnostic placeholder
+fields. Views are collected on the simulation thread and are not an atomic engine
+transaction. Snapshot collection/JSON cost remains gameplay-thread work.
+
+Events carry sequence, generation, tick/frame, kind/label, owner, task/object/
+production/request IDs, bounded reason/state fields and optional position. Queue/template names use the reason field.
+Command acceptance and production queue issuance do not mean physical completion.
+The bounded game journal separates ordinary events from priority terminal/task
+outcomes; either ring can overwrite. It retains the existing twelve-event UI/policy
+window separately. Journal reset follows actual adapter match reset, not autonomy
+configuration reset.
+
+Health exposes record size/capacity, retained/high-water/overwritten records,
+next sequence, field truncations, sampled producer timing, collection time,
+adapter update timing totals/max/100-us histogram and diagnostic writer counters.
+The adapter update histogram is not whole-engine frame time. Exact deaths/damage
+and comprehensive unit spawn attribution are not supplied by these hooks.
+
+Diagnostic text now uses a bounded producer queue and background writer. Configure
+acknowledges queueing; disk open/write failure appears in writer counters. Existing
+throttles remain, flushes are batched and shutdown joins the writer. Abrupt process
+termination can lose buffered text. The TCP output backlog is bounded; this does
+not change the separate Windows named-pipe implementation's blocking behavior.
+
+The external backend handles segment persistence, compression and report creation.
+See the workspace [post match guide](../../../docs/guides/post-match-adapter-analysis.md)
+for consumer commands and evidence limitations.
+
+### Balanced-sprawl economic victory
+
+After the controlled player's balance first reaches $100,000, `Autonomy.Telemetry`
+(and status) expose `economic_victory` with achieved/tick/threshold, army target
+1,000, market target 120, assault readiness and reason. This is a strategy milestone,
+not a game outcome. It remains achieved as cash is spent; new match, controlled
+player and explicit autonomy reset clear it.
+
+With attack automation enabled and fresh zone pressure cleared, quiet defense
+allocations join available ground forces in persistent `autonomous_assault`
+tasks. Existing autonomous raids keep their IDs on conversion. Up to96 local
+units join each new group every 2 simulation seconds, with ten local launcher seats
+selected before escorts. Visible legal targets receive object attack messages;
+fogged objectives receive attack-move orders to stored positions. Surviving
+assaults remain at the front and wait for fresh intelligence if needed. Pause,
+simulation command gating and attack disable suppress new assault orders.
+
+Production refills eligible queues toward depth 2 every production tick in this phase,
+up to 64 new orders per pass, honoring actual unit prices, pending orders, army
+slots and the configured reserve. `production` adds `refill_issued`,
+`refill_desired_scuds`, `refill_protected_cash`, `refill_order_limit`,
+`refill_emergency_pulse` and `refill_utility_template`. Normal refill protects
+reserve plus$3000 for a market/workers, or plus$5000 with ample cash. Approved
+low-cash emergency pulses issue at most three orders and retain$3000, or$600
+when cash is below$4000; rejected
+emergency spending cannot fall through to broad factory queueing. Legal scout
+utility production uses one selected producer under the same budget/queue gates.
+SCUD prerequisites and per-producer capabilities still apply. Markets grow toward
+120 with four healthy construction slots when funded; below reserve+$15000,
+one viable recovery market may use reserve cash. Positive net cash samples do
+not suppress that recovery. Safe local worker replacement can use bounded reserve
+money while retaining market funding. Zone seeds obey spending/reserve gates.
+
+Assault details export `target_object_id`, `assault_target_template`,
+`assault_target_age_ms`, `assault_damage_age_ms`. Templates and health progress
+are read only for currently visible objectives. Movement progress uses median
+member distance, and incidental firing does not extend objective progress.
+After45s without target damage/group progress, or90s ineffective mobile pursuit,
+`assault_objective_deferred` records the old objective/reason; that objective is
+avoided for120s across cohorts. Useful visible structures have stronger target
+preference, visible targets require a representative group member to legally
+attack them, and additional cohorts avoid a mobile target with24 other committed
+units. Fog objectives retain stored positions and bounded movement recovery.
+These controls do not establish that1000
+units run efficiently; next-match performance measurement remains required.
+
+## Zone front direction diagnostics
+
+Zone fronts use recent attack targets, the configured enemy target or nearest
+actual enemy base, then an outward-from-main expansion fallback. The main base
+retains the shared sprawl fallback when no valid enemy/attack direction exists.
+Enemy membership uses engine diplomacy; lobby metadata uses PlayerList slot
+mapping, not engine player IDs. Noncombat/dead/observer players are excluded.
+
+`front_direction_source` on telemetry zones and `Autonomy.ZonesSnapshot` preserves
+`attack_target`, `enemy_base`, `outward_from_main` or `sprawl_axis` before terrain
+adjustment. Existing `front_source` describes the final geometry source. Nearby
+entrances must lie within60 degrees of the resolved front and2.5 zone radii;
+terrain radius limits still apply. Front/rear geometry and active flags refresh
+at existing macro cadence without requiring a new building; unchanged spatial
+fields add no JSON writes or text logs. A direction is a planning point, not
+proof that defenses or units have arrived.
+
+## Balanced-sprawl survival recovery, 2026-10-10
+
+Severe collapse or loss of the established production spine activates a
+30-second recovery hold, refreshed while the trigger persists. The early opening
+is exempt from the broken-spine trigger. Pressure and reserve deficits count
+current zones; deficits count missing resident units rather than zone entries.
+Recovery overrides expansion, supply seeds, perimeter static growth and Palace
+redundancy. It retains the main base, the best viable production/income zone,
+and at most one additional quiet income cluster. Exposed non-core defense tasks
+release their units; available mobile defenders and idle guard units can rally to
+core fronts. Existing scout/capture/garrison reservations retain ownership.
+
+Factories can grow while a market is under construction when protected cash is
+available. Established economies target two ready Arms Dealers/two barracks,
+raise the factory target to four in recovery, and may target up to eight when
+cash exceeds reserve+$8000 and queues are saturated, within profile caps.
+Replacement of the first two dealers or missing barracks can use reserve cash,
+retaining$600 for builders with existing market income, otherwise$3100 for a
+market and builders. Funded growth retains the ordinary reserve. New capacity
+uses the selected core's rear and strict placement; one pending building of each
+type prevents duplicate requests. If that core has no worker producer, recovery
+can rebuild the faction Command Center through the existing smart builder.
+
+Recovery redirects at most one traveling builder per worker pass from a freshly
+attacked outer supply/defense site with no bound foundation. Active foundations
+retain their builder. Idle redistribution favors core zones; one-worker refill
+uses legal core producers with shallow queues, targeting at least eight workers
+and four available core builders. Legacy bulk worker rules defer to this recovery
+allocator. Command Center/worker recovery still requires a surviving builder or
+legal worker producer; it cannot recover an already eliminated player.
+
+`survival_policy` adds `recovery_active`, `recovery_zone`, `core_zones`,
+`desired_arms_dealers`, `desired_barracks`, `queues_saturated`,
+`arms_spend_allowed` and `arms_spend_reason`. `macro_build` exposes
+`producer_recovery`, `worker_producer_recovery`, and `safe_survival_income`
+intent reasons and the inferred worker-producer template when dispatched.
+`zone_defense_reserves` uses posture `consolidated` and floor zero for deferred
+outer zones. `worker_liquidity` adds `recovery_worker_target`,
+`recovery_safe_builders`, `recovery_queued_workers` and `recovery_issued`.
+Worker redirection records the bounded event `worker_survival_return`.
+
+`production` adds `refill_phase`, `refill_queue_limit` and `refill_siege_issued`.
+Legal mobile SCUD coverage starts before the milestone: a two-launcher floor,
+roughly one per ten heavy vehicles, capped at six before the milestone. After
+it, the existing four-launcher floor and proportional scaling apply. Counter
+production precedes siege for a missing escort floor; once escorts exist, siege
+gets replenishment slots. Low-cash emergency pulses buy counters. The deprecated
+`scud_reserve` now reports actual queued launchers and the shared mix target;
+its reason is `launcher_mix_deficit` or `launcher_mix_satisfied`. This is mobile
+army composition; `allow_superweapons` continues to govern SCUD Storms.
+
+Counterbattery live scans require a vehicle and reject `KINDOF_PROJECTILE`.
+Enemy memory excludes projectile/effect objects; template classification rejects
+missiles, and live task revalidation repeats the kind/ownership checks. Real
+Tomahawk, Inferno, Nuke Cannon and other supported siege vehicles remain eligible.
+Counterbattery orders honor depth two and builder funding during recovery.
+Autonomous garrison replenishment also respects depth two in balanced sprawl.
