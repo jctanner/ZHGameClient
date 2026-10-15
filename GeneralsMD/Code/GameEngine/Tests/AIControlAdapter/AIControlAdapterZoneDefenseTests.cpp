@@ -1237,6 +1237,32 @@ namespace Phase78
 		std::cout << "PASS: testReinforcementAddsOnlyDelta\n";
 	}
 
+	void testCriticalHalfStrengthAllocationReinforces()
+	{
+		const AIControlAdapterZoneDefenseAllocationResult result = AIControlAdapterEvaluateZoneDefenseAllocation({
+			true,
+			4,
+			4,
+			80000u,
+			100000u,
+			140000u,
+			9,
+			18,
+			100.0f,
+			100.0f,
+			100.0f,
+			100.0f,
+			300.0f
+		});
+
+		expect(result.shouldIssueCommand, "Critical allocation at half strength should reinforce during min hold");
+		expect(result.shouldReinforce, "Critical half-strength allocation should be marked as reinforcement");
+		expectEq(result.requestedNewAssignments, 9, "Critical reinforcement should request the missing delta");
+		expectEq(std::string(result.reason), std::string("defenders_missing"), "Expected defenders_missing reason");
+
+		std::cout << "PASS: testCriticalHalfStrengthAllocationReinforces\n";
+	}
+
 	void testMissingDefendersTriggerReinforcement()
 	{
 		const AIControlAdapterZoneDefenseAllocationResult result = AIControlAdapterEvaluateZoneDefenseAllocation({
@@ -1311,6 +1337,7 @@ namespace Phase78
 		testLocalReservesPreserved();
 		testReinforcementAddsOnlyDelta();
 		testMissingDefendersTriggerReinforcement();
+		testCriticalHalfStrengthAllocationReinforces();
 		testThreatSeverityAndFreshnessHelpers();
 		testTransientStrikeReleaseReason();
 

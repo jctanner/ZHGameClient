@@ -40,6 +40,8 @@ AIControlAdapterStrategicSpendDecision AIControlAdapterStrategicSpendManager::Ev
 	if (snapshot.profilePlan.active)
 	{
 		const auto& plan = snapshot.profilePlan;
+		// A large surplus keeps growth funded unless the main base itself is critical.
+		const bool surplusGrowth = plan.surplusUnderThreat && !snapshot.mainBaseCritical;
 		AIControlAdapterStrategicSpendDecision decision;
 		decision.protectedCash = plan.growthProtectedCash;
 		decision.batchLimit = 1;
@@ -50,7 +52,7 @@ AIControlAdapterStrategicSpendDecision AIControlAdapterStrategicSpendManager::Ev
 		case StrategicSpendCategory::EconomyGrowth:
 			decision.protectedCash = plan.incomeProtectedCash;
 			permitted = snapshot.healthyMarketsInProgress < plan.maxConcurrentMarkets
-				&& (!plan.threatResponse || !plan.deferIncomeUnderThreat || snapshot.completedMarkets == 0);
+				&& (!plan.threatResponse || !plan.deferIncomeUnderThreat || surplusGrowth || snapshot.completedMarkets == 0);
 			break;
 		case StrategicSpendCategory::LocalWorkerRecovery:
 			decision.protectedCash = plan.workerProtectedCash;
@@ -73,6 +75,8 @@ AIControlAdapterStrategicSpendDecision AIControlAdapterStrategicSpendManager::Ev
 			break;
 		case StrategicSpendCategory::ProductionGrowth:
 		case StrategicSpendCategory::Expansion:
+			permitted = !plan.threatResponse || surplusGrowth;
+			break;
 		case StrategicSpendCategory::TechPrerequisite:
 		case StrategicSpendCategory::LuxuryBaseline:
 			permitted = !plan.threatResponse;

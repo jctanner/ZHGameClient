@@ -72,15 +72,28 @@
 			}
 		}
 
+		UnsignedInt mainAutonomyZoneAnchorId() const
+		{
+			if (!m_autonomy.state.telemetryZones.is_array()) return 0u;
+			for (const auto& zone : m_autonomy.state.telemetryZones)
+				if (zone.is_object() && zone.value("is_main_base", false)) return zone.value("anchor_id", 0u);
+			return 0u;
+		}
+
 		bool economicAssaultReady(DWORD now) const
 		{
 			if (!isEconomicVictoryPhase() || !m_automation.attackRule.enabled || !autonomyRuleEnabled("sustained_assaults") || !areAutonomySimCommandsEnabled()) return false;
 			if (!autonomyRuleEnabled("defer_offense_under_threat")) return true;
-			if (m_autonomy.state.profileSpendPlan.active && m_autonomy.state.profileSpendPlan.threatResponse) return false;
+			// With a large surplus only main-base pressure defers offense; zone
+			// defense tasks answer outer-zone threats from reserved units.
+			const bool surplus = m_autonomy.state.profileSpendPlan.active && m_autonomy.state.profileSpendPlan.surplusUnderThreat;
+			if (m_autonomy.state.profileSpendPlan.active && m_autonomy.state.profileSpendPlan.threatResponse && !surplus) return false;
+			const UnsignedInt mainAnchor = mainAutonomyZoneAnchorId();
 			for (const auto& entry : m_autonomy.state.zoneThreats)
 			{
 				const auto& threat = entry.second;
 				if (now - threat.lastSeenTick > 10000u) continue;
+				if (surplus && mainAnchor != 0u && entry.first != mainAnchor) continue;
 				if (threat.localEnemyCount > 0 || threat.enemyArtilleryCount > 0
 					|| AIControlAdapterDefenseManager::ThreatSeverityForLevel(threat.level) >= 3) return false;
 			}

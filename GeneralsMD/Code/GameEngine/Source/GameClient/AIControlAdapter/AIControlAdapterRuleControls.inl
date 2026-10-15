@@ -22,8 +22,8 @@
                 {"storm_firing", "SCUD Storm firing", "Automatic Storm firing; superweapon permission still required", false},
                 {"tech_upgrades", "Tech and upgrades", "Palaces, science and automatic upgrades", false},
                 {"idle_guard", "Idle guard", "Automatic orders to idle ground combat units", false},
-                {"defer_income_under_threat", "Defer income under attack", "Economic profile restricts market growth during threat response", true},
-                {"defer_offense_under_threat", "Defer offense under attack", "Require relief from local pressure for economic offense", true}
+                {"defer_income_under_threat", "Defer income under attack", "Economic profile restricts market growth during threat response unless cash is in surplus", true},
+                {"defer_offense_under_threat", "Defer offense under attack", "Require relief from local pressure for economic offense; with surplus cash only main-base pressure", true}
             };
             return catalog;
         }
@@ -69,7 +69,8 @@
                 {
                     const std::string id = rule.id;
                     if (id == "market_growth" && m_autonomy.state.profileSpendPlan.active
-                        && m_autonomy.state.profileSpendPlan.threatResponse && autonomyRuleEnabled("defer_income_under_threat")
+                        && m_autonomy.state.profileSpendPlan.threatResponse && !m_autonomy.state.profileSpendPlan.surplusUnderThreat
+                        && autonomyRuleEnabled("defer_income_under_threat")
                         && m_autonomy.state.profileCompletedMarkets > 0) gate = "income_deferred_under_threat";
                     else if (id == "sustained_assaults" && !m_autonomy.state.economicVictory) gate = "economic_threshold_pending";
                     else if (id == "sustained_assaults" && autonomyRuleEnabled("defer_offense_under_threat")

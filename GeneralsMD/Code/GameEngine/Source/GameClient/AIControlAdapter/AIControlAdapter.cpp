@@ -6718,13 +6718,21 @@ namespace
 					m_autonomy.state.scoutingTelemetry["scout_pool_queued"] = counts.queuedTechnicals;
 					m_autonomy.state.scoutingTelemetry["scout_pool_assigned"] = activeScoutAssignments;
 				}
+				// Utility Technicals may displace generic army refill. Soldier refill must be
+				// included: at the profile army target it is dropped later, starving Technicals.
+				// Emergency survival and capture-reserve infantry keep priority.
+				const auto utilityTechnicalMayReplaceIntent = [&prodIntent, emergencyProductionCommand]() {
+					return !prodIntent.shouldProduce
+						|| prodIntent.commandName == "Game.QueueQuadsAllWarFactories"
+						|| prodIntent.commandName == "Game.QueueScorpionsAllWarFactories"
+						|| (prodIntent.commandName == "Game.QueueSoldiersAllBarracks" && !emergencyProductionCommand
+							&& prodIntent.reason != "capture_utility_reserve");
+				};
 				if (autonomyRuleEnabled("scouting") && !emergencyDecision.active
 					&& scoutPoolDecision.productionNeeded
 					&& scoutPoolProducerId > 0
 					&& scoutPoolQueueDepth < 2
-					&& (!prodIntent.shouldProduce
-						|| prodIntent.commandName == "Game.QueueQuadsAllWarFactories"
-						|| prodIntent.commandName == "Game.QueueScorpionsAllWarFactories"))
+					&& utilityTechnicalMayReplaceIntent())
 				{
 					prodIntent.shouldProduce = true;
 					prodIntent.commandName = "Game.QueueUnit";
@@ -6736,9 +6744,7 @@ namespace
 				if (glaUsaStrategy.shuttleTechnicalProductionNeeded
 					&& scoutPoolProducerId > 0
 					&& scoutPoolQueueDepth < 2
-					&& (!prodIntent.shouldProduce
-						|| prodIntent.commandName == "Game.QueueQuadsAllWarFactories"
-						|| prodIntent.commandName == "Game.QueueScorpionsAllWarFactories"))
+					&& utilityTechnicalMayReplaceIntent())
 				{
 					std::string shuttleTechnicalTemplate = "GLAVehicleTechnical";
 					for (const ProductionProducerSnapshot& producer : producerSnapshots)
@@ -8520,6 +8526,7 @@ namespace
 					{"active", m_autonomy.state.profileSpendPlan.active},
 					{"reason", m_autonomy.state.profileSpendPlan.reason},
 					{"threat_response", m_autonomy.state.profileSpendPlan.threatResponse},
+					{"surplus_under_threat", m_autonomy.state.profileSpendPlan.surplusUnderThreat},
 					{"response_until_tick", m_autonomy.state.profileThreatUntilTick},
 					{"sustained_offense", m_autonomy.state.profileSpendPlan.sustainedOffense},
 					{"army_target", m_autonomy.state.profileSpendPlan.armyTarget},
@@ -9415,6 +9422,10 @@ namespace
 				result["current_zone_count"] = currentZoneCount;
 				result["developed_zone_count"] = developedZoneCount;
 			}
+			// Live economy rate; same smoothed net bank delta as the final snapshot's income_rate.
+			const int netCashPerMinute = static_cast<int>(std::floor(m_autonomy.state.smoothedNetCashPerMinute));
+			result["income_rate"] = netCashPerMinute;
+			result["net_cash_per_minute"] = netCashPerMinute;
 			const AIControlAdapterProfilePolicyConfig zoneTargetPolicyConfig = resolveAutonomyProfilePolicyConfig();
 			if (zoneTargetPolicyConfig.isSprawlStyle)
 			{
@@ -13408,7 +13419,6 @@ namespace
 
 		void evaluateDedicatedScouting(Player* player)
 		{
-			if (!autonomyRuleEnabled("scouting")) return;
 			if (!isAutonomyModeActive() || player == nullptr || TheGameLogic == nullptr)
 			{
 				return;
@@ -13419,6 +13429,17 @@ namespace
 				return;
 			}
 			m_autonomy.state.nextScoutTick = now + 5000u;
+			// Record the skipped evaluation so rule status shows the gate firing.
+			std::string scoutingRuleReason;
+			if (!requireAutonomyRule("scouting", scoutingRuleReason))
+			{
+				if (m_autonomy.state.scoutingTelemetry.is_object())
+				{
+					m_autonomy.state.scoutingTelemetry["mode"] = "disabled";
+					m_autonomy.state.scoutingTelemetry["reason"] = scoutingRuleReason;
+				}
+				return;
+			}
 
 			const int readyScuds = countReadyScudStorms(player);
 			const int freshTargets = countFreshScudStrategicTargets(now);

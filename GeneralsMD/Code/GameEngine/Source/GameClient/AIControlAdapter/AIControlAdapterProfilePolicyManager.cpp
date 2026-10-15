@@ -221,6 +221,7 @@ AIControlAdapterProfileSpendPlan AIControlAdapterProfilePolicyManager::ResolveSp
 	if (!plan.active) return plan;
 	plan.threatResponse = threatResponse;
 	plan.sustainedOffense = sustainedOffense;
+	plan.surplusUnderThreat = threatResponse && availableCash >= config.reserveCash + config.threatSurplusCashFloat;
 	plan.workerLimit = config.workerLimit;
 	plan.armyTarget = sustainedOffense ? 1000 : threatResponse
 		? std::min(150, std::max(config.responseArmyFloor, 32 + std::min(29, std::max(0, localEnemies)) * 4))
@@ -237,7 +238,7 @@ AIControlAdapterProfileSpendPlan AIControlAdapterProfilePolicyManager::ResolveSp
 	plan.combatProtectedCash = threatResponse ? 1000u : std::max(config.reserveCash + 2500u, plan.growthProtectedCash);
 	plan.maxConcurrentMarkets = !threatResponse && completedMarkets >= 3
 		&& availableCash >= plan.incomeProtectedCash + 5000u ? 2 : 1;
-	plan.reason = threatResponse ? "threat_response" : sustainedOffense ? "income_funded_offense" : "quiet_economic_growth";
+	plan.reason = plan.surplusUnderThreat ? "threat_response_surplus" : threatResponse ? "threat_response" : sustainedOffense ? "income_funded_offense" : "quiet_economic_growth";
 	return plan;
 }
 

@@ -70,9 +70,15 @@ int main()
 		snapshot.money = 1800u;
 		snapshot.reserveCash = 10000u;
 		snapshot.expansionUrgent = true;
-		const AIControlAdapterStrategicSpendDecision decision =
+		AIControlAdapterStrategicSpendDecision decision =
 			manager.Evaluate(snapshot, StrategicSpendCategory::Expansion, 1800u);
-		expect(decision.allowed, "Urgent expansion should be allowed despite reserve pressure when affordable");
+		// Urgency no longer spends through the shared reserve (pre-milestone budget starvation).
+		expect(!decision.allowed, "Urgent expansion should not spend through the protected reserve");
+		expect(decision.reason == std::string("recovery_cash_protected"), "Urgent expansion below reserve should report recovery cash protection");
+
+		snapshot.money = 12000u;
+		decision = manager.Evaluate(snapshot, StrategicSpendCategory::Expansion, 1800u);
+		expect(decision.allowed, "Urgent expansion should be allowed when funded above the reserve");
 		expect(decision.reason == std::string("urgent_expansion_priority"), "Urgent expansion should preserve policy reason");
 	}
 
@@ -122,6 +128,42 @@ int main()
 			manager.Evaluate(snapshot, StrategicSpendCategory::DefensiveWmd, 5000u);
 		expect(decision.allowed, "Defensive WMD spend should be allowed for active WMD threat when protected");
 		expect(decision.reason == std::string("defensive_wmd"), "Defensive WMD should preserve policy reason");
+	}
+
+	{
+		// Economic profile under threat response: income deferral holds without a surplus.
+		AIControlAdapterStrategicSpendSnapshot snapshot = makeBaseSnapshot();
+		snapshot.money = 98000u;
+		snapshot.completedMarkets = 9;
+		snapshot.profilePlan.active = true;
+		snapshot.profilePlan.threatResponse = true;
+		snapshot.profilePlan.deferIncomeUnderThreat = true;
+		snapshot.profilePlan.incomeProtectedCash = 3000u;
+		snapshot.profilePlan.growthProtectedCash = 6000u;
+		snapshot.profilePlan.maxConcurrentMarkets = 1;
+		snapshot.profilePlan.reason = "threat_response";
+		AIControlAdapterStrategicSpendDecision decision =
+			manager.Evaluate(snapshot, StrategicSpendCategory::EconomyGrowth, 2500u);
+		expect(!decision.allowed, "Threat response without surplus should defer market growth");
+		decision = manager.Evaluate(snapshot, StrategicSpendCategory::Expansion, 1800u);
+		expect(!decision.allowed, "Threat response without surplus should defer expansion");
+
+		snapshot.profilePlan.surplusUnderThreat = true;
+		decision = manager.Evaluate(snapshot, StrategicSpendCategory::EconomyGrowth, 2500u);
+		expect(decision.allowed, "Surplus under threat should permit funded market growth");
+		decision = manager.Evaluate(snapshot, StrategicSpendCategory::Expansion, 1800u);
+		expect(decision.allowed, "Surplus under threat should permit funded expansion");
+		decision = manager.Evaluate(snapshot, StrategicSpendCategory::LuxuryBaseline, 1000u);
+		expect(!decision.allowed, "Surplus under threat should keep luxury spending deferred");
+
+		snapshot.healthyMarketsInProgress = 1;
+		decision = manager.Evaluate(snapshot, StrategicSpendCategory::EconomyGrowth, 2500u);
+		expect(!decision.allowed, "Surplus growth should keep the market concurrency limit");
+
+		snapshot.healthyMarketsInProgress = 0;
+		snapshot.mainBaseCritical = true;
+		decision = manager.Evaluate(snapshot, StrategicSpendCategory::EconomyGrowth, 2500u);
+		expect(!decision.allowed, "Critical main base pressure should defer surplus growth");
 	}
 
 	std::cout << "AIControlAdapterStrategicSpendManagerTests passed\n";

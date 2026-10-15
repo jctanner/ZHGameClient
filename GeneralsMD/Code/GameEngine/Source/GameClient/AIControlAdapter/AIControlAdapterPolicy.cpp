@@ -1907,7 +1907,11 @@ AIControlAdapterZoneDefenseAllocationResult AIControlAdapterEvaluateZoneDefenseA
 	const float dy = inputs.newTargetY - inputs.oldTargetY;
 	const bool targetMoved = (dx * dx + dy * dy) >= (inputs.targetMoveThreshold * inputs.targetMoveThreshold);
 	const bool threatEscalated = inputs.newThreatSeverity > inputs.activeSeverity;
-	const bool defendersMissing = inputs.assignedCount < std::max(1, inputs.desiredDefenders / 2);
+	// Critical threats reinforce to full strength; otherwise a half-strength
+	// allocation stays under a refreshed min_hold for the whole attack.
+	const int reinforceBelow = inputs.newThreatSeverity >= 4
+		? inputs.desiredDefenders : std::max(1, inputs.desiredDefenders / 2);
+	const bool defendersMissing = inputs.assignedCount < reinforceBelow;
 
 	if (threatEscalated || targetMoved || defendersMissing)
 	{

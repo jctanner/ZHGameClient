@@ -132,6 +132,9 @@ struct AIControlAdapterProfilePolicyConfig
 	int offensiveMarketThreshold = 12;
 	unsigned int offensiveCashFloat = 5000u;
 	unsigned int threatHoldMs = 30000u;
+	// Available cash above reserve + this float lets growth/offense continue
+	// under non-core pressure instead of hoarding through a permanent response.
+	unsigned int threatSurplusCashFloat = 25000u;
 };
 
 // One profile plan feeds construction, workforce and unit production. Cash
@@ -142,6 +145,7 @@ struct AIControlAdapterProfileSpendPlan
 	bool threatResponse = false;
 	bool deferIncomeUnderThreat = true;
 	bool sustainedOffense = false;
+	bool surplusUnderThreat = false;
 	int armyTarget = 0;
 	int workerLimit = 80;
 	int maxConcurrentMarkets = 1;
