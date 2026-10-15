@@ -132,6 +132,8 @@ Supported `cmd` values (v1):
 46. `Game.Camera.SetZoomLimited`
 47. `Game.Camera.Get`
 48. `Game.Display.Get`
+49. `Game.SetSpeed`
+50. `Game.GetSpeed`
 48. `Autonomy.SetMode`
 49. `Autonomy.Configure`
 50. `Autonomy.Status`
@@ -361,6 +363,31 @@ spending are outside this pending unit budget.
 2. Intended for debugging only.
 3. Rejects multiplayer sessions with `invalid_state` + `cash_mutation_not_allowed_in_multiplayer`.
 4. Safe target modes are single-player and skirmish.
+
+`Game.SetSpeed` args:
+
+1. `multiplier` (required int, 1-8)
+
+`Game.SetSpeed` / `Game.GetSpeed` behavior:
+
+1. Local (non-network) matches only: while in game and unpaused, the engine steps
+   fixed 1/30 s logic frames at `30 * multiplier` per wall second, running more
+   steps in slower render frames (capped at `3 * multiplier` per frame, dropping
+   backlog beyond that). Simulation time, and every adapter timer derived from it,
+   stays exact; only wall-clock progress scales.
+2. Rejects network sessions with `network_game`; invalid values return
+   `invalid_multiplier` or `multiplier_out_of_range` without changing the speed.
+3. Both commands return the `game_speed` object, also present in `Autonomy.Status`
+   and `Autonomy.Telemetry`: `requested_multiplier`,
+   `active_multiplier`, `max_multiplier`, `achieved_multiplier` (simulated / wall time over ~2 s windows),
+   `render_fps` and `state` (`normal`, `accelerated`, `paused`,
+   `waiting_for_match`, `network_game_ignored`).
+4. Achieved speed is bounded by CPU time for logic plus rendering; heavy late-game
+   logic lowers render FPS and, past the per-frame cap, the achieved multiplier.
+5. Changes append a `speed` recording event. Adapter reset (new match or return
+   to menu) restores 1x; `launch-match.py --speed-multiplier=N` reapplies it.
+6. Wall-clock consumers (backend recorder sampling, launcher timeouts, the owned
+   object cache age) see proportionally more simulated time per wall second.
 
 `Game.DebugDeshroud` args:
 

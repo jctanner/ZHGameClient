@@ -404,6 +404,8 @@
 		 * - Game.QueueUpgrade: Purchase upgrade (args: upgrade)
 		 * - Game.PurchaseScience: Research science (args: science)
 		 * - Game.SetMoney: Set cash (debug) (args: money)
+		 * - Game.SetSpeed: Local-match speed multiplier (args: multiplier 1-8); returns game_speed state
+		 * - Game.GetSpeed: Current requested/achieved game speed (args: none)
 		 * - Game.DebugDeshroud: Remove fog of war (debug) (args: none)
 		 * - Game.BuildWorker: Build worker/rebel (args: none)
 		 * - Game.MoveArmy: Move combat units (args: position)
@@ -661,6 +663,25 @@
 				}
 
 				sendActionAck(requestId, true);
+				return;
+			}
+
+			if (cmd == "Game.SetSpeed")
+			{
+				std::string reason;
+				if (!executeGameSetSpeed(message, requestId, reason))
+				{
+					sendQueryError(requestId, "invalid_args", reason.c_str());
+					return;
+				}
+
+				sendQueryResult(requestId, buildGameSpeedState());
+				return;
+			}
+
+			if (cmd == "Game.GetSpeed")
+			{
+				sendQueryResult(requestId, buildGameSpeedState());
 				return;
 			}
 

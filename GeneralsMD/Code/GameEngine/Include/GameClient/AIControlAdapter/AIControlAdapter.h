@@ -114,3 +114,12 @@ void AIControlAdapterUpdate();
  * - Must be called from game's main thread only
  */
 void AIControlAdapterReset();
+
+/**
+ * Simulation speed multiplier the engine should apply this render frame.
+ *
+ * Returns the operator-selected multiplier (Game.SetSpeed) while a local match is
+ * running and unpaused, otherwise 1. The engine then steps fixed logic frames at
+ * LOGICFRAMES_PER_SECOND * multiplier of wall time. Ignored for network games.
+ */
+int AIControlAdapterSpeedMultiplier();

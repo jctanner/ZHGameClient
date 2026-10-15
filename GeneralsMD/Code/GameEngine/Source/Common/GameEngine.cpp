@@ -306,6 +306,7 @@ GameEngine::GameEngine()
 {
 	// initialize to non garbage values
 	m_logicTimeAccumulator = 0.0f;
+	m_acceleratedLogicAccumulator = 0.0f;
 	m_quitting = FALSE;
 	m_isActive = FALSE;
 	m_discordRichPresence = nullptr;
@@ -887,6 +888,40 @@ void GameEngine::resetSubsystems()
 }
 
 /// -----------------------------------------------------------------------------------------------
+/** Fixed logic steps for an accelerated local match in this render frame. Wall time
+ * accumulates toward steps at LOGICFRAMES_PER_SECOND * multiplier, so slower render
+ * frames run more steps. A per-frame cap drops backlog instead of spiralling. */
+Int GameEngine::consumeAcceleratedLogicSteps(Int multiplier)
+{
+	TheGameLogic->preUpdate();
+	TheFramePacer->setTimeFrozen(isTimeFrozen());
+	TheFramePacer->setGameHalted(isGameHalted());
+
+	// Halted (paused) games do not step; frozen time still steps for the script engine.
+	if (TheFramePacer->getActualLogicTimeScaleFps(FramePacer::IgnoreFrozenTime) <= 0)
+	{
+		m_acceleratedLogicAccumulator = 0.0f;
+		return 0;
+	}
+
+	const Real stepTime = 1.0f / (LOGICFRAMES_PER_SECONDS_REAL * multiplier);
+	const Int maxSteps = multiplier * 3;
+	m_acceleratedLogicAccumulator += min(TheFramePacer->getUpdateTime(), 0.25f);
+
+	Int steps = 0;
+	while (m_acceleratedLogicAccumulator >= stepTime && steps < maxSteps)
+	{
+		m_acceleratedLogicAccumulator -= stepTime;
+		++steps;
+	}
+	if (steps == maxSteps)
+	{
+		m_acceleratedLogicAccumulator = 0.0f;
+	}
+	return steps;
+}
+
+/// -----------------------------------------------------------------------------------------------
 Bool GameEngine::canUpdateGameLogic(UnsignedInt logicTimeQueryFlags)
 {
 	// This updates the paused game status of the game logic.
@@ -1027,13 +1062,32 @@ void GameEngine::update()
 		}
 
 		// TheSuperHackers @info Ignores frozen time because the script engine needs updating in the logic update regardless.
-		if (canUpdateGameLogic(FramePacer::IgnoreFrozenTime))
+		// The AI control adapter may accelerate local matches; network games never are.
+		const Int speedMultiplier = TheNetwork == nullptr ? AIControlAdapterSpeedMultiplier() : 1;
+		if (speedMultiplier > 1)
 		{
-			TheGameLogic->UPDATE();
-
-			if (!TheFramePacer->isTimeFrozen())
+			const Int logicSteps = consumeAcceleratedLogicSteps(speedMultiplier);
+			for (Int step = 0; step < logicSteps; ++step)
 			{
-				TheGameClient->step();
+				TheGameLogic->UPDATE();
+
+				if (!TheFramePacer->isTimeFrozen())
+				{
+					TheGameClient->step();
+				}
+			}
+		}
+		else
+		{
+			m_acceleratedLogicAccumulator = 0.0f;
+			if (canUpdateGameLogic(FramePacer::IgnoreFrozenTime))
+			{
+				TheGameLogic->UPDATE();
+
+				if (!TheFramePacer->isTimeFrozen())
+				{
+					TheGameClient->step();
+				}
 			}
 		}
 	}

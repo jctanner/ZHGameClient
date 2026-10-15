@@ -603,11 +603,15 @@ namespace
 			m_terrainMapCacheService.clear();
 			m_mapFileTerrainMergeLoggedKeys.clear();
 			m_transport.resetClientConnection();
+			resetGameSpeed();
 		}
+
+		int engineSpeedMultiplier() const { return activeSpeedMultiplier(); }
 
 		void update()
 		{
 			LARGE_INTEGER started; ::QueryPerformanceCounter(&started);
+			sampleGameSpeed();
 			m_transport.ensurePipeCreated();
 			m_transport.ensureTcpCreated();
 			if (!m_transport.hasListener())
@@ -1103,6 +1107,7 @@ namespace
 		}
 
 		#include "AIControlAdapterRuleControls.inl"
+		#include "AIControlAdapterSpeedControl.inl"
 
 		void applyAutonomyRules()
 		{
@@ -8483,6 +8488,7 @@ namespace
 			result["mode"] = m_autonomy.state.mode;
 			result["profile"] = m_autonomy.state.profile;
 			result["rule_controls"] = buildAutonomyRuleState();
+			result["game_speed"] = buildGameSpeedState();
 			result["match_generation"] = m_recordingJournal.generation;
 			result["paused"] = m_autonomy.state.paused;
 			result["active"] = isAutonomyModeActive();
@@ -9425,6 +9431,7 @@ namespace
 			// Live economy rate; same smoothed net bank delta as the final snapshot's income_rate.
 			const int netCashPerMinute = static_cast<int>(std::floor(m_autonomy.state.smoothedNetCashPerMinute));
 			result["income_rate"] = netCashPerMinute;
+			result["game_speed"] = buildGameSpeedState();
 			result["net_cash_per_minute"] = netCashPerMinute;
 			const AIControlAdapterProfilePolicyConfig zoneTargetPolicyConfig = resolveAutonomyProfilePolicyConfig();
 			if (zoneTargetPolicyConfig.isSprawlStyle)
@@ -18713,4 +18720,9 @@ void AIControlAdapterUpdate()
 void AIControlAdapterReset()
 {
 	g_adapterState.reset();
+}
+
+int AIControlAdapterSpeedMultiplier()
+{
+	return g_adapterState.engineSpeedMultiplier();
 }
