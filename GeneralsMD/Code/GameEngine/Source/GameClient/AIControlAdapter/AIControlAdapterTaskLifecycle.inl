@@ -1142,7 +1142,7 @@ void logStrategicFoundationHealth(Player* player)
 	{
 		const Counts& counts = pair.second;
 		const char* reason = counts.stale > 0 ? "stale_no_progress" : (counts.noBuilder > 0 ? "no_active_builder" : "healthy_in_progress");
-		adapterLog(
+		adapterLogOnChange("strategic_foundation_health:" + pair.first,
 			"strategic_foundation_health template=%s live=%d in_progress=%d healthy=%d stale=%d no_builder=%d damaged=%d reason=%s",
 			pair.first.c_str(),
 			counts.live,

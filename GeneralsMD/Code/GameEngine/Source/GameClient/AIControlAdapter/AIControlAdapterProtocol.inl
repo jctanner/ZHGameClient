@@ -451,6 +451,7 @@
 		void handleSessionCommand(const nlohmann::json& message, const std::string& requestId)
 		{
 			const std::string cmd = getJsonString(message, "cmd");
+			m_profileCurrentCmd = cmd;
 			DEBUG_LOG(("[AICTRL] session_cmd request_id=%s cmd=%s", requestId.c_str(), cmd.c_str()));
 			if (cmd != "Game.Query" && cmd.find("Snapshot") == std::string::npos && cmd != "Autonomy.RecordingEvents" && cmd != "Autonomy.Telemetry" && cmd != "Autonomy.Status")
 				appendRecordingEvent("command", "command_received", cmd.c_str(), 0, 0, "operator", requestId.c_str());
@@ -676,6 +677,15 @@
 				}
 
 				sendQueryResult(requestId, buildGameSpeedState());
+				return;
+			}
+
+			if (cmd == "Adapter.Profile")
+			{
+				const nlohmann::json args = message.value("args", nlohmann::json::object());
+				const nlohmann::json profile = buildAdapterProfile();
+				if (args.value("reset", false)) resetAdapterProfile();
+				sendQueryResult(requestId, profile);
 				return;
 			}
 

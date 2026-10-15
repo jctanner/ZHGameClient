@@ -602,8 +602,13 @@ namespace
 			resetAutonomyState();
 			m_terrainMapCacheService.clear();
 			m_mapFileTerrainMergeLoggedKeys.clear();
+			m_terrainFactsCacheKey.clear();
+			m_terrainFactsCache = AIControlAdapterTerrainFacts();
+			m_lastStateLogLines.clear();
+			m_terrainFactsCacheTick = 0u;
 			m_transport.resetClientConnection();
 			resetGameSpeed();
+			resetAdapterProfile();
 		}
 
 		int engineSpeedMultiplier() const { return activeSpeedMultiplier(); }
@@ -619,16 +624,20 @@ namespace
 				return;
 			}
 
-			m_transport.acceptClientIfAvailable();
-			if (m_transport.hasClient())
 			{
-				m_transport.readIncomingData();
+				ProfileScope profileScope(*this, "transport_and_commands");
+				m_transport.acceptClientIfAvailable();
+				if (m_transport.hasClient())
+				{
+					m_transport.readIncomingData();
+				}
 			}
 
 			// Autonomy should run even when no client is connected
 			evaluateAutomationRules();
 			LARGE_INTEGER ended, frequency; ::QueryPerformanceCounter(&ended); ::QueryPerformanceFrequency(&frequency);
 			const std::uint64_t elapsed = frequency.QuadPart > 0 ? (ended.QuadPart - started.QuadPart) * 1000000 / frequency.QuadPart : 0;
+			finishProfileFrame(elapsed);
 			++m_recordingUpdateSamples; m_recordingUpdateUs += elapsed;
 			m_recordingUpdateMaxUs = std::max(m_recordingUpdateMaxUs, elapsed);
 			++m_recordingUpdateHistogram[std::min<std::size_t>(127, static_cast<std::size_t>(elapsed / 100))];
@@ -662,7 +671,11 @@ namespace
 
 		static void onMessage(void* context, const std::string& line)
 		{
-			static_cast<AIControlAdapterState*>(context)->handleMessage(line);
+			AIControlAdapterState* state = static_cast<AIControlAdapterState*>(context);
+			state->m_profileCurrentCmd = "message";
+			const std::uint64_t started = profileNowUs();
+			state->handleMessage(line);
+			state->recordProfileSection("cmd:" + state->m_profileCurrentCmd, profileNowUs() - started);
 		}
 
 		void adapterLog(const char* format, ...)
@@ -675,10 +688,25 @@ namespace
 			m_log.log("%s", buf);
 		}
 
-		void sendJsonLine(const nlohmann::json& payload) { m_transport.sendJsonLine(payload); }
+		// For state lines evaluated every frame: write only when the text for key changes.
+		std::map<std::string, std::string> m_lastStateLogLines;
+		void adapterLogOnChange(const std::string& key, const char* format, ...)
+		{
+			va_list args;
+			va_start(args, format);
+			char buf[4096];
+			vsnprintf(buf, sizeof(buf), format, args);
+			va_end(args);
+			std::string& last = m_lastStateLogLines[key];
+			if (last == buf) return;
+			last = buf;
+			m_log.log("%s", buf);
+		}
+
+		void sendJsonLine(const nlohmann::json& payload) { ProfileScope profileScope(*this, "send_reply"); m_transport.sendJsonLine(payload); }
 		void sendProtocolError(const std::string& requestId, const char* code, const char* reason) { m_transport.sendProtocolError(requestId, code, reason); }
 		void sendActionAck(const std::string& requestId, bool ok, const char* code = nullptr, const char* reason = nullptr) { appendRecordingEvent("command", ok ? "command_accepted" : "command_rejected", reason != nullptr ? reason : (code != nullptr ? code : ""), 0, 0, "operator", requestId.c_str()); m_transport.sendActionAck(requestId, ok, code, reason); }
-		void sendQueryResult(const std::string& requestId, const nlohmann::json& result) { m_transport.sendQueryResult(requestId, result); }
+		void sendQueryResult(const std::string& requestId, const nlohmann::json& result) { ProfileScope profileScope(*this, "send_reply"); m_transport.sendQueryResult(requestId, result); }
 		void sendQueryError(const std::string& requestId, const char* code, const char* reason) { m_transport.sendQueryError(requestId, code, reason); }
 		std::unordered_map<Int, Int> m_lastAutoSupplySourceByPlayer;
 		AdapterWorkersState m_workers;
@@ -692,6 +720,11 @@ namespace
 		AIControlAdapterTerrainMapCacheService m_terrainMapCacheService;
 		AIControlAdapterWorkerShuttleManager m_workerShuttleManager;
 		std::set<std::string> m_mapFileTerrainMergeLoggedKeys;
+		// Terrain facts are static per map/main base; rebuild on change or periodically
+		// (bridge state) instead of sampling the whole map every macro pass.
+		AIControlAdapterTerrainFacts m_terrainFactsCache;
+		std::string m_terrainFactsCacheKey;
+		DWORD m_terrainFactsCacheTick = 0u;
 
 		void resetAutonomyState()
 		{
@@ -1108,6 +1141,7 @@ namespace
 
 		#include "AIControlAdapterRuleControls.inl"
 		#include "AIControlAdapterSpeedControl.inl"
+		#include "AIControlAdapterProfiler.inl"
 
 		void applyAutonomyRules()
 		{
@@ -1346,10 +1380,9 @@ namespace
 			const bool techDue = tickSchedule.techDue;
 			if (!tickSchedule.anyDue)
 			{
-				adapterLog(
-					"autonomy_macro_skip_not_due player=%d now=%lu timers[macro=%lu prod=%lu tech=%lu guard=%lu]",
+				adapterLogOnChange("autonomy_macro_skip_not_due",
+					"autonomy_macro_skip_not_due player=%d timers[macro=%lu prod=%lu tech=%lu guard=%lu]",
 					player->getPlayerIndex(),
-					static_cast<unsigned long>(now),
 					static_cast<unsigned long>(m_autonomy.state.nextMacroTick),
 					static_cast<unsigned long>(m_autonomy.state.nextProductionTick),
 					static_cast<unsigned long>(m_autonomy.state.nextTechTick),
@@ -1912,78 +1945,89 @@ namespace
 					break;
 				}
 			}
-				const AIControlAdapterTerrainFacts extractedTerrainFacts = buildEngineTerrainFacts(
-					mapName,
-					hasMainBaseTerrainAnchor,
-					mainBaseTerrainX,
-					mainBaseTerrainY);
-				const AIControlAdapterTerrainFacts fixtureTerrainFacts = AIControlAdapterBuildTerrainFacts(
-					mapName,
-					hasMainBaseTerrainAnchor,
-					mainBaseTerrainX,
-					mainBaseTerrainY);
-				const AIControlAdapterTerrainFacts mapFileCacheFacts = loadMapFileCacheFactsForMap(mapName);
-				const AIControlAdapterTerrainFacts terrainFacts = AIControlAdapterMergeMapFileCacheFacts(
-					extractedTerrainFacts,
-					fixtureTerrainFacts,
-					mapFileCacheFacts);
-				m_autonomy.state.pathingTelemetry = AIControlAdapterSerializeTerrainFacts(terrainFacts);
-				const std::string mapFileCacheKey = AIControlAdapterNormalizeMapFileCacheKey(mapName);
-				if (m_mapFileTerrainMergeLoggedKeys.insert(mapFileCacheKey).second)
-				{
-					adapterLog(
-						"map_file_cache_merge map=%s cache_features=%d runtime_features=%d fixture_features=%d final_features=%d reason=%s",
-						mapName.empty() ? "unknown" : mapName.c_str(),
-						static_cast<int>(mapFileCacheFacts.features.size()),
-						static_cast<int>(extractedTerrainFacts.features.size()),
-						static_cast<int>(fixtureTerrainFacts.features.size()),
-						static_cast<int>(terrainFacts.features.size()),
-						mapFileCacheFacts.mapFileCacheTelemetry.is_object()
-							? mapFileCacheFacts.mapFileCacheTelemetry.value("reason", std::string("not_evaluated")).c_str()
-							: "not_evaluated");
-				}
-				adapterLog(
-					"terrain_extraction_probe map=%s source=%s extent=%.1f,%.1f,%.1f,%.1f cliffs=%d bridges=%d waypoints=%d features=%d reason=%s",
-					mapName.empty() ? "unknown" : mapName.c_str(),
-					extractedTerrainFacts.source.c_str(),
-					extractedTerrainFacts.extraction.extent.minX,
-					extractedTerrainFacts.extraction.extent.minY,
-					extractedTerrainFacts.extraction.extent.maxX,
-					extractedTerrainFacts.extraction.extent.maxY,
-					extractedTerrainFacts.extraction.cliffSamples,
-					extractedTerrainFacts.extraction.bridgeCount,
-					extractedTerrainFacts.extraction.waypointCount,
-					static_cast<int>(extractedTerrainFacts.features.size()),
-					extractedTerrainFacts.extraction.reason.c_str());
-				adapterLog(
-					"terrain_sample_summary map=%s sample_step=%d blocked=%d passable=%d cliff=%d unknown=%d",
-					mapName.empty() ? "unknown" : mapName.c_str(),
-					extractedTerrainFacts.extraction.sampleStep,
-					extractedTerrainFacts.extraction.blockedSamples,
-					extractedTerrainFacts.extraction.passableSamples,
-					extractedTerrainFacts.extraction.cliffSamples,
-					extractedTerrainFacts.extraction.unknownSamples);
-				adapterLog(
-					"terrain_extraction_source map=%s selected=%s fallback=%s reason=%s",
-					mapName.empty() ? "unknown" : mapName.c_str(),
-					terrainFacts.source.c_str(),
-					terrainFacts.extraction.fallbackSource.empty() ? "none" : terrainFacts.extraction.fallbackSource.c_str(),
-					terrainFacts.extraction.reason.empty() ? "not_evaluated" : terrainFacts.extraction.reason.c_str());
-				adapterLog(
-					"terrain_facts_loaded map=%s features=%d source=%s",
-				mapName.empty() ? "unknown" : mapName.c_str(),
-				static_cast<int>(terrainFacts.features.size()),
-				terrainFacts.source.c_str());
-			for (std::size_t terrainIdx = 0; terrainIdx < terrainFacts.features.size(); ++terrainIdx)
+			const std::string terrainCacheKey = mapName + "|" + (hasMainBaseTerrainAnchor
+				? std::to_string(static_cast<long>(std::lround(mainBaseTerrainX / 100.0f))) + "," + std::to_string(static_cast<long>(std::lround(mainBaseTerrainY / 100.0f)))
+				: std::string("none"));
+			const DWORD terrainCacheNow = adapterGameplayTick();
+			if (terrainCacheKey != m_terrainFactsCacheKey || terrainCacheNow - m_terrainFactsCacheTick >= 60000u)
 			{
-				const AIControlAdapterTerrainFeature& feature = terrainFacts.features[terrainIdx];
-				adapterLog(
-					"terrain_feature id=%s kind=%s source=%s points=%d",
-					feature.id.c_str(),
-					feature.kind.c_str(),
-					feature.source.c_str(),
-					static_cast<int>(feature.points.size()));
+				m_terrainFactsCacheKey = terrainCacheKey;
+				m_terrainFactsCacheTick = terrainCacheNow;
+					const AIControlAdapterTerrainFacts extractedTerrainFacts = buildEngineTerrainFacts(
+						mapName,
+						hasMainBaseTerrainAnchor,
+						mainBaseTerrainX,
+						mainBaseTerrainY);
+					const AIControlAdapterTerrainFacts fixtureTerrainFacts = AIControlAdapterBuildTerrainFacts(
+						mapName,
+						hasMainBaseTerrainAnchor,
+						mainBaseTerrainX,
+						mainBaseTerrainY);
+					const AIControlAdapterTerrainFacts mapFileCacheFacts = loadMapFileCacheFactsForMap(mapName);
+					m_terrainFactsCache = AIControlAdapterMergeMapFileCacheFacts(
+						extractedTerrainFacts,
+						fixtureTerrainFacts,
+						mapFileCacheFacts);
+					const AIControlAdapterTerrainFacts& terrainFacts = m_terrainFactsCache;
+					m_autonomy.state.pathingTelemetry = AIControlAdapterSerializeTerrainFacts(terrainFacts);
+					const std::string mapFileCacheKey = AIControlAdapterNormalizeMapFileCacheKey(mapName);
+					if (m_mapFileTerrainMergeLoggedKeys.insert(mapFileCacheKey).second)
+					{
+						adapterLog(
+							"map_file_cache_merge map=%s cache_features=%d runtime_features=%d fixture_features=%d final_features=%d reason=%s",
+							mapName.empty() ? "unknown" : mapName.c_str(),
+							static_cast<int>(mapFileCacheFacts.features.size()),
+							static_cast<int>(extractedTerrainFacts.features.size()),
+							static_cast<int>(fixtureTerrainFacts.features.size()),
+							static_cast<int>(terrainFacts.features.size()),
+							mapFileCacheFacts.mapFileCacheTelemetry.is_object()
+								? mapFileCacheFacts.mapFileCacheTelemetry.value("reason", std::string("not_evaluated")).c_str()
+								: "not_evaluated");
+					}
+					adapterLog(
+						"terrain_extraction_probe map=%s source=%s extent=%.1f,%.1f,%.1f,%.1f cliffs=%d bridges=%d waypoints=%d features=%d reason=%s",
+						mapName.empty() ? "unknown" : mapName.c_str(),
+						extractedTerrainFacts.source.c_str(),
+						extractedTerrainFacts.extraction.extent.minX,
+						extractedTerrainFacts.extraction.extent.minY,
+						extractedTerrainFacts.extraction.extent.maxX,
+						extractedTerrainFacts.extraction.extent.maxY,
+						extractedTerrainFacts.extraction.cliffSamples,
+						extractedTerrainFacts.extraction.bridgeCount,
+						extractedTerrainFacts.extraction.waypointCount,
+						static_cast<int>(extractedTerrainFacts.features.size()),
+						extractedTerrainFacts.extraction.reason.c_str());
+					adapterLog(
+						"terrain_sample_summary map=%s sample_step=%d blocked=%d passable=%d cliff=%d unknown=%d",
+						mapName.empty() ? "unknown" : mapName.c_str(),
+						extractedTerrainFacts.extraction.sampleStep,
+						extractedTerrainFacts.extraction.blockedSamples,
+						extractedTerrainFacts.extraction.passableSamples,
+						extractedTerrainFacts.extraction.cliffSamples,
+						extractedTerrainFacts.extraction.unknownSamples);
+					adapterLog(
+						"terrain_extraction_source map=%s selected=%s fallback=%s reason=%s",
+						mapName.empty() ? "unknown" : mapName.c_str(),
+						terrainFacts.source.c_str(),
+						terrainFacts.extraction.fallbackSource.empty() ? "none" : terrainFacts.extraction.fallbackSource.c_str(),
+						terrainFacts.extraction.reason.empty() ? "not_evaluated" : terrainFacts.extraction.reason.c_str());
+					adapterLog(
+						"terrain_facts_loaded map=%s features=%d source=%s",
+					mapName.empty() ? "unknown" : mapName.c_str(),
+					static_cast<int>(terrainFacts.features.size()),
+					terrainFacts.source.c_str());
+				for (std::size_t terrainIdx = 0; terrainIdx < terrainFacts.features.size(); ++terrainIdx)
+				{
+					const AIControlAdapterTerrainFeature& feature = terrainFacts.features[terrainIdx];
+					adapterLog(
+						"terrain_feature id=%s kind=%s source=%s points=%d",
+						feature.id.c_str(),
+						feature.kind.c_str(),
+						feature.source.c_str(),
+						static_cast<int>(feature.points.size()));
+				}
 			}
+			const AIControlAdapterTerrainFacts& terrainFacts = m_terrainFactsCache;
 			for (std::size_t i = 0; i < ownedObjects.size(); ++i)
 			{
 				const AutonomyOwnedObjectSnapshot& owned = ownedObjects[i];
@@ -11548,7 +11592,7 @@ namespace
 		void evaluateAutomationRules()
 		{
 			Player* player = resolveAutonomyPlayer();
-			reconcileStrategicFoundations(player, adapterGameplayTick());
+			{ ProfileScope profileScope(*this, "reconcileStrategicFoundations"); reconcileStrategicFoundations(player, adapterGameplayTick()); }
 
 			const bool simCommandsEnabled = areAutonomySimCommandsEnabled();
 			struct AutomaticSpendScope
@@ -11559,13 +11603,13 @@ namespace
 			} scope(m_profileAutomaticSpendScope, simCommandsEnabled);
 			if (simCommandsEnabled)
 			{
-				evaluateAutonomyMacro();
-				evaluateStashWorkerAutomationRule();
-				evaluateLocalWorkerLiquidity();
-				evaluateWorkerAutomationRule();
-				evaluateRadarVanAutomationRule();
-				evaluateAttackAutomationRule();
-				evaluateCaptureAutomationRule();
+				{ ProfileScope profileScope(*this, "evaluateAutonomyMacro"); evaluateAutonomyMacro(); }
+				{ ProfileScope profileScope(*this, "evaluateStashWorkerAutomationRule"); evaluateStashWorkerAutomationRule(); }
+				{ ProfileScope profileScope(*this, "evaluateLocalWorkerLiquidity"); evaluateLocalWorkerLiquidity(); }
+				{ ProfileScope profileScope(*this, "evaluateWorkerAutomationRule"); evaluateWorkerAutomationRule(); }
+				{ ProfileScope profileScope(*this, "evaluateRadarVanAutomationRule"); evaluateRadarVanAutomationRule(); }
+				{ ProfileScope profileScope(*this, "evaluateAttackAutomationRule"); evaluateAttackAutomationRule(); }
+				{ ProfileScope profileScope(*this, "evaluateCaptureAutomationRule"); evaluateCaptureAutomationRule(); }
 			}
 			else if (isAutonomyModeActive())
 			{
@@ -11574,16 +11618,16 @@ namespace
 			}
 
 			// Phase 6.1: Update special task reservations and construction lifecycle
-			updateSpecialTaskReservations(player);
+			{ ProfileScope profileScope(*this, "updateSpecialTaskReservations"); updateSpecialTaskReservations(player); }
 
 			// Phase 9.0: Update combat task lifecycle
-			updateCombatTaskLifecycle(player);
+			{ ProfileScope profileScope(*this, "updateCombatTaskLifecycle"); updateCombatTaskLifecycle(player); }
 
 			// Phase 7.4: Update WMD target tracking
-			updateWMDTargets(player);
+			{ ProfileScope profileScope(*this, "updateWMDTargets"); updateWMDTargets(player); }
 
 			// Phase 8.1: Update structured enemy map memory for telemetry/UI.
-			updateEnemyMemory(player);
+			{ ProfileScope profileScope(*this, "updateEnemyMemory"); updateEnemyMemory(player); }
 
 			if (!simCommandsEnabled)
 			{
@@ -11592,19 +11636,19 @@ namespace
 			}
 
 			// Phase 9.2: Dedicated fast scouting refreshes map memory while raids wait.
-			evaluateDedicatedScouting(player);
+			{ ProfileScope profileScope(*this, "evaluateDedicatedScouting"); evaluateDedicatedScouting(player); }
 
 			// Phase 7.9: Bounded battlefield counterbattery for visible long-range artillery.
-			evaluateBattlefieldCounterbattery(player);
+			{ ProfileScope profileScope(*this, "evaluateBattlefieldCounterbattery"); evaluateBattlefieldCounterbattery(player); }
 
 			// Phase 7.9: Keep durable defensive garrisons reserved from unrelated automation.
-			evaluateGarrisonManagement(player);
+			{ ProfileScope profileScope(*this, "evaluateGarrisonManagement"); evaluateGarrisonManagement(player); }
 
 			// Phase 7.5: Mobile SCUD Launcher counterbattery is deprecated.
 			// Trucks remain in the normal vehicle mix; stationary SCUD Storms handle WMD counterplay.
 
 			// Phase 7.5: Evaluate defensive SCUD Storm construction and firing
-			evaluateDefensiveScudStorm(player);
+			{ ProfileScope profileScope(*this, "evaluateDefensiveScudStorm"); evaluateDefensiveScudStorm(player); }
 
 			drawDebugZones();
 		}
@@ -12774,7 +12818,7 @@ namespace
 			}
 
 			m_autonomy.state.glaUsaStrategyTelemetry["worker_shuttle_tasks"] = telemetry;
-			adapterLog(
+			adapterLogOnChange("worker_shuttle_policy",
 				"worker_shuttle_policy protected=%d active=%d reason=%s",
 				protectedTechnicals,
 				static_cast<int>(m_autonomy.state.workerShuttleAssignments.size()),
