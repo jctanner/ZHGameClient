@@ -881,33 +881,46 @@
 			return ctx.found;
 		}
 
-		// Our claims on a supply source: completed or under-construction dropoffs nearby,
-		// plus stash build tasks whose foundation does not exist yet.
-		int countOwnedSupplyClaims(Player* player, Object* supplySource, Real maxDistance)
+		// Our claims on supply sources: completed or under-construction dropoffs plus stash
+		// build tasks whose foundation does not exist yet. Positions are gathered once per
+		// selection (scanning every object per source was a large-sprawl frame cost).
+		struct SupplyClaimIndex { std::vector<Coord3D> positions; NameKeyType centerDockKey = NAMEKEY_INVALID; };
+		static void collectSupplyClaimCallback(Object* obj, void* userData)
 		{
-			if (player == nullptr || supplySource == nullptr || supplySource->getPosition() == nullptr)
-			{
-				return 0;
-			}
-			NearbySupplyDropoffSearchContext ctx = {
-				supplySource->getPosition(),
-				maxDistance * maxDistance,
-				TheNameKeyGenerator != nullptr ? TheNameKeyGenerator->nameToKey("SupplyCenterDockUpdate") : NAMEKEY_INVALID,
-				false,
-				true,
-				0
-			};
-			player->iterateObjects(findNearbySupplyDropoffCallback, &ctx);
-			int claims = ctx.count;
+			if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead() || obj->getPosition() == nullptr) return;
+			SupplyClaimIndex* index = static_cast<SupplyClaimIndex*>(userData);
+			NearbySupplyDropoffSearchContext probe = { obj->getPosition(), 0.0f, index->centerDockKey, false, true, 0 };
+			findNearbySupplyDropoffCallback(obj, &probe);
+			if (probe.found) index->positions.push_back(*obj->getPosition());
+		}
+
+		SupplyClaimIndex buildSupplyClaimIndex(Player* player)
+		{
+			SupplyClaimIndex index;
+			if (player == nullptr) return index;
+			// Without the dock key the dropoff callback would accept every structure.
+			index.centerDockKey = TheNameKeyGenerator != nullptr ? TheNameKeyGenerator->nameToKey("SupplyCenterDockUpdate") : NAMEKEY_INVALID;
+			if (index.centerDockKey == NAMEKEY_INVALID) return index;
+			player->iterateObjects(collectSupplyClaimCallback, &index);
 			for (const SpecialTaskReservation* task : m_autonomy.taskReservationManager.findBuildTasks())
 			{
 				if (task == nullptr || task->targetObjectId != 0u || !isSupplyDropoffTemplateName(task->expectedTemplate)) continue;
 				if (task->state == SpecialTaskState::Complete || task->state == SpecialTaskState::Failed
 					|| task->state == SpecialTaskState::Expired) continue;
-				if (distanceSq2D(&task->targetPosition, supplySource->getPosition()) <= maxDistance * maxDistance) ++claims;
+				index.positions.push_back(task->targetPosition);
 			}
+			return index;
+		}
+
+		static int countSupplyClaims(const SupplyClaimIndex& index, Object* supplySource, Real maxDistance)
+		{
+			if (supplySource == nullptr || supplySource->getPosition() == nullptr) return 0;
+			int claims = 0;
+			for (const Coord3D& pos : index.positions)
+				if (distanceSq2D(&pos, supplySource->getPosition()) <= maxDistance * maxDistance) ++claims;
 			return claims;
 		}
+
 
 		struct NearbyStructureClearanceContext
 		{
@@ -1208,6 +1221,7 @@
 			const Real minDistSq = std::max<Real>(0.0f, minDistance) * std::max<Real>(0.0f, minDistance);
 			const Real maxDistSq = std::max<Real>(0.0f, maxDistance) * std::max<Real>(0.0f, maxDistance);
 			const bool hasMaxDistance = maxDistance > 0.0f;
+			const SupplyClaimIndex claimIndex = buildSupplyClaimIndex(player);
 
 			for (const SupplySourceInfo& info : sources)
 			{
@@ -1224,7 +1238,7 @@
 				{
 					continue;
 				}
-				const int claims = countOwnedSupplyClaims(player, info.source, 430.0f);
+				const int claims = countSupplyClaims(claimIndex, info.source, 430.0f);
 				if (claims == 0 && preferUnclaimed)
 				{
 					if (bestUnclaimed == nullptr || distSq < bestUnclaimedDistSq)

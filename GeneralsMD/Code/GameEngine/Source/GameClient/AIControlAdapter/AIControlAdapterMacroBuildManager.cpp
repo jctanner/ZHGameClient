@@ -355,10 +355,13 @@ AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 		// Income growth competes in the existing macro intent plan. Missing
 		// essential producers retain higher priority; funded capacity grows next.
 		// Expansion first: urgent supply expansion (108) outranks market growth.
+		// Once market sprawl is active (Palace + 2 markets) in-zone market growth keeps one
+		// slot so the remaining concurrent market slots go to sprawl footholds.
+		const bool marketSprawlActive = snapshot.completedBlackMarkets >= 2;
 		AddIntent(plan, "profile_income", "Game.BuildBlackMarketSmart", 107,
 			snapshot.effectiveTotalBlackMarkets < snapshot.sprawlMarketCap,
 			"profile_income_growth", snapshot.blackMarketCost,
-			snapshot.inProgressBlackMarkets, snapshot.profilePlan.maxConcurrentMarkets,
+			snapshot.inProgressBlackMarkets, marketSprawlActive ? 1 : snapshot.profilePlan.maxConcurrentMarkets,
 			snapshot.blackMarketBuildCooldownReady, snapshot.marketGrowthSpend,
 			true, AIControlAdapterMacroBuildExecutor::MacroBuild, snapshot.money);
 	}

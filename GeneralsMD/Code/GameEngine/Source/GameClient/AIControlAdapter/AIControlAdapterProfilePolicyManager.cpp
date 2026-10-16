@@ -239,6 +239,8 @@ AIControlAdapterProfileSpendPlan AIControlAdapterProfilePolicyManager::ResolveSp
 	plan.combatProtectedCash = threatResponse ? 1000u : std::max(config.reserveCash + 2500u, plan.growthProtectedCash);
 	plan.maxConcurrentMarkets = !threatResponse && completedMarkets >= 3
 		&& availableCash >= plan.incomeProtectedCash + 5000u ? 2 : 1;
+	// Surplus cash: market construction (including market sprawl footholds) runs in parallel.
+	if (availableCash >= config.reserveCash + config.threatSurplusCashFloat) plan.maxConcurrentMarkets = 4;
 	plan.reason = plan.surplusUnderThreat ? "threat_response_surplus" : threatResponse ? "threat_response" : sustainedOffense ? "income_funded_offense" : "quiet_economic_growth";
 	return plan;
 }

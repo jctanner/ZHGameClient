@@ -97,6 +97,7 @@ extern void skirmishUpdateSlotList();
 #include <string>
 #include <cstring>
 #include <algorithm>
+#include <functional>
 #include <cctype>
 #include <cmath>
 #include <map>
@@ -561,6 +562,11 @@ namespace
 		std::vector<FailedFootholdPoint> failedMarketFootholdPoints;
 		DWORD nextMarketFootholdTick = 0u;
 		nlohmann::json marketSprawlTelemetry = nlohmann::json::object();
+		// Surplus mode bulk job pass: per (zone anchor, command) failure backoff and a
+		// rotating zone cursor so development reaches every zone.
+		std::map<std::string, DWORD> surplusJobBackoff;
+		std::size_t surplusZoneCursor = 0u;
+		nlohmann::json surplusModeTelemetry = nlohmann::json::object();
 	};
 
 	#include "AIControlAdapterLog.inl"
@@ -2201,7 +2207,7 @@ namespace
 				auto& pendingList = m_autonomy.state.pendingFootholdAnchors;
 				pendingList.erase(std::remove_if(pendingList.begin(), pendingList.end(), [&](const AutonomyState::PendingFootholdAnchor& pending)
 				{
-					const bool expired = pendingNow - pending.createdTick > 150000u;
+					const bool expired = pendingNow - pending.createdTick > 240000u;
 					if (expired)
 					{
 						adapterLog("zone_anchor_rejected type=%s reason=pending_foothold_expired x=%.1f y=%.1f",
@@ -3552,6 +3558,10 @@ namespace
 							player != nullptr ? player->getBaseSide().str() : "",
 							scudTemplate.c_str());
 					ok = queueCombatUnitAtWarFactory(player, "scudlauncher", parseQueueCountArg(message), outReason);
+				}
+				else if (cmdString == "Game.BuildCommandCenterSmart")
+				{
+					ok = executeGameBuildCommandCenterSmart(message, outReason);
 				}
 				else if (cmdString == "Game.PurchaseScience")
 				{
@@ -4943,7 +4953,7 @@ namespace
 					int pendingMarketFootholds = 0;
 					for (const auto& pending : m_autonomy.state.pendingFootholdAnchors)
 						if (pending.anchorType == ZoneAnchorType::MarketFoothold) ++pendingMarketFootholds;
-					const int marketFootholdCap = economicSurplusCash ? 3 : 1;
+					const int marketFootholdCap = sprawlPlan.surplusMode ? 8 : (economicSurplusCash ? 3 : 1);
 					const char* sprawlReason = "inactive";
 					nlohmann::json sprawlCandidateJson = nullptr;
 					if (!sprawlPlan.active || !hasCompletedPalace || completedBlackMarkets < 2u) sprawlReason = "waiting_for_palace_and_markets";
@@ -4952,6 +4962,48 @@ namespace
 					else if (!macroSpendPlan.economyGrowth.allowed) sprawlReason = macroSpendPlan.economyGrowth.reason != nullptr ? macroSpendPlan.economyGrowth.reason : "spend_blocked";
 					else if (pendingMarketFootholds >= marketFootholdCap) sprawlReason = "pending_cap";
 					else if (AIControlAdapterIsTickInFuture(m_autonomy.state.nextMarketFootholdTick, sprawlNow)) sprawlReason = "cooldown";
+					else if (AutonomyState::PendingFootholdAnchor* unbuilt = [&]() -> AutonomyState::PendingFootholdAnchor*
+					{
+						// A shrouded or distant site first gets only a worker move; keep re-issuing
+						// the build at pending sites until a Black Market foundation exists there.
+						for (auto& pending : m_autonomy.state.pendingFootholdAnchors)
+						{
+							if (pending.anchorType != ZoneAnchorType::MarketFoothold) continue;
+							bool hasMarket = false;
+							for (const AutonomyOwnedObjectSnapshot& owned : ownedObjects)
+							{
+								if (!owned.isBlackMarket || owned.object == nullptr || owned.object->getPosition() == nullptr) continue;
+								const Real dx = owned.object->getPosition()->x - pending.targetX;
+								const Real dy = owned.object->getPosition()->y - pending.targetY;
+								if (dx * dx + dy * dy < 300.0f * 300.0f) { hasMarket = true; break; }
+							}
+							if (!hasMarket) return &pending;
+						}
+						return nullptr;
+					}())
+					{
+						AutonomyZone footholdZone = {};
+						footholdZone.center.x = unbuilt->targetX;
+						footholdZone.center.y = unbuilt->targetY;
+						footholdZone.center.z = 0.0f;
+						footholdZone.anchorId = static_cast<ObjectID>(unbuilt->syntheticAnchorId);
+						footholdZone.isMainBase = false;
+						footholdZone.anchorType = ZoneAnchorType::MarketFoothold;
+						std::string followReason;
+						struct ExpansionPurposeScope
+						{
+							bool& value;
+							explicit ExpansionPurposeScope(bool& flag) : value(flag) { value = true; }
+							~ExpansionPurposeScope() { value = false; }
+						} expansionPurpose(m_ruleExpansionConstructionScope);
+						const bool followIssued = trySpecificZoneCommand("auto_market_foothold", "Game.BuildBlackMarketSmart",
+							footholdZone, nlohmann::json::object(), followReason);
+						m_autonomy.state.nextMarketFootholdTick = sprawlNow + (sprawlPlan.surplusMode ? 2000u : 6000u);
+						sprawlReason = followIssued ? "pending_site_followup" : "pending_site_followup_failed";
+						sprawlCandidateJson = {{"x", unbuilt->targetX}, {"y", unbuilt->targetY}, {"issued", followIssued}, {"detail", followReason}, {"followup", true}};
+						adapterLog("market_sprawl_foothold_followup x=%.1f y=%.1f issued=%d detail=%s",
+							unbuilt->targetX, unbuilt->targetY, followIssued ? 1 : 0, followReason.c_str());
+					}
 					else
 					{
 						auto& failedPoints = m_autonomy.state.failedMarketFootholdPoints;
@@ -5020,8 +5072,11 @@ namespace
 									if (nearestEnemy < (forwardPhase ? 600.0f : 900.0f)) continue;
 									const Real dmx = candidate.x - mainCenter.x, dmy = candidate.y - mainCenter.y;
 									const Real mainDistance = std::sqrt(dmx * dmx + dmy * dmy);
-									const Real enemyTerm = enemyStructures.empty() ? 0.0f : (forwardPhase ? -nearestEnemy : nearestEnemy);
-									const Real score = enemyTerm - 0.3f * mainDistance;
+									// Contiguity dominates: the enemy term is capped so distant empty map
+									// edges never outrank nearer ground next to our territory.
+									const Real cappedEnemy = std::min(nearestEnemy, 2000.0f);
+									const Real enemyTerm = enemyStructures.empty() ? 0.0f : (forwardPhase ? -cappedEnemy : cappedEnemy);
+									const Real score = enemyTerm - 1.0f * mainDistance;
 									if (score > bestScore) { bestScore = score; best = candidate; found = true; }
 								}
 							}
@@ -5047,7 +5102,7 @@ namespace
 							} expansionPurpose(m_ruleExpansionConstructionScope);
 							const bool footholdIssued = trySpecificZoneCommand("auto_market_foothold", "Game.BuildBlackMarketSmart",
 								footholdZone, nlohmann::json::object(), footholdBuildReason);
-							m_autonomy.state.nextMarketFootholdTick = sprawlNow + 6000u;
+							m_autonomy.state.nextMarketFootholdTick = sprawlNow + (sprawlPlan.surplusMode ? 2000u : 6000u);
 							sprawlCandidateJson = {{"x", best.x}, {"y", best.y}, {"issued", footholdIssued}, {"detail", footholdBuildReason}};
 							if (footholdIssued)
 							{
@@ -5084,6 +5139,117 @@ namespace
 						{"established", establishedMarketFootholds},
 						{"last_candidate", sprawlCandidateJson}
 					};
+				}
+
+				// Surplus mode bulk job pass (economy-first, available cash >= surplusModeCash):
+				// money is not the constraint, so issue many construction jobs per pass directly
+				// to the executors (each claims its own worker and placement), bypassing the
+				// one-pick-per-pass planner and per-type cooldowns; failures back off per job.
+				if (m_autonomy.state.profileSpendPlan.active && m_autonomy.state.profileSpendPlan.surplusMode
+					&& !macroSpendEconomy.mainBaseCritical)
+				{
+					const DWORD jobNow = adapterGameplayTick();
+					auto& backoff = m_autonomy.state.surplusJobBackoff;
+					for (auto it = backoff.begin(); it != backoff.end(); )
+						it = AIControlAdapterIsTickInFuture(it->second, jobNow) ? std::next(it) : backoff.erase(it);
+					int jobBudget = 10;
+					// Each job runs a placement and worker search; cap the pass by time so a large
+					// sprawl cannot stall the frame (remaining jobs run on later passes).
+					const std::uint64_t jobPassStartUs = profileNowUs();
+					bool jobTimeBudgetHit = false;
+					int ccJobs = 0, expansionJobs = 0, zoneJobs = 0, jobFailures = 0;
+					std::map<std::string, int> zoneJobsByCommand;
+					auto runJob = [&](const std::string& key, const std::function<bool(std::string&)>& job) -> bool
+					{
+						if (jobBudget <= 0 || backoff.count(key) != 0u) return false;
+						if (profileNowUs() - jobPassStartUs > 25000u) { jobTimeBudgetHit = true; jobBudget = 0; return false; }
+						std::string jobReason;
+						const bool ok = job(jobReason);
+						--jobBudget;
+						if (!ok)
+						{
+							++jobFailures;
+							backoff[key] = jobNow + 20000u;
+							adapterLogOnChange("surplus_job_fail:" + key, "surplus_job_failed key=%s reason=%s", key.c_str(), jobReason.c_str());
+						}
+						return ok;
+					};
+					// 1. Extra Command Centers as worker producers (one per 50 of the worker limit).
+					int commandCenters = 0;
+					for (const AutonomyOwnedObjectSnapshot& owned : ownedObjects)
+					{
+						if (owned.object == nullptr || owned.object->getTemplate() == nullptr) continue;
+						if (containsIgnoreCase(owned.object->getTemplate()->getName().str(), "commandcenter")) ++commandCenters;
+					}
+					const int desiredCommandCenters = std::max(1, (m_autonomy.state.profileSpendPlan.workerLimit + 49) / 50);
+					if (commandCenters < desiredCommandCenters && autonomyRuleEnabled("worker_recruitment")
+						&& runJob("command_center", [&](std::string& r) { return tryMacroBuildWithFallback("Game.BuildCommandCenterSmart", true, r); }))
+						++ccJobs;
+					// 2. Parallel supply expansion: the chooser takes the nearest unclaimed source
+					//    and counts pending stash tasks as claims, so each call targets a new site.
+					if (autonomyRuleEnabled("zone_expansion"))
+					{
+						for (int i = 0; i < 4 && jobBudget > 0; ++i)
+						{
+							if (!runJob("supply_expansion_" + std::to_string(i), [&](std::string& r) { return trySupplyExpansionBuild(r); })) break;
+							++expansionJobs;
+						}
+					}
+					// 3. Development package for every non-main zone (one item per zone per pass),
+					//    rotating so all zones are reached: Tunnel, Stinger, Barracks, Arms Dealer, 2 markets.
+					struct DevelopmentItem { const char* command; const char* rule; Int AutonomyZoneCounts::*count; Int AutonomyZoneCounts::*inProgress; Int desired; };
+					static const DevelopmentItem developmentItems[] = {
+						{ "Game.BuildTunnelNetwork", "static_defense", &AutonomyZoneCounts::tunnels, &AutonomyZoneCounts::tunnelsInProgress, 1 },
+						{ "Game.BuildStingerSite", "static_defense", &AutonomyZoneCounts::stingers, &AutonomyZoneCounts::stingersInProgress, 1 },
+						{ "Game.BuildBarracksSmart", "capacity_growth", &AutonomyZoneCounts::barracks, &AutonomyZoneCounts::barracksInProgress, 1 },
+						{ "Game.BuildArmsDealerSmart", "capacity_growth", &AutonomyZoneCounts::armsDealers, &AutonomyZoneCounts::armsDealersInProgress, 1 },
+						{ "Game.BuildBlackMarketSmart", "market_growth", &AutonomyZoneCounts::blackMarkets, &AutonomyZoneCounts::blackMarketsInProgress, 2 },
+					};
+					const std::size_t zoneTotal = std::min(zones.size(), zoneCounts.size());
+					for (std::size_t step = 0; step < zoneTotal && jobBudget > 0; ++step)
+					{
+						const std::size_t zoneIdx = (m_autonomy.state.surplusZoneCursor + step) % zoneTotal;
+						const AutonomyZone& zone = zones[zoneIdx];
+						if (zone.isMainBase) continue;
+						const auto zoneThreat = m_autonomy.state.zoneThreats.find(static_cast<UnsignedInt>(zone.anchorId));
+						const bool zoneUnderAttack = zoneThreat != m_autonomy.state.zoneThreats.end()
+							&& jobNow - zoneThreat->second.lastSeenTick <= 15000u && zoneThreat->second.localEnemyCount > 0;
+						for (const DevelopmentItem& item : developmentItems)
+						{
+							const AutonomyZoneCounts& zc = zoneCounts[zoneIdx];
+							if (zc.*(item.count) + zc.*(item.inProgress) >= item.desired) continue;
+							if (zoneUnderAttack && std::strcmp(item.rule, "static_defense") != 0) continue;
+							if (!autonomyRuleEnabled(item.rule)) continue;
+							// Black Markets need a completed Palace (GLA prerequisite).
+							if (std::strcmp(item.command, "Game.BuildBlackMarketSmart") == 0 && !hasCompletedPalace) continue;
+							const std::string key = std::to_string(static_cast<unsigned int>(zone.anchorId)) + ":" + item.command;
+							if (runJob(key, [&](std::string& r) { return trySpecificZoneCommand("auto_surplus_zone", item.command, zone, nlohmann::json::object(), r); }))
+							{
+								++zoneJobs;
+								++zoneJobsByCommand[item.command];
+							}
+							break; // one item per zone per pass
+						}
+					}
+					if (zoneTotal > 0u) m_autonomy.state.surplusZoneCursor = (m_autonomy.state.surplusZoneCursor + 3u) % zoneTotal;
+					if (ccJobs + expansionJobs + zoneJobs > 0) issued = true;
+					m_autonomy.state.surplusModeTelemetry = {
+						{"active", true},
+						{"worker_limit", m_autonomy.state.profileSpendPlan.workerLimit},
+						{"command_centers", commandCenters},
+						{"desired_command_centers", desiredCommandCenters},
+						{"jobs_last_pass", {{"command_center", ccJobs}, {"supply_expansion", expansionJobs}, {"zone_development", zoneJobs}, {"failures", jobFailures}}},
+						{"zone_jobs_by_command", zoneJobsByCommand},
+						{"backoff_entries", static_cast<int>(backoff.size())},
+						{"time_budget_hit", jobTimeBudgetHit},
+						{"pass_ms", static_cast<double>(profileNowUs() - jobPassStartUs) / 1000.0}
+					};
+					adapterLog("surplus_job_pass cc=%d expansion=%d zone=%d failures=%d budget_left=%d backoff=%d",
+						ccJobs, expansionJobs, zoneJobs, jobFailures, jobBudget, static_cast<int>(backoff.size()));
+				}
+				else
+				{
+					m_autonomy.state.surplusModeTelemetry = {{"active", false}};
 				}
 
 				if (!issued && reason.empty())
@@ -8873,6 +9039,7 @@ namespace
 					{"surplus_under_threat", m_autonomy.state.profileSpendPlan.surplusUnderThreat},
 					{"opening_income_reserve", m_autonomy.state.profileSpendPlan.openingIncomeReserve},
 					{"army_floor", m_autonomy.state.profileSpendPlan.armyFloor},
+					{"surplus_mode", m_autonomy.state.profileSpendPlan.surplusMode},
 					{"wave_peak", m_autonomy.state.profileWavePeak},
 					{"response_until_tick", m_autonomy.state.profileThreatUntilTick},
 					{"sustained_offense", m_autonomy.state.profileSpendPlan.sustainedOffense},
@@ -9773,6 +9940,7 @@ namespace
 			const int netCashPerMinute = static_cast<int>(std::floor(m_autonomy.state.smoothedNetCashPerMinute));
 			result["income_rate"] = netCashPerMinute;
 			result["market_sprawl"] = m_autonomy.state.marketSprawlTelemetry;
+			result["surplus_mode"] = m_autonomy.state.surplusModeTelemetry;
 			result["game_speed"] = buildGameSpeedState();
 			result["net_cash_per_minute"] = netCashPerMinute;
 			const AIControlAdapterProfilePolicyConfig zoneTargetPolicyConfig = resolveAutonomyProfilePolicyConfig();
@@ -16982,6 +17150,36 @@ namespace
 				return;
 			}
 
+			// Surplus mode: workers are builders and money is not a constraint, so keep every
+			// Command Center producing up to the territory-scaled worker limit.
+			if (player == resolveAutonomyPlayer() && m_autonomy.state.profileSpendPlan.active
+				&& m_autonomy.state.profileSpendPlan.surplusMode)
+			{
+				std::vector<AutomationOwnedObjectSnapshot> owned;
+				collectOwnedAutomationObjects(player, owned);
+				int queued = 0;
+				std::string lastReason;
+				for (const AutomationOwnedObjectSnapshot& object : owned)
+				{
+					if (object.object == nullptr || object.underConstruction || !containsIgnoreCase(object.name, "commandcenter")) continue;
+					nlohmann::json args = nlohmann::json::object({
+						{"count", 2},
+						{"producer_object_id", static_cast<Int>(object.object->getID())}});
+					if (m_automation.workerRule.hasExplicitPlayerIndex) args["player_index"] = m_automation.workerRule.playerIndex;
+					nlohmann::json message = {
+						{"type", "SessionCommand"},
+						{"request_id", AIControlAdapterUiUtils::FormatPlayerTickRequestId("auto_surplus_worker", player->getPlayerIndex(), static_cast<unsigned int>(now))},
+						{"cmd", "Game.BuildWorker"},
+						{"args", args}};
+					std::string reason;
+					if (executeGameBuildWorker(message, reason)) ++queued; else lastReason = reason;
+				}
+				m_automation.workerRule.nextAllowedTick = now + 1500u;
+				adapterLogOnChange("surplus_worker_production", "surplus_worker_production queued_producers=%d limit=%d reason=%s",
+					queued, m_autonomy.state.profileSpendPlan.workerLimit, queued > 0 ? "queued" : lastReason.c_str());
+				if (queued > 0) m_cache.valid = false;
+				return;
+			}
 			refreshOwnedObjectCache(player);
 			const Int idleWorkers = m_cache.idleWorkersTotal;
 			const AIControlAdapterEconomyManager economyManager;

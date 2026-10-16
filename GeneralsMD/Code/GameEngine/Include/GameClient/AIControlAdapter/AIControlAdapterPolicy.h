@@ -135,6 +135,13 @@ struct AIControlAdapterProfilePolicyConfig
 	// Available cash above reserve + this float lets growth/offense continue
 	// under non-core pressure instead of hoarding through a permanent response.
 	unsigned int threatSurplusCashFloat = 25000u;
+	// Surplus mode: with this much available cash, money is not the constraint;
+	// construction and worker throughput scale with territory instead.
+	unsigned int surplusModeCash = 100000u;
+	// Surplus-mode unit caps keep the simulation playable (~900 units dropped the
+	// match to ~1 fps at 5x); user-chosen values.
+	int surplusWorkerCap = 150;
+	int surplusArmyCap = 350;
 };
 
 // One profile plan feeds construction, workforce and unit production. Cash
@@ -153,6 +160,7 @@ struct AIControlAdapterProfileSpendPlan
 	// pressure is allowed once the army meets it.
 	int armyFloor = 0;
 	bool armyFloorMet = true;
+	bool surplusMode = false;
 	int armyTarget = 0;
 	int workerLimit = 80;
 	int maxConcurrentMarkets = 1;

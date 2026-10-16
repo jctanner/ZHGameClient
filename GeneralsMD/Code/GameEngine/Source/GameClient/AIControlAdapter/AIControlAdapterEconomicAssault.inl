@@ -199,6 +199,15 @@
 			AIControlAdapterProfileSpendPlan& plan = m_autonomy.state.profileSpendPlan;
 			plan.armyFloor = std::min(150, (wave * 5 + 3) / 4);
 			plan.armyFloorMet = mobileArmy >= plan.armyFloor;
+			// Surplus mode: workers scale with territory (they are builders, not income).
+			plan.surplusMode = cash >= config.surplusModeCash;
+			if (plan.surplusMode)
+			{
+				const int zoneCount = m_autonomy.state.telemetryZones.is_array() ? static_cast<int>(m_autonomy.state.telemetryZones.size()) : 0;
+				plan.workerLimit = std::max(plan.workerLimit, std::min(config.surplusWorkerCap, 40 + 4 * zoneCount));
+				plan.armyTarget = std::max(plan.armyFloor, std::min(plan.armyTarget, config.surplusArmyCap));
+				plan.maxConcurrentMarkets = std::max(plan.maxConcurrentMarkets, 12);
+			}
 			if (!plan.sustainedOffense) plan.armyTarget = std::max(plan.armyTarget, plan.armyFloor);
 		}
 
@@ -240,7 +249,9 @@
 				// surplus cash and the army target); refusing here starved every other intent.
 				const int target = containsIgnoreCase(name, "armsdealer")
 					? std::max(std::min(8, 2 + m_autonomy.state.profileCompletedMarkets / 3), m_autonomy.state.profileArmsDealerTarget)
-					: containsIgnoreCase(name, "barracks") ? std::max(2, m_autonomy.state.profileBarracksTarget) : 1;
+					: containsIgnoreCase(name, "barracks") ? std::max(2, m_autonomy.state.profileBarracksTarget)
+					// Surplus mode: extra Command Centers produce workers (one per 50 of the limit).
+					: plan.surplusMode ? std::max(1, (plan.workerLimit + 49) / 50) : 1;
 				if (existing >= target) { reason = "profile_capacity_satisfied"; return false; }
 				category = existing == 0 ? StrategicSpendCategory::ProducerRecovery : StrategicSpendCategory::ProductionGrowth;
 			}
@@ -290,7 +301,8 @@
 			auto* queue = producer->getProductionUpdateInterface();
 			int pendingDepth = 0;
 			for (const auto& pending : m_pendingUnitQueues) if (pending.producerId == producer->getID()) ++pendingDepth;
-			if (queue == nullptr || queue->getProductionCount() + pendingDepth >= 2) { reason = "profile_shallow_queue_full"; return false; }
+			const int queueDepthLimit = worker && plan.surplusMode ? 4 : 2;
+			if (queue == nullptr || queue->getProductionCount() + pendingDepth >= queueDepthLimit) { reason = "profile_shallow_queue_full"; return false; }
 			return true;
 		}
 
