@@ -146,6 +146,13 @@ struct AIControlAdapterProfileSpendPlan
 	bool deferIncomeUnderThreat = true;
 	bool sustainedOffense = false;
 	bool surplusUnderThreat = false;
+	// Economic opening: cash held for the Palace (if missing) plus the first Black
+	// Market until one exists; applied to army, worker and non-income construction.
+	unsigned int openingIncomeReserve = 0u;
+	// Standing army floor sized to recently observed attack waves; expansion under
+	// pressure is allowed once the army meets it.
+	int armyFloor = 0;
+	bool armyFloorMet = true;
 	int armyTarget = 0;
 	int workerLimit = 80;
 	int maxConcurrentMarkets = 1;
@@ -1005,6 +1012,9 @@ struct AIControlAdapterZoneSeedPackageInputs
 	int barracksInProgress = 0;
 	int armsDealers = 0;
 	int armsDealersInProgress = 0;
+	// Economy-first with surplus cash: expansion zones get producers (Barracks,
+	// Arms Dealer) instead of stopping after defenses while coverage is urgent.
+	bool fundedZoneProduction = false;
 };
 
 struct AIControlAdapterZoneSeedPackageDecision

@@ -806,6 +806,8 @@
 			Real maxDistSq;
 			NameKeyType centerDockKey;
 			bool found;
+			bool includeUnderConstruction = false; // count foundations as claims too
+			int count = 0;
 		};
 
 		static void findNearbySupplyDropoffCallback(Object* obj, void* userData)
@@ -814,7 +816,9 @@
 			{
 				return;
 			}
-			if (!isCompletedStructure(obj))
+			const bool countsAsClaim = static_cast<NearbySupplyDropoffSearchContext*>(userData)->includeUnderConstruction
+				&& obj->isKindOf(KINDOF_STRUCTURE) && obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION);
+			if (!isCompletedStructure(obj) && !countsAsClaim)
 			{
 				return;
 			}
@@ -825,6 +829,7 @@
 				if (ctx->sourcePos != nullptr && pos != nullptr && distanceSq2D(ctx->sourcePos, pos) <= ctx->maxDistSq)
 				{
 					ctx->found = true;
+					++ctx->count;
 				}
 				return;
 			}
@@ -851,6 +856,7 @@
 			if (distanceSq2D(ctx->sourcePos, pos) <= ctx->maxDistSq)
 			{
 				ctx->found = true;
+					++ctx->count;
 			}
 		}
 
@@ -873,6 +879,34 @@
 			};
 			player->iterateObjects(findNearbySupplyDropoffCallback, &ctx);
 			return ctx.found;
+		}
+
+		// Our claims on a supply source: completed or under-construction dropoffs nearby,
+		// plus stash build tasks whose foundation does not exist yet.
+		int countOwnedSupplyClaims(Player* player, Object* supplySource, Real maxDistance)
+		{
+			if (player == nullptr || supplySource == nullptr || supplySource->getPosition() == nullptr)
+			{
+				return 0;
+			}
+			NearbySupplyDropoffSearchContext ctx = {
+				supplySource->getPosition(),
+				maxDistance * maxDistance,
+				TheNameKeyGenerator != nullptr ? TheNameKeyGenerator->nameToKey("SupplyCenterDockUpdate") : NAMEKEY_INVALID,
+				false,
+				true,
+				0
+			};
+			player->iterateObjects(findNearbySupplyDropoffCallback, &ctx);
+			int claims = ctx.count;
+			for (const SpecialTaskReservation* task : m_autonomy.taskReservationManager.findBuildTasks())
+			{
+				if (task == nullptr || task->targetObjectId != 0u || !isSupplyDropoffTemplateName(task->expectedTemplate)) continue;
+				if (task->state == SpecialTaskState::Complete || task->state == SpecialTaskState::Failed
+					|| task->state == SpecialTaskState::Expired) continue;
+				if (distanceSq2D(&task->targetPosition, supplySource->getPosition()) <= maxDistance * maxDistance) ++claims;
+			}
+			return claims;
 		}
 
 		struct NearbyStructureClearanceContext
@@ -1155,6 +1189,9 @@
 			return best;
 		}
 
+		// Sprawl grows outward: nearest unclaimed source beyond the minimum ring first. A
+		// source we already hold is only reused while it has fewer than two of our claims
+		// (stacking stashes at one pile added income cost but no territory).
 		Object* chooseRemoteSupplySource(
 			const std::vector<SupplySourceInfo>& sources,
 			const Coord3D* remoteOrigin,
@@ -1164,10 +1201,10 @@
 			Real minDistance = 0.0f,
 			Real maxDistance = 0.0f)
 		{
-			Object* best = nullptr;
-			Real bestDistSq = 0.0f;
 			Object* bestUnclaimed = nullptr;
 			Real bestUnclaimedDistSq = 0.0f;
+			Object* bestLightlyClaimed = nullptr;
+			Real bestLightlyClaimedDistSq = 0.0f;
 			const Real minDistSq = std::max<Real>(0.0f, minDistance) * std::max<Real>(0.0f, minDistance);
 			const Real maxDistSq = std::max<Real>(0.0f, maxDistance) * std::max<Real>(0.0f, maxDistance);
 			const bool hasMaxDistance = maxDistance > 0.0f;
@@ -1183,41 +1220,29 @@
 					continue;
 				}
 				const Real distSq = distanceSq2D(info.source->getPosition(), remoteOrigin);
-				const bool isUnclaimed = !hasNearbyOwnedSupplyDropoff(player, info.source, 430.0f);
 				if (distSq < minDistSq || (hasMaxDistance && distSq > maxDistSq))
 				{
 					continue;
 				}
-				if (best == nullptr || distSq > bestDistSq)
+				const int claims = countOwnedSupplyClaims(player, info.source, 430.0f);
+				if (claims == 0 && preferUnclaimed)
 				{
-					best = info.source;
-					bestDistSq = distSq;
+					if (bestUnclaimed == nullptr || distSq < bestUnclaimedDistSq)
+					{
+						bestUnclaimed = info.source;
+						bestUnclaimedDistSq = distSq;
+					}
 				}
-
-				if (!preferUnclaimed)
+				else if (claims < 2)
 				{
-					continue;
-				}
-				if (!isUnclaimed)
-				{
-					continue;
-				}
-				if (bestUnclaimed == nullptr || distSq > bestUnclaimedDistSq)
-				{
-					bestUnclaimed = info.source;
-					bestUnclaimedDistSq = distSq;
+					if (bestLightlyClaimed == nullptr || distSq < bestLightlyClaimedDistSq)
+					{
+						bestLightlyClaimed = info.source;
+						bestLightlyClaimedDistSq = distSq;
+					}
 				}
 			}
-
-			if (bestUnclaimed != nullptr)
-			{
-				return bestUnclaimed;
-			}
-			if (best != nullptr)
-			{
-				return best;
-			}
-			return nullptr;
+			return bestUnclaimed != nullptr ? bestUnclaimed : bestLightlyClaimed;
 		}
 
 		bool findBuildLocationNearSupply(Player* player, Object* worker, Object* supplySource, const ThingTemplate* buildingTemplate, Coord3D& outLocation, Real& outAngle)

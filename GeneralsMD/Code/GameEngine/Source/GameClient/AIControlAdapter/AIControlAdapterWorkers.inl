@@ -393,6 +393,10 @@
 			{
 				return false;
 			}
+			if (isWorkerForcedToSupply(worker))
+			{
+				return false;
+			}
 			// Extra guard: if this worker is currently assigned as builder for an
 			// under-construction structure, treat it as not available even if AI
 			// idle/busy briefly reports an inconsistent value.
@@ -412,9 +416,22 @@
 			return true;
 		}
 
+		// A GLA worker forced into the supply "wanting" state (e.g. freshly produced) returns to
+		// supply-truck mode right after a construct order and never leaves it, holding the build.
+		static bool isWorkerForcedToSupply(const Object* worker)
+		{
+			const AIUpdateInterface* ai = worker != nullptr ? worker->getAI() : nullptr;
+			const SupplyTruckAIInterface* supply = ai != nullptr ? ai->getSupplyTruckAIInterface() : nullptr;
+			return supply != nullptr && supply->isForcedIntoWantingState();
+		}
+
 		bool isWorkerFallbackAvailableForNewBuild(Object* worker, bool checkReservation = true)
 		{
 			if (worker == nullptr || worker->isEffectivelyDead())
+			{
+				return false;
+			}
+			if (isWorkerForcedToSupply(worker))
 			{
 				return false;
 			}
@@ -540,6 +557,18 @@
 
 			WorkerSearchContext ctx = { this, std::vector<Object*>(), std::vector<Object*>(), nullptr };
 			player->iterateObjects(findWorkerCallback, &ctx);
+			// A GLA worker ferrying supplies can keep a construct order pending forever
+			// (it waits for its supply logic to go idle), so try non-ferrying workers first.
+			const auto ferryingBoundary = std::stable_partition(ctx.availableFallbackDozers.begin(), ctx.availableFallbackDozers.end(), [](Object* worker)
+			{
+				const AIUpdateInterface* ai = worker != nullptr ? worker->getAI() : nullptr;
+				const SupplyTruckAIInterface* supply = ai != nullptr ? ai->getSupplyTruckAIInterface() : nullptr;
+				return supply == nullptr || !supply->isCurrentlyFerryingSupplies();
+			});
+			if (ferryingBoundary != ctx.availableFallbackDozers.begin())
+			{
+				ctx.availableFallbackDozers.erase(ferryingBoundary, ctx.availableFallbackDozers.end());
+			}
 			if (requireIdle)
 			{
 				std::vector<Object*>* candidates = &ctx.availableIdleDozers;
@@ -585,6 +614,10 @@
 			if (!ctx.availableIdleDozers.empty())
 			{
 				return ctx.availableIdleDozers.front();
+			}
+			if (!ctx.availableFallbackDozers.empty())
+			{
+				return ctx.availableFallbackDozers.front();
 			}
 			if (ctx.firstDozer == nullptr)
 			{

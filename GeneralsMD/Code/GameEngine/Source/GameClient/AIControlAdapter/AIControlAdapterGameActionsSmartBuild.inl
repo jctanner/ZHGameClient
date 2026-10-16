@@ -209,6 +209,12 @@
 				if (preferRemoteSupply && hasRemoteOrigin)
 				{
 					selectedSupply = chooseRemoteSupplySource(sources, &remoteOrigin, player, true, avoidSupplyId, remoteMinDistance, remoteMaxDistance);
+					if (selectedSupply == nullptr)
+					{
+						// Sprawl requests do not fall back to the nearest (usually already held) source.
+						reason = "no_unclaimed_supply_source";
+						return false;
+					}
 				}
 				if (selectedSupply == nullptr)
 				{

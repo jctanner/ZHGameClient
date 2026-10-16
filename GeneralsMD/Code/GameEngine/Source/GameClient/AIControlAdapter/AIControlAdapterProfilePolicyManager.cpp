@@ -205,7 +205,8 @@ AIControlAdapterProfilePolicyConfig AIControlAdapterResolveProfilePolicyConfig(
 		config.stashWorkersPerStash = 2;
 		config.workerQueueCount = 1;
 		config.workerMinIdle = 2;
-		config.normalMaxConcurrentExpansionStashes = 1;
+		// Expansion first: several supply zones may be under construction at once.
+		config.normalMaxConcurrentExpansionStashes = 3;
 		config.sprawlMarketCap = std::max(config.sprawlMarketCap, 24);
 	}
 	return config;

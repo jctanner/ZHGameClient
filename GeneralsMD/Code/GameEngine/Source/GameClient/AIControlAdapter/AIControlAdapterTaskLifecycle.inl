@@ -71,6 +71,23 @@ Real getObjectMaxHealthForStrategicFoundation(Object* obj)
 	return body != nullptr ? body->getMaxHealth() : -1.0f;
 }
 
+// True while this worker has a pending build order on the foundation and is not held in
+// GLA supply-truck mode (which can leave a construct order pending indefinitely).
+static bool isWorkerBuildingFoundation(Object* worker, ObjectID foundationId)
+{
+	if (worker == nullptr || worker->isEffectivelyDead() || !worker->isKindOf(KINDOF_DOZER) || worker->getAI() == nullptr)
+	{
+		return false;
+	}
+	DozerAIInterface* dozer = worker->getAI()->getDozerAIInterface();
+	if (dozer == nullptr || !dozer->isTaskPending(DOZER_TASK_BUILD) || dozer->getTaskTarget(DOZER_TASK_BUILD) != foundationId)
+	{
+		return false;
+	}
+	const SupplyTruckAIInterface* supply = worker->getAI()->getSupplyTruckAIInterface();
+	return supply == nullptr || !supply->isCurrentlyFerryingSupplies();
+}
+
 bool hasActiveBuilderForFoundation(Player* player, ObjectID foundationId)
 {
 	if (player == nullptr || TheGameLogic == nullptr || static_cast<Int>(foundationId) <= 0)
@@ -81,10 +98,29 @@ bool hasActiveBuilderForFoundation(Player* player, ObjectID foundationId)
 	if (foundation == nullptr || foundation->isEffectivelyDead() ||
 		foundation->getControllingPlayer() != player ||
 		!foundation->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION)) return false;
-	Object* worker = TheGameLogic->findObjectByID(foundation->getBuilderID());
-	return worker != nullptr && !worker->isEffectivelyDead() &&
-		worker->getControllingPlayer() == player && worker->isKindOf(KINDOF_DOZER) &&
-		worker->getAI() != nullptr && !worker->getAI()->isIdle();
+	Object* recordedBuilder = TheGameLogic->findObjectByID(foundation->getBuilderID());
+	if (recordedBuilder != nullptr && recordedBuilder->getControllingPlayer() == player)
+	{
+		if (recordedBuilder->getAI() != nullptr && recordedBuilder->getAI()->getDozerAIInterface() == nullptr)
+		{
+			return !recordedBuilder->getAI()->isIdle();
+		}
+		if (isWorkerBuildingFoundation(recordedBuilder, foundationId))
+		{
+			return true;
+		}
+	}
+	// The recorded builder only changes once a replacement starts constructing, so a
+	// recovery worker still walking to the site must be found by its own build order.
+	for (Object* worker = TheGameLogic->getFirstObject(); worker != nullptr; worker = worker->getNextObject())
+	{
+		if (worker != recordedBuilder && worker->getControllingPlayer() == player
+			&& isWorkerBuildingFoundation(worker, foundationId))
+		{
+			return true;
+		}
+	}
+	return false;
 }
 
 void updateStrategicFoundationProgress(Object* foundation, AutonomyStrategicFoundationState& state, DWORD now)
@@ -397,6 +433,17 @@ void updateConstructionTaskLifecycle(Player* player)
 		// scan for matching foundation by template and position
 		if (foundFoundation == nullptr && task->targetObjectId == 0)
 		{
+			// Never bind a foundation another active build task already owns (two tasks
+			// sharing one foundation left the second build untracked); take the nearest.
+			std::set<unsigned int> claimedFoundations;
+			for (const SpecialTaskReservation* otherTask : m_autonomy.taskReservationManager.findBuildTasks())
+			{
+				if (otherTask == nullptr || otherTask == task || otherTask->targetObjectId == 0u) continue;
+				if (otherTask->state == SpecialTaskState::Complete || otherTask->state == SpecialTaskState::Failed
+					|| otherTask->state == SpecialTaskState::Expired) continue;
+				claimedFoundations.insert(otherTask->targetObjectId);
+			}
+			Real bestFoundationDistSq = 150.0f * 150.0f; // 150 units radius tolerance
 			for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
 			{
 				if (obj->isEffectivelyDead())
@@ -437,14 +484,18 @@ void updateConstructionTaskLifecycle(Player* player)
 				const Real dx = objPos->x - task->targetPosition.x;
 				const Real dy = objPos->y - task->targetPosition.y;
 				const Real distSq = dx * dx + dy * dy;
-				if (distSq > 150.0f * 150.0f) // 150 units radius tolerance
+				if (distSq > bestFoundationDistSq)
+				{
+					continue;
+				}
+				if (claimedFoundations.count(static_cast<unsigned int>(obj->getID())) != 0u)
 				{
 					continue;
 				}
 
-				// Found matching foundation
+				// Nearest unclaimed matching foundation so far
 				foundFoundation = obj;
-				break;
+				bestFoundationDistSq = distSq;
 			}
 		}
 
@@ -819,12 +870,34 @@ void attemptAbandonedFoundationRecovery(Player* player)
 				}
 			}
 
-			// Prefer idle workers
+			// Prefer idle workers. GLA workers also harvest and are rarely idle, so fall
+			// back to one with no pending dozer task (gathering or moving); never take a
+			// worker that is constructing or repairing.
 			AIUpdateInterface* ai = worker->getAI();
-			if (ai == nullptr || !ai->isIdle())
+			if (ai == nullptr)
 			{
 				continue;
 			}
+			const bool workerIdle = ai->isIdle();
+			if (!workerIdle)
+			{
+				DozerAIInterface* dozer = ai->getDozerAIInterface();
+				if (dozer == nullptr || dozer->isAnyTaskPending())
+				{
+					continue;
+				}
+			}
+			// The recorded builder already failed to build this foundation.
+			if (workerId == foundation->getBuilderID())
+			{
+				continue;
+			}
+			const SupplyTruckAIInterface* workerSupply = ai->getSupplyTruckAIInterface();
+			if (workerSupply != nullptr && workerSupply->isForcedIntoWantingState())
+			{
+				continue;
+			}
+			const bool workerFerrying = workerSupply != nullptr && workerSupply->isCurrentlyFerryingSupplies();
 
 			// Find closest idle worker
 			const Coord3D* workerPos = worker->getPosition();
@@ -862,6 +935,11 @@ void attemptAbandonedFoundationRecovery(Player* player)
 				{
 					score -= 1000000.0f;
 				}
+			}
+			if (!workerIdle)
+			{
+				// Ferrying workers may never leave supply mode; use them last.
+				score += workerFerrying ? 200000000.0f : 100000000.0f;
 			}
 
 			if (distSq < 1800.0f * 1800.0f && score < bestScore)
@@ -938,6 +1016,28 @@ void attemptAbandonedFoundationRecovery(Player* player)
 					static_cast<unsigned int>(foundationId),
 					static_cast<unsigned int>(bestWorker->getID()),
 					foundationTemplate->getName().str());
+
+				// The engine refuses a resume while the recorded builder still holds BUILD as its
+				// current task on this foundation (a GLA worker can keep it while harvesting), so
+				// release that builder with a player Stop first; it is processed before the resume.
+				Object* staleBuilder = TheGameLogic->findObjectByID(foundation->getBuilderID());
+				if (staleBuilder != nullptr && staleBuilder != bestWorker && !staleBuilder->isEffectivelyDead()
+					&& staleBuilder->getControllingPlayer() == player)
+				{
+					std::string releaseReason;
+					const bool released = executeScopedSelectionCommand(player, std::vector<ObjectID>(1, staleBuilder->getID()), releaseReason, [&]() -> bool
+					{
+						return appendPlayerMessage(player, GameMessage::MSG_DO_STOP) != nullptr;
+					});
+					adapterLog(
+						"construction_task_release_builder task=%u foundation=%u builder=%u replacement=%u issued=%d reason=%s",
+						task->taskId,
+						static_cast<unsigned int>(foundationId),
+						static_cast<unsigned int>(staleBuilder->getID()),
+						static_cast<unsigned int>(workerId),
+						released ? 1 : 0,
+						released ? "stuck_builder" : releaseReason.c_str());
+				}
 
 				// Use MSG_RESUME_CONSTRUCTION to continue building an existing foundation
 				// (MSG_DO_REPAIR is for damaged buildings, MSG_RESUME_CONSTRUCTION is for unfinished ones)

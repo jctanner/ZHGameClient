@@ -141,12 +141,13 @@ int main()
 		snapshot.profilePlan.incomeProtectedCash = 3000u;
 		snapshot.profilePlan.growthProtectedCash = 6000u;
 		snapshot.profilePlan.maxConcurrentMarkets = 1;
+		snapshot.profilePlan.armyFloorMet = false;
 		snapshot.profilePlan.reason = "threat_response";
 		AIControlAdapterStrategicSpendDecision decision =
 			manager.Evaluate(snapshot, StrategicSpendCategory::EconomyGrowth, 2500u);
 		expect(!decision.allowed, "Threat response without surplus should defer market growth");
 		decision = manager.Evaluate(snapshot, StrategicSpendCategory::Expansion, 1800u);
-		expect(!decision.allowed, "Threat response without surplus should defer expansion");
+		expect(!decision.allowed, "Threat response without surplus or army floor should defer expansion");
 
 		snapshot.profilePlan.surplusUnderThreat = true;
 		decision = manager.Evaluate(snapshot, StrategicSpendCategory::EconomyGrowth, 2500u);
@@ -164,6 +165,57 @@ int main()
 		snapshot.mainBaseCritical = true;
 		decision = manager.Evaluate(snapshot, StrategicSpendCategory::EconomyGrowth, 2500u);
 		expect(!decision.allowed, "Critical main base pressure should defer surplus growth");
+	}
+
+	{
+		// Economic opening reserve holds Palace + first market cash from non-income spend.
+		AIControlAdapterStrategicSpendSnapshot snapshot = makeBaseSnapshot();
+		snapshot.money = 9000u;
+		snapshot.completedMarkets = 0;
+		snapshot.profilePlan.active = true;
+		snapshot.profilePlan.threatResponse = false;
+		snapshot.profilePlan.incomeProtectedCash = 6000u;
+		snapshot.profilePlan.growthProtectedCash = 6000u;
+		snapshot.profilePlan.maxConcurrentMarkets = 1;
+		snapshot.profilePlan.openingIncomeReserve = 5000u;
+		snapshot.profilePlan.reason = "quiet_economic_growth";
+		AIControlAdapterStrategicSpendDecision decision =
+			manager.Evaluate(snapshot, StrategicSpendCategory::ProductionGrowth, 2500u);
+		expect(!decision.allowed, "Opening reserve should hold production growth below reserve plus income cost");
+		decision = manager.Evaluate(snapshot, StrategicSpendCategory::Expansion, 1800u);
+		expect(decision.allowed, "Expansion first: the opening reserve must not block supply expansion");
+		decision = manager.Evaluate(snapshot, StrategicSpendCategory::TechPrerequisite, 2500u);
+		expect(decision.allowed, "Opening reserve must not block the Palace tech prerequisite");
+		decision = manager.Evaluate(snapshot, StrategicSpendCategory::EconomyRecovery, 2500u);
+		expect(decision.allowed, "Opening reserve must not block the first Black Market");
+		snapshot.profilePlan.openingIncomeReserve = 0u;
+		decision = manager.Evaluate(snapshot, StrategicSpendCategory::ProductionGrowth, 2500u);
+		expect(decision.allowed, "Without the opening reserve funded production growth proceeds");
+	}
+
+	{
+		// Expansion first under pressure, gated by the wave-sized army floor.
+		AIControlAdapterStrategicSpendSnapshot snapshot = makeBaseSnapshot();
+		snapshot.money = 9000u;
+		snapshot.completedMarkets = 1;
+		snapshot.profilePlan.active = true;
+		snapshot.profilePlan.threatResponse = true;
+		snapshot.profilePlan.growthProtectedCash = 6000u;
+		snapshot.profilePlan.armyFloor = 30;
+		snapshot.profilePlan.armyFloorMet = true;
+		snapshot.profilePlan.reason = "threat_response";
+		AIControlAdapterStrategicSpendDecision decision =
+			manager.Evaluate(snapshot, StrategicSpendCategory::Expansion, 1800u);
+		expect(decision.allowed, "Expansion should continue under threat when the army floor is met");
+		decision = manager.Evaluate(snapshot, StrategicSpendCategory::ProductionGrowth, 2500u);
+		expect(!decision.allowed, "Production growth stays deferred under threat without surplus");
+		snapshot.profilePlan.armyFloorMet = false;
+		decision = manager.Evaluate(snapshot, StrategicSpendCategory::Expansion, 1800u);
+		expect(!decision.allowed, "Expansion should wait under threat while the army is below the floor");
+		snapshot.profilePlan.armyFloorMet = true;
+		snapshot.mainBaseCritical = true;
+		decision = manager.Evaluate(snapshot, StrategicSpendCategory::Expansion, 1800u);
+		expect(!decision.allowed, "A critical main base should pause expansion");
 	}
 
 	std::cout << "AIControlAdapterStrategicSpendManagerTests passed\n";

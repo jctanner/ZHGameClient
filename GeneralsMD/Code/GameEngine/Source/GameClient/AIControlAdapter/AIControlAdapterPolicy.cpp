@@ -930,7 +930,7 @@ AIControlAdapterZoneSeedPackageDecision AIControlAdapterChooseZoneSeedPackage(
 		return decision;
 	}
 
-	if (inputs.coverageExpansionUrgent && !inputs.activeZoneThreatened)
+	if (inputs.coverageExpansionUrgent && !inputs.activeZoneThreatened && !inputs.fundedZoneProduction)
 	{
 		decision.needsFollowup = !inputs.allowExpansionBeforeFullRemoteFollowup;
 		decision.packageStage = "coverage";
@@ -940,22 +940,23 @@ AIControlAdapterZoneSeedPackageDecision AIControlAdapterChooseZoneSeedPackage(
 		return decision;
 	}
 
-	if (inputs.canScaleMilitaryProduction && inputs.barracks <= 0 && inputs.barracksInProgress <= 0)
+	const bool canProduceInZone = inputs.canScaleMilitaryProduction || inputs.fundedZoneProduction;
+	if (canProduceInZone && inputs.barracks <= 0 && inputs.barracksInProgress <= 0)
 	{
 		decision.needsFollowup = true;
 		decision.packageStage = "barracks";
 		decision.command = "Game.BuildBarracksSmart";
-		decision.priority = 50;
+		decision.priority = inputs.fundedZoneProduction ? 106 : 50;
 		decision.reason = "needs_barracks";
 		return decision;
 	}
 
-	if (inputs.canScaleMilitaryProduction && inputs.armsDealers <= 0 && inputs.armsDealersInProgress <= 0)
+	if (canProduceInZone && inputs.armsDealers <= 0 && inputs.armsDealersInProgress <= 0)
 	{
 		decision.needsFollowup = true;
 		decision.packageStage = "arms_dealer";
 		decision.command = "Game.BuildArmsDealerSmart";
-		decision.priority = 45;
+		decision.priority = inputs.fundedZoneProduction ? 106 : 45;
 		decision.reason = "needs_arms_dealer";
 		return decision;
 	}

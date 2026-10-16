@@ -1716,6 +1716,30 @@ int main()
 	}
 
 	{
+		// Economy-first surplus: expansion zones still get producers under coverage urgency.
+		const AIControlAdapterZoneSeedPackageDecision decision = AIControlAdapterChooseZoneSeedPackage({
+			true,  // isSprawlStyle
+			false, // canScaleMilitaryProduction
+			true,  // remoteZoneHasStash
+			true,  // coverageExpansionUrgent
+			false, // activeZoneThreatened
+			true,  // allowExpansionBeforeFullRemoteFollowup
+			1,     // tunnels
+			0,     // tunnelsInProgress
+			1,     // stingers
+			0,     // stingersInProgress
+			0,     // barracks
+			0,     // barracksInProgress
+			0,     // armsDealers
+			0,     // armsDealersInProgress
+			true   // fundedZoneProduction
+		});
+		expect(decision.needsFollowup, "Funded zone production should continue the seed package past coverage urgency");
+		expect(decision.command != nullptr && std::strcmp(decision.command, "Game.BuildBarracksSmart") == 0, "Funded zone production should build a zone Barracks");
+		expect(decision.priority == 106, "Funded zone producers should compete with expansion");
+	}
+
+	{
 		const AIControlAdapterZoneSeedPackageDecision decision = AIControlAdapterChooseZoneSeedPackage({
 			true,  // isSprawlStyle
 			true,  // canScaleMilitaryProduction

@@ -26,8 +26,10 @@ AIControlAdapterMacroBuildSnapshot AIControlAdapterMacroBuildSnapshotBuilder::Bu
 		input.hasActiveZone
 		&& input.totalZoneSupplyStashes > 0
 		&& (input.totalZoneBarracks + input.totalZoneArmsDealers + input.totalZoneTunnels + input.totalZoneStingers) >= 3;
+	// Economy-first expansion does not wait for markets to keep pace with stashes.
 	const bool shouldThrottleExtraStashGrowth =
 		policy.isSprawlStyle
+		&& !policy.isEconomyFirstSprawl
 		&& input.hasCompletedPalace
 		&& input.effectiveTotalBlackMarkets < std::max<int>(
 			policy.isBalancedSprawl ? 2 : 1,

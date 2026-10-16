@@ -168,7 +168,8 @@ AIControlAdapterMacroBuildPolicyDecisions AIControlAdapterMacroBuildManager::Res
 		snapshot.totalZoneBarracks,
 		snapshot.activeZoneBarracksInProgress,
 		snapshot.totalZoneArmsDealers,
-		snapshot.activeZoneArmsDealersInProgress
+		snapshot.activeZoneArmsDealersInProgress,
+		snapshot.economicSurplus
 	});
 	decisions.sprawlDesiredMarketCount =
 		std::max<int>(
@@ -214,7 +215,7 @@ AIControlAdapterMacroBuildPolicyDecisions AIControlAdapterMacroBuildManager::Res
 		&& snapshot.money >= (snapshot.isBalancedSprawl ? (snapshot.reserveCash + snapshot.blackMarketCost) : snapshot.blackMarketCost)
 		&& (!snapshot.isBalancedSprawl || snapshot.inProgressBlackMarkets < 1)
 		&& snapshot.effectiveTotalBlackMarkets < decisions.sprawlDesiredMarketCount;
-	if (snapshot.survivalRecovery)
+	if (snapshot.survivalRecovery && !snapshot.expansionDuringRecovery)
 	{
 		decisions.macroExpansion.zoneExpansionUrgent = false;
 		decisions.macroExpansion.allowUrgentExpansionDespiteReserve = false;
@@ -353,7 +354,8 @@ AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 	{
 		// Income growth competes in the existing macro intent plan. Missing
 		// essential producers retain higher priority; funded capacity grows next.
-		AddIntent(plan, "profile_income", "Game.BuildBlackMarketSmart", 115,
+		// Expansion first: urgent supply expansion (108) outranks market growth.
+		AddIntent(plan, "profile_income", "Game.BuildBlackMarketSmart", 107,
 			snapshot.effectiveTotalBlackMarkets < snapshot.sprawlMarketCap,
 			"profile_income_growth", snapshot.blackMarketCost,
 			snapshot.inProgressBlackMarkets, snapshot.profilePlan.maxConcurrentMarkets,
@@ -367,7 +369,8 @@ AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 			plan,
 			"expansion",
 			"Game.BuildSupplyStashSmart",
-			expansionDecision.isUrgent ? 100 : 60,
+			// Economy-first: urgent supply expansion outranks the Palace/first market (105).
+			expansionDecision.isUrgent ? (snapshot.profilePlan.active ? 108 : 100) : 60,
 			expansionDecision.shouldAttemptExpansion,
 			expansionDecision.reason,
 			0u,
@@ -462,13 +465,36 @@ AIControlAdapterMacroBuildPlan AIControlAdapterMacroBuildManager::BuildPlan(
 			snapshot.money);
 	}
 
+	// Economic opening: Black Markets require a Palace, so build the first Palace as soon
+	// as an Arms Dealer exists instead of waiting for the tech path or a WMD threat.
+	if (snapshot.profilePlan.active && snapshot.effectiveTotalBlackMarkets < 1
+		&& snapshot.totalPalaces + snapshot.palacesInProgress == 0)
+	{
+		AddIntent(
+			plan,
+			"income_opening",
+			"Game.BuildPalaceSmart",
+			105,
+			snapshot.readyArmsDealers > 0,
+			"opening_palace_for_markets",
+			0u,
+			snapshot.palacesInProgress,
+			1,
+			snapshot.palaceBuildCooldownReady,
+			snapshot.palaceSpend,
+			false,
+			AIControlAdapterMacroBuildExecutor::MacroBuild,
+			snapshot.money);
+	}
+
 	if (snapshot.isSprawlStyle && snapshot.effectiveTotalBlackMarkets < 1)
 	{
 		AddIntent(
 			plan,
 			"market_recovery",
 			"Game.BuildBlackMarketSmart",
-			55,
+			// Economic opening: the first market outranks expansion (100).
+			snapshot.profilePlan.active ? 105 : 55,
 			decisions.canAttemptBlackMarketNow,
 			"first_sprawl_market",
 			snapshot.blackMarketCost,

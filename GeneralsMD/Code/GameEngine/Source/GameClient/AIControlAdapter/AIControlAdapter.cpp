@@ -71,6 +71,8 @@
 #include "GameLogic/VictoryConditions.h"
 #include "GameLogic/Weapon.h"
 #include "GameLogic/Module/AIUpdate.h"
+#include "GameLogic/Module/DozerAIUpdate.h"
+#include "GameLogic/Module/SupplyTruckAIUpdate.h"
 #include "GameLogic/Module/BodyModule.h"
 #include "GameLogic/Module/ContainModule.h"
 #include "GameLogic/Module/ProductionUpdate.h"
@@ -451,6 +453,10 @@ namespace
 		DWORD zonesSnapshotTick;
 		AIControlAdapterProfileSpendPlan profileSpendPlan;
 		DWORD profileThreatUntilTick = 0u;
+		int profileWavePeak = 0;            // largest recent count of enemies near our zones
+		int profileArmsDealerTarget = 0;    // producer targets chosen by the macro planner; the
+		int profileBarracksTarget = 0;      // construction gate must not undercut them
+		DWORD profileWavePeakTick = 0u;
 		DWORD profileOffenseFundedSinceTick = 0u;
 		int profileCompletedMarkets = 0;
 		int profileArmyObserved = 0;
@@ -540,6 +546,21 @@ namespace
 		};
 		std::vector<PendingFootholdAnchor> pendingFootholdAnchors;
 		UnsignedInt nextSyntheticAnchorId = 1000000;  // Start at 1M to avoid conflicts with real object IDs
+		// Converted footholds persist across macro passes (zones are rebuilt each pass);
+		// removed only when their support structures are gone.
+		struct EstablishedFoothold
+		{
+			UnsignedInt anchorId = 0u;
+			ZoneAnchorType anchorType = ZoneAnchorType::MarketFoothold;
+			Real x = 0.0f;
+			Real y = 0.0f;
+		};
+		std::vector<EstablishedFoothold> establishedFootholds;
+		// Market sprawl (economy-first GLA): Black Market footholds away from supply.
+		struct FailedFootholdPoint { Real x; Real y; DWORD untilTick; };
+		std::vector<FailedFootholdPoint> failedMarketFootholdPoints;
+		DWORD nextMarketFootholdTick = 0u;
+		nlohmann::json marketSprawlTelemetry = nlohmann::json::object();
 	};
 
 	#include "AIControlAdapterLog.inl"
@@ -1355,6 +1376,7 @@ namespace
 
 		void evaluateAutonomyMacro()
 		{
+			ProfileLaps macroLaps(*this, "macro/");
 			if (!isAutonomyModeActive())
 			{
 				return;
@@ -1389,6 +1411,7 @@ namespace
 					static_cast<unsigned long>(m_autonomy.state.nextGuardTick));
 				return;
 			}
+			macroLaps.mark("schedule_check");
 			if (tickSchedule.guardOnly)
 			{
 				struct GuardOnlyCounts
@@ -1582,6 +1605,7 @@ namespace
 			};
 
 			std::vector<AutonomyOwnedObjectSnapshot> ownedObjects;
+			macroLaps.mark("economy_setup");
 			ownedObjects.reserve(256);
 
 			struct AutonomyZone
@@ -2038,6 +2062,7 @@ namespace
 				pushZone(owned.object, false, ZoneAnchorType::SupplyStash);
 			}
 
+			macroLaps.mark("objects_terrain_stash_zones");
 			// Phase 5.8: Add captured structure zone anchors
 			// Scan for owned capturable/tech structures that can become zone anchors
 			if (TheGameLogic != nullptr)
@@ -2158,6 +2183,34 @@ namespace
 				}
 			}
 
+			// Re-add established footholds (validated below with the other synthetic anchors).
+			for (const auto& established : m_autonomy.state.establishedFootholds)
+			{
+				AutonomyZone zone = {};
+				zone.center.x = established.x;
+				zone.center.y = established.y;
+				zone.center.z = 0.0f;
+				zone.anchorId = static_cast<ObjectID>(established.anchorId);
+				zone.isMainBase = false;
+				zone.anchorType = established.anchorType;
+				zones.push_back(zone);
+			}
+			// Drop pending footholds whose structure never appeared.
+			{
+				const DWORD pendingNow = adapterGameplayTick();
+				auto& pendingList = m_autonomy.state.pendingFootholdAnchors;
+				pendingList.erase(std::remove_if(pendingList.begin(), pendingList.end(), [&](const AutonomyState::PendingFootholdAnchor& pending)
+				{
+					const bool expired = pendingNow - pending.createdTick > 150000u;
+					if (expired)
+					{
+						adapterLog("zone_anchor_rejected type=%s reason=pending_foothold_expired x=%.1f y=%.1f",
+							zoneAnchorTypeToString(pending.anchorType), pending.targetX, pending.targetY);
+					}
+					return expired;
+				}), pendingList.end());
+			}
+
 			// Phase 5.8: Convert pending foothold anchors to actual zones if structures exist nearby
 			std::vector<UnsignedInt> convertedFootholds;
 			for (std::size_t i = 0; i < m_autonomy.state.pendingFootholdAnchors.size(); ++i)
@@ -2175,8 +2228,9 @@ namespace
 						continue;
 					}
 
-					// Check for Tunnel Network or Stinger Site
-					if (!owned.isTunnel && !owned.isStinger)
+					// Check for Tunnel Network or Stinger Site (or a Black Market for market footholds)
+					if (!owned.isTunnel && !owned.isStinger
+						&& !(owned.isBlackMarket && pending.anchorType == ZoneAnchorType::MarketFoothold))
 					{
 						continue;
 					}
@@ -2212,6 +2266,12 @@ namespace
 					zone.isMainBase = false;
 					zone.anchorType = pending.anchorType;
 					zones.push_back(zone);
+					AutonomyState::EstablishedFoothold established;
+					established.anchorId = pending.syntheticAnchorId;
+					established.anchorType = pending.anchorType;
+					established.x = pending.targetX;
+					established.y = pending.targetY;
+					m_autonomy.state.establishedFootholds.push_back(established);
 
 					adapterLog(
 						"zone_anchor_selected type=%s source_object=%u x=%.1f y=%.1f reason=foothold_structure_completed nearby_structure=%u",
@@ -2358,8 +2418,9 @@ namespace
 							continue;
 						}
 
-						// Look for Tunnel or Stinger
-						if (!owned.isTunnel && !owned.isStinger)
+						// Look for Tunnel or Stinger (or a Black Market anchoring a market foothold)
+						if (!owned.isTunnel && !owned.isStinger
+							&& !(owned.isBlackMarket && zone.anchorType == ZoneAnchorType::MarketFoothold))
 						{
 							continue;
 						}
@@ -2392,6 +2453,10 @@ namespace
 							zone.center.x,
 							zone.center.y);
 						zonesToRemove.push_back(i);
+						auto& establishedList = m_autonomy.state.establishedFootholds;
+						establishedList.erase(std::remove_if(establishedList.begin(), establishedList.end(),
+							[&](const AutonomyState::EstablishedFoothold& e) { return e.anchorId == static_cast<UnsignedInt>(zone.anchorId); }),
+							establishedList.end());
 					}
 				}
 			}
@@ -2639,6 +2704,7 @@ namespace
 				Int stingersInProgress;
 			};
 
+			macroLaps.mark("zone_anchor_maintenance");
 			// Phase 5.5: Strategic placement helpers for high-value structures
 			enum class StrategicStructureRole
 			{
@@ -3681,7 +3747,9 @@ namespace
 					{"y", zoneCenter.y}
 				});
 				args["zone_radius"] = zoneRadius;
-				args["strict_zone"] = safeCapacity;
+				// Footholds must land at the chosen site, never fall back to the main base.
+				const bool footholdRequest = requestIdPrefix != nullptr && std::strcmp(requestIdPrefix, "auto_market_foothold") == 0;
+				args["strict_zone"] = safeCapacity || footholdRequest;
 				return tryCommand(requestIdPrefix, cmd, args, outReason);
 			};
 
@@ -3824,6 +3892,18 @@ namespace
 			m_autonomy.state.strategicSpendTelemetry["market_foundations_no_builder"] = blackMarketFoundationsNoBuilder;
 			updateProfileSpendingPlan(player, money, static_cast<int>(completedBlackMarkets), counts.mobileCombatUnits
 				+ counts.queuedQuads + counts.queuedScorpions + counts.queuedRocketBuggies + counts.queuedScudLaunchers, now);
+			{
+				// Palace-first economic opening (Black Market requires a Palace): until the
+				// first market is placed, keep its cost and any missing Palace funded.
+				// Threat response drops the reserve so defense is never starved.
+				AIControlAdapterProfileSpendPlan& plan = m_autonomy.state.profileSpendPlan;
+				if (plan.active && !plan.threatResponse && completedBlackMarkets == 0u
+					&& inProgressBlackMarkets == 0u && counts.blackMarketsInProgress == 0)
+				{
+					plan.openingIncomeReserve = (counts.palaces + counts.palacesInProgress == 0 ? 2500u : 0u) + 2500u;
+					plan.workerProtectedCash += plan.openingIncomeReserve;
+				}
+			}
 			const AIControlAdapterStrategicSpendSnapshotBuilder strategicSpendSnapshotBuilder;
 
 			auto tryOpeningBarracksFallbackAfterSupplyFailure = [&](std::string& outReason) -> bool
@@ -3852,6 +3932,7 @@ namespace
 			};
 
 			bool macroIncomeIssued = false;
+			macroLaps.mark("zone_counts_and_placement");
 			if (macroDue)
 			{
 				std::string reason;
@@ -3979,11 +4060,19 @@ namespace
 					establishedEconomy ? std::max(survivalRecovery ? 4 : 2,
 						fundedCapacity && queuesSaturated ? std::min(8, 2 + counts.blackMarkets / 3) : 0) : 1);
 				const Int desiredReadyBarracks = std::min(policyConfig.sprawlBarracksCap, establishedEconomy ? 2 : 1);
+				// Economy-first with surplus cash: production capacity follows the army
+				// target rather than market count (2-3 factories could not replace losses).
+				const bool economicSurplusCash = m_autonomy.state.profileSpendPlan.active
+					&& money >= m_autonomy.state.profileSpendPlan.growthProtectedCash + 20000u;
+				const int surplusArmyTarget = std::max(24, m_autonomy.state.profileSpendPlan.armyTarget);
+				const Int surplusReadyArms = std::min(policyConfig.sprawlArmsCap, 2 + std::min(surplusArmyTarget, 300) / 15);
+				const Int surplusReadyBarracks = std::min(policyConfig.sprawlBarracksCap, 1 + std::min(surplusArmyTarget, 300) / 25);
 				m_autonomy.state.survivalPolicyTelemetry["recovery_active"] = survivalRecovery;
 				m_autonomy.state.survivalPolicyTelemetry["recovery_zone"] = m_autonomy.state.recoveryZoneAnchor;
 				m_autonomy.state.survivalPolicyTelemetry["core_zones"] = m_autonomy.state.survivalCoreZones;
-				m_autonomy.state.survivalPolicyTelemetry["desired_arms_dealers"] = desiredReadyArms;
-				m_autonomy.state.survivalPolicyTelemetry["desired_barracks"] = desiredReadyBarracks;
+				m_autonomy.state.survivalPolicyTelemetry["desired_arms_dealers"] = economicSurplusCash ? std::max(desiredReadyArms, surplusReadyArms) : desiredReadyArms;
+				m_autonomy.state.survivalPolicyTelemetry["desired_barracks"] = economicSurplusCash ? std::max(desiredReadyBarracks, surplusReadyBarracks) : desiredReadyBarracks;
+				m_autonomy.state.survivalPolicyTelemetry["economic_surplus"] = economicSurplusCash;
 				m_autonomy.state.survivalPolicyTelemetry["queues_saturated"] = queuesSaturated;
 
 				const Int effectiveTotalBlackMarkets = static_cast<Int>(completedBlackMarkets + inProgressBlackMarkets);
@@ -4079,11 +4168,29 @@ namespace
 				AIControlAdapterMacroBuildSnapshot macroBuildSnapshotBase =
 					AIControlAdapterMacroBuildSnapshotBuilder().Build(macroSnapshotInput);
 				macroBuildSnapshotBase.survivalRecovery = survivalRecovery;
+				macroBuildSnapshotBase.profilePlan = m_autonomy.state.profileSpendPlan;
+				// Foothold zones (e.g. market sprawl) have no stash but still get the zone seed
+				// package (Tunnel, Stinger, producers).
+				if (hasActiveZone && (activeZone.anchorType == ZoneAnchorType::MarketFoothold
+					|| activeZone.anchorType == ZoneAnchorType::StrategicFoothold))
+				{
+					macroBuildSnapshotBase.remoteZoneHasStash = true;
+				}
+				// Expansion first (economy-first profile): keep supply growth through survival
+				// recovery while the wave-sized army floor holds and the main base is not critical.
+				const bool economicExpansionDuringRecovery = m_autonomy.state.profileSpendPlan.active
+					&& m_autonomy.state.profileSpendPlan.armyFloorMet
+					&& !(m_autonomy.state.mainBaseCriticalOverrideTelemetry.is_object()
+						&& m_autonomy.state.mainBaseCriticalOverrideTelemetry.value("active", false));
+				macroBuildSnapshotBase.expansionDuringRecovery = economicExpansionDuringRecovery;
 				macroBuildSnapshotBase.recoveryZoneIndex = establishedEconomy || survivalRecovery ? recoveryZoneIndex : -1;
 				macroBuildSnapshotBase.readyArmsDealers = counts.armsDealers;
 				macroBuildSnapshotBase.readyBarracks = counts.barracks;
-				macroBuildSnapshotBase.desiredReadyArmsDealers = desiredReadyArms;
-				macroBuildSnapshotBase.desiredReadyBarracks = desiredReadyBarracks;
+				macroBuildSnapshotBase.desiredReadyArmsDealers = economicSurplusCash ? std::max(desiredReadyArms, surplusReadyArms) : desiredReadyArms;
+				macroBuildSnapshotBase.desiredReadyBarracks = economicSurplusCash ? std::max(desiredReadyBarracks, surplusReadyBarracks) : desiredReadyBarracks;
+				m_autonomy.state.profileArmsDealerTarget = macroBuildSnapshotBase.desiredReadyArmsDealers;
+				m_autonomy.state.profileBarracksTarget = macroBuildSnapshotBase.desiredReadyBarracks;
+				macroBuildSnapshotBase.economicSurplus = economicSurplusCash;
 				std::string workerProducerTemplate = inferCommandCenterTemplateForPlayer(player);
 				for (const auto& owned : ownedObjects)
 				{
@@ -4177,7 +4284,7 @@ namespace
 				macroBuildSnapshotBase.workerProducerSpend = {workerProducerSpend.allowed && !workerProducerTemplate.empty(), workerProducerSpend.reason};
 				macroBuildSnapshotBase.armsCapacitySpend = {armsSpend.allowed, armsSpend.reason};
 				macroBuildSnapshotBase.barracksCapacitySpend = {barracksSpend.allowed, barracksSpend.reason};
-				if (survivalRecovery) {
+				if (survivalRecovery && !economicExpansionDuringRecovery) {
 					macroSpendPlan.expansion.allowed = false; macroSpendPlan.expansion.reason = "survival_recovery";
 				}
 				m_autonomy.state.survivalPolicyTelemetry["arms_spend_allowed"] = armsSpend.allowed;
@@ -4394,7 +4501,11 @@ namespace
 				macroRuntimeInput.palaceRedundancyZoneIndex = palaceRedundancyZoneIndex;
 				macroRuntimeInput.palaceRedundancyReason = palaceRedundancyReason.c_str();
 				macroBuildSnapshot = macroSnapshotBuilder.ApplyRuntimeInput(macroBuildSnapshotBase, macroRuntimeInput);
+				// The rebuilt plan is the one dispatched: it needs the profile plan and the
+				// live rule filter as well (both were previously applied to the first plan only).
+				macroBuildSnapshot.profilePlan = m_autonomy.state.profileSpendPlan;
 				macroBuildPlan = macroBuildManager.BuildPlan(macroBuildSnapshot);
+				filterAutonomyMacroRules(macroBuildPlan, totalArmsDealers, totalBarracks);
 				AIControlAdapterMacroBuildTelemetryInput macroTelemetryInput;
 				macroTelemetryInput.profile = profile;
 				macroTelemetryInput.money = money;
@@ -4589,10 +4700,32 @@ namespace
 					}
 					return true;
 				};
+				// Economy-first with surplus cash dispatches further intents with distinct commands
+				// in the same pass; executors still claim their own workers and placements.
+				auto dispatchSurplusMacroIntents = [&]()
+				{
+					for (int extraDispatch = 0; economicSurplusCash && extraDispatch < 3; ++extraDispatch)
+					{
+						const std::string dispatchedCommand = chosenCommand;
+						std::vector<AIControlAdapterMacroBuildIntentOption> remaining;
+						for (auto& intent : macroBuildPlan.intents)
+						{
+							if (intent.option.command != nullptr && dispatchedCommand == intent.option.command)
+							{
+								intent.option.valid = false;
+								intent.option.reason = "dispatched_this_pass";
+							}
+							remaining.push_back(intent.option);
+						}
+						macroBuildPlan.choice = AIControlAdapterChooseMacroBuildIntent(remaining);
+						if (!tryMacroBuildIntentScheduler()) break;
+					}
+				};
 				if ((survivalRecovery || (macroBuildPlan.choice.category != nullptr
 					&& std::strcmp(macroBuildPlan.choice.category, "producer_recovery") == 0)) && tryMacroBuildIntentScheduler())
 				{
 					// Safe recovery/capacity growth handled this tick.
+					dispatchSurplusMacroIntents();
 				}
 				else if (survivalRecovery)
 				{
@@ -4669,6 +4802,7 @@ namespace
 					else if (tryMacroBuildIntentScheduler())
 					{
 						// Intent scheduler handled this macro build tick.
+						dispatchSurplusMacroIntents();
 					}
 				}
 
@@ -4797,6 +4931,161 @@ namespace
 						static_cast<unsigned long>(money));
 				}
 
+				// Market sprawl (economy-first GLA): once Black Markets are available, zones no
+				// longer need supply. Place Black Market footholds around our territory: phase
+				// "safe" prefers sites far from known enemy structures; phase "forward" (8+
+				// markets and an army at critical mass) prefers sites toward them.
+				{
+					const AIControlAdapterProfileSpendPlan& sprawlPlan = m_autonomy.state.profileSpendPlan;
+					const DWORD sprawlNow = adapterGameplayTick();
+					const bool forwardPhase = completedBlackMarkets >= 8u
+						&& m_autonomy.state.profileArmyObserved >= std::max(60, sprawlPlan.armyFloor * 3 / 2);
+					int pendingMarketFootholds = 0;
+					for (const auto& pending : m_autonomy.state.pendingFootholdAnchors)
+						if (pending.anchorType == ZoneAnchorType::MarketFoothold) ++pendingMarketFootholds;
+					const int marketFootholdCap = economicSurplusCash ? 3 : 1;
+					const char* sprawlReason = "inactive";
+					nlohmann::json sprawlCandidateJson = nullptr;
+					if (!sprawlPlan.active || !hasCompletedPalace || completedBlackMarkets < 2u) sprawlReason = "waiting_for_palace_and_markets";
+					else if (!autonomyRuleEnabled("zone_expansion") || !autonomyRuleEnabled("market_growth")) sprawlReason = "rule_disabled";
+					else if (macroSpendEconomy.mainBaseCritical) sprawlReason = "main_base_critical";
+					else if (!macroSpendPlan.economyGrowth.allowed) sprawlReason = macroSpendPlan.economyGrowth.reason != nullptr ? macroSpendPlan.economyGrowth.reason : "spend_blocked";
+					else if (pendingMarketFootholds >= marketFootholdCap) sprawlReason = "pending_cap";
+					else if (AIControlAdapterIsTickInFuture(m_autonomy.state.nextMarketFootholdTick, sprawlNow)) sprawlReason = "cooldown";
+					else
+					{
+						auto& failedPoints = m_autonomy.state.failedMarketFootholdPoints;
+						failedPoints.erase(std::remove_if(failedPoints.begin(), failedPoints.end(),
+							[&](const AutonomyState::FailedFootholdPoint& f) { return !AIControlAdapterIsTickInFuture(f.untilTick, sprawlNow); }),
+							failedPoints.end());
+						Region3D mapExtent;
+						TheTerrainLogic->getExtent(&mapExtent);
+						std::vector<Coord3D> enemyStructures;
+						for (const auto& item : m_autonomy.enemyMemory.getItems())
+						{
+							if (!item.isStructure) continue;
+							Player* enemy = getPlayerByIndex(item.playerIndex);
+							if (enemy == nullptr || enemy->getDefaultTeam() == nullptr || player->getRelationship(enemy->getDefaultTeam()) != ENEMIES) continue;
+							Coord3D pos = {}; pos.x = item.position.x; pos.y = item.position.y;
+							enemyStructures.push_back(pos);
+						}
+						const Coord3D mainCenter = hasMainZoneForFootprint ? mainZoneCenter : (zones.empty() ? Coord3D{} : zones.front().center);
+						bool found = false;
+						Coord3D best = {};
+						Real bestScore = -1.0e30f;
+						for (const AutonomyZone& origin : zones)
+						{
+							const auto originThreat = m_autonomy.state.zoneThreats.find(static_cast<UnsignedInt>(origin.anchorId));
+							if (originThreat != m_autonomy.state.zoneThreats.end() && sprawlNow - originThreat->second.lastSeenTick <= 30000u) continue;
+							for (int ring = 0; ring < 2; ++ring)
+							{
+								const Real distance = ring == 0 ? 650.0f : 850.0f;
+								for (int dir = 0; dir < 8; ++dir)
+								{
+									const Real angle = static_cast<Real>(dir) * 0.7853982f;
+									Coord3D candidate = {};
+									candidate.x = origin.center.x + std::cos(angle) * distance;
+									candidate.y = origin.center.y + std::sin(angle) * distance;
+									if (candidate.x < mapExtent.lo.x + 200.0f || candidate.x > mapExtent.hi.x - 200.0f
+										|| candidate.y < mapExtent.lo.y + 200.0f || candidate.y > mapExtent.hi.y - 200.0f) continue;
+									bool rejected = false;
+									for (const AutonomyZone& other : zones)
+									{
+										const Real dx = candidate.x - other.center.x, dy = candidate.y - other.center.y;
+										if (dx * dx + dy * dy < 550.0f * 550.0f) { rejected = true; break; }
+									}
+									for (const auto& pending : m_autonomy.state.pendingFootholdAnchors)
+									{
+										const Real dx = candidate.x - pending.targetX, dy = candidate.y - pending.targetY;
+										if (!rejected && dx * dx + dy * dy < 550.0f * 550.0f) rejected = true;
+									}
+									for (const auto& failed : failedPoints)
+									{
+										const Real dx = candidate.x - failed.x, dy = candidate.y - failed.y;
+										if (!rejected && dx * dx + dy * dy < 250.0f * 250.0f) rejected = true;
+									}
+									for (const auto& entry : m_autonomy.state.zoneThreats)
+									{
+										if (rejected || sprawlNow - entry.second.lastSeenTick > 30000u) continue;
+										const Real dx = candidate.x - entry.second.positionX, dy = candidate.y - entry.second.positionY;
+										if (dx * dx + dy * dy < 700.0f * 700.0f) rejected = true;
+									}
+									if (rejected) continue;
+									Real nearestEnemy = 1.0e9f;
+									for (const Coord3D& enemyPos : enemyStructures)
+									{
+										const Real dx = candidate.x - enemyPos.x, dy = candidate.y - enemyPos.y;
+										nearestEnemy = std::min(nearestEnemy, std::sqrt(dx * dx + dy * dy));
+									}
+									if (nearestEnemy < (forwardPhase ? 600.0f : 900.0f)) continue;
+									const Real dmx = candidate.x - mainCenter.x, dmy = candidate.y - mainCenter.y;
+									const Real mainDistance = std::sqrt(dmx * dmx + dmy * dmy);
+									const Real enemyTerm = enemyStructures.empty() ? 0.0f : (forwardPhase ? -nearestEnemy : nearestEnemy);
+									const Real score = enemyTerm - 0.3f * mainDistance;
+									if (score > bestScore) { bestScore = score; best = candidate; found = true; }
+								}
+							}
+						}
+						if (!found)
+						{
+							sprawlReason = "no_candidate";
+							m_autonomy.state.nextMarketFootholdTick = sprawlNow + 10000u;
+						}
+						else
+						{
+							AutonomyZone footholdZone = {};
+							footholdZone.center = best;
+							footholdZone.anchorId = static_cast<ObjectID>(m_autonomy.state.nextSyntheticAnchorId);
+							footholdZone.isMainBase = false;
+							footholdZone.anchorType = ZoneAnchorType::MarketFoothold;
+							std::string footholdBuildReason;
+							struct ExpansionPurposeScope
+							{
+								bool& value;
+								explicit ExpansionPurposeScope(bool& flag) : value(flag) { value = true; }
+								~ExpansionPurposeScope() { value = false; }
+							} expansionPurpose(m_ruleExpansionConstructionScope);
+							const bool footholdIssued = trySpecificZoneCommand("auto_market_foothold", "Game.BuildBlackMarketSmart",
+								footholdZone, nlohmann::json::object(), footholdBuildReason);
+							m_autonomy.state.nextMarketFootholdTick = sprawlNow + 6000u;
+							sprawlCandidateJson = {{"x", best.x}, {"y", best.y}, {"issued", footholdIssued}, {"detail", footholdBuildReason}};
+							if (footholdIssued)
+							{
+								AutonomyState::PendingFootholdAnchor pending;
+								pending.syntheticAnchorId = m_autonomy.state.nextSyntheticAnchorId++;
+								pending.anchorType = ZoneAnchorType::MarketFoothold;
+								pending.targetX = best.x;
+								pending.targetY = best.y;
+								pending.createdTick = sprawlNow;
+								pending.buildIssued = true;
+								pending.buildCommand = "Game.BuildBlackMarketSmart";
+								pending.reason = forwardPhase ? "market_sprawl_forward" : "market_sprawl_safe";
+								m_autonomy.state.pendingFootholdAnchors.push_back(pending);
+								sprawlReason = "foothold_issued";
+							}
+							else
+							{
+								m_autonomy.state.failedMarketFootholdPoints.push_back({best.x, best.y, sprawlNow + 120000u});
+								sprawlReason = "foothold_build_failed";
+							}
+							adapterLog("market_sprawl_foothold phase=%s x=%.1f y=%.1f issued=%d detail=%s pending=%d cap=%d",
+								forwardPhase ? "forward" : "safe", best.x, best.y, footholdIssued ? 1 : 0,
+								footholdBuildReason.c_str(), pendingMarketFootholds + (footholdIssued ? 1 : 0), marketFootholdCap);
+						}
+					}
+					int establishedMarketFootholds = 0;
+					for (const auto& established : m_autonomy.state.establishedFootholds)
+						if (established.anchorType == ZoneAnchorType::MarketFoothold) ++establishedMarketFootholds;
+					m_autonomy.state.marketSprawlTelemetry = {
+						{"phase", forwardPhase ? "forward" : "safe"},
+						{"reason", sprawlReason},
+						{"pending", pendingMarketFootholds},
+						{"cap", marketFootholdCap},
+						{"established", establishedMarketFootholds},
+						{"last_candidate", sprawlCandidateJson}
+					};
+				}
+
 				if (!issued && reason.empty())
 				{
 					reason = macroBuildManager.EvaluateMacroHoldReason({
@@ -4897,6 +5186,7 @@ namespace
 				m_autonomy.state.nextMacroTick = now + (issued ? 3000u : 2000u);
 			}
 
+			macroLaps.mark("macro_build");
 			// Economy policy assessment: determines income health, reserve pressure, and spending mode
 			const std::string profile = AIControlAdapterUiUtils::NormalizeAsciiLower(m_autonomy.state.profile);
 			const AIControlAdapterProfilePolicyManager profilePolicyManager;
@@ -5158,6 +5448,7 @@ namespace
 					now);
 			}
 
+			macroLaps.mark("economy_policy");
 			// Phase 7.8: Multi-front zone defense allocation.
 			// Maintain capped per-zone defense groups instead of repeatedly moving one global army blob.
 			const DWORD defenseResponseCooldownMs = 5000;  // 5 seconds command throttle per allocation
@@ -6055,6 +6346,7 @@ namespace
 			}
 
 			AIControlAdapterGlaUsaStrategyResult glaUsaStrategy;
+			macroLaps.mark("zone_defense");
 			if (productionDue)
 			{
 				// Prepare owned producers for zone selection
@@ -6942,7 +7234,7 @@ namespace
 					{
 						prodIntent.shouldProduce = inputs.openingInfrastructureReady
 							&& (armyCount < refillArmyCap || phaseUtilityProduction || captureUtilityProduction)
-							&& money > profileSpendPlan.combatProtectedCash;
+							&& money > profileSpendPlan.combatProtectedCash + (phaseEmergencyPulse ? 0u : profileSpendPlan.openingIncomeReserve);
 						prodIntent.reason = prodIntent.shouldProduce ? profileSpendPlan.reason : "profile_army_or_budget_satisfied";
 					}
 					prodIntent.effectiveArmyCap = refillArmyCap;
@@ -7133,6 +7425,7 @@ namespace
 				schedulerHasIntents = true;
 			}
 
+			macroLaps.mark("production");
 			if (techDue && autonomyRuleEnabled("tech_upgrades"))
 			{
 				const AIControlAdapterProfilePolicyManager profilePolicyManager;
@@ -7330,6 +7623,7 @@ namespace
 				}
 			}
 
+			macroLaps.mark("tech");
 			// Process all scheduler intents (production + tech)
 			bool productionIssued = false;
 			bool techIssued = false;
@@ -8577,6 +8871,9 @@ namespace
 					{"reason", m_autonomy.state.profileSpendPlan.reason},
 					{"threat_response", m_autonomy.state.profileSpendPlan.threatResponse},
 					{"surplus_under_threat", m_autonomy.state.profileSpendPlan.surplusUnderThreat},
+					{"opening_income_reserve", m_autonomy.state.profileSpendPlan.openingIncomeReserve},
+					{"army_floor", m_autonomy.state.profileSpendPlan.armyFloor},
+					{"wave_peak", m_autonomy.state.profileWavePeak},
 					{"response_until_tick", m_autonomy.state.profileThreatUntilTick},
 					{"sustained_offense", m_autonomy.state.profileSpendPlan.sustainedOffense},
 					{"army_target", m_autonomy.state.profileSpendPlan.armyTarget},
@@ -9475,6 +9772,7 @@ namespace
 			// Live economy rate; same smoothed net bank delta as the final snapshot's income_rate.
 			const int netCashPerMinute = static_cast<int>(std::floor(m_autonomy.state.smoothedNetCashPerMinute));
 			result["income_rate"] = netCashPerMinute;
+			result["market_sprawl"] = m_autonomy.state.marketSprawlTelemetry;
 			result["game_speed"] = buildGameSpeedState();
 			result["net_cash_per_minute"] = netCashPerMinute;
 			const AIControlAdapterProfilePolicyConfig zoneTargetPolicyConfig = resolveAutonomyProfilePolicyConfig();

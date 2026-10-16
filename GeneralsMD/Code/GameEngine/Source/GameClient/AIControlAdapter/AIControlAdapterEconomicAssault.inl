@@ -4,6 +4,10 @@
 		{
 			m_autonomy.state.profileSpendPlan = {};
 			m_autonomy.state.profileThreatUntilTick = 0u;
+			m_autonomy.state.profileWavePeak = 0;
+			m_autonomy.state.profileWavePeakTick = 0u;
+			m_autonomy.state.profileArmsDealerTarget = 0;
+			m_autonomy.state.profileBarracksTarget = 0;
 			m_autonomy.state.profileOffenseFundedSinceTick = 0u;
 			m_autonomy.state.profileAvailableCash = 0u;
 			m_autonomy.state.profileConstructionCommittedCash = 0u;
@@ -177,6 +181,25 @@
 			m_autonomy.state.profileSpendPlan = AIControlAdapterProfilePolicyManager().ResolveSpendPlan(
 				config, cash, completedMarkets, approaching, response, m_autonomy.state.economicVictory);
 			m_autonomy.state.profileSpendPlan.deferIncomeUnderThreat = autonomyRuleEnabled("defer_income_under_threat");
+			// Size the standing army to recent attack waves: hold the peak for 4 minutes,
+			// then decay it over the next 4, so production keeps refilling between waves.
+			if (approaching >= m_autonomy.state.profileWavePeak)
+			{
+				m_autonomy.state.profileWavePeak = approaching;
+				m_autonomy.state.profileWavePeakTick = now;
+			}
+			int wave = m_autonomy.state.profileWavePeak;
+			const DWORD waveAge = now - m_autonomy.state.profileWavePeakTick;
+			if (waveAge > 240000u)
+			{
+				const DWORD decayMs = std::min<DWORD>(waveAge - 240000u, 240000u);
+				wave = static_cast<int>(wave * static_cast<long long>(240000u - decayMs) / 240000);
+				if (wave <= approaching) { m_autonomy.state.profileWavePeak = approaching; m_autonomy.state.profileWavePeakTick = now; wave = approaching; }
+			}
+			AIControlAdapterProfileSpendPlan& plan = m_autonomy.state.profileSpendPlan;
+			plan.armyFloor = std::min(150, (wave * 5 + 3) / 4);
+			plan.armyFloorMet = mobileArmy >= plan.armyFloor;
+			if (!plan.sustainedOffense) plan.armyTarget = std::max(plan.armyTarget, plan.armyFloor);
 		}
 
 		int profilePendingCombatCount(Player* player) const
@@ -213,8 +236,11 @@
 					if (object.object != nullptr && object.name == name) ++existing;
 				for (const auto* task : m_autonomy.taskReservationManager.findBuildTasks(name))
 					if (task->targetObjectId == 0u) ++existing;
-				const int target = containsIgnoreCase(name, "armsdealer") ? std::min(8, 2 + m_autonomy.state.profileCompletedMarkets / 3)
-					: containsIgnoreCase(name, "barracks") ? 2 : 1;
+				// Never undercut the producer targets the macro planner chose (they scale with
+				// surplus cash and the army target); refusing here starved every other intent.
+				const int target = containsIgnoreCase(name, "armsdealer")
+					? std::max(std::min(8, 2 + m_autonomy.state.profileCompletedMarkets / 3), m_autonomy.state.profileArmsDealerTarget)
+					: containsIgnoreCase(name, "barracks") ? std::max(2, m_autonomy.state.profileBarracksTarget) : 1;
 				if (existing >= target) { reason = "profile_capacity_satisfied"; return false; }
 				category = existing == 0 ? StrategicSpendCategory::ProducerRecovery : StrategicSpendCategory::ProductionGrowth;
 			}

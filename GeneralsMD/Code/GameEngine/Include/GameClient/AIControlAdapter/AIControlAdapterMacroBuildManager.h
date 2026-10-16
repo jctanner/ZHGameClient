@@ -51,6 +51,12 @@ struct AIControlAdapterRemoteSupplyStageDecision
 struct AIControlAdapterMacroBuildSnapshot
 {
 	AIControlAdapterProfileSpendPlan profilePlan;
+	// Economy-first: keep supply expansion during survival recovery while the
+	// wave-sized army floor holds and the main base is not critical.
+	bool expansionDuringRecovery = false;
+	// Economy-first with cash well above the growth reserve: several macro builds per
+	// pass and producers in expansion zones.
+	bool economicSurplus = false;
 	bool isSprawlStyle = false;
 	bool isBalancedSprawl = false;
 	bool hasActiveZone = false;

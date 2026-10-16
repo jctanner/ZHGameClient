@@ -34,6 +34,21 @@
             ~ProfileScope() { owner.recordProfileSection(name, profileNowUs() - started); }
         };
 
+        // Sequential checkpoints inside one long function: each mark records the time
+        // since the previous mark under prefix+name; the destructor records the tail.
+        struct ProfileLaps
+        {
+            AIControlAdapterState& owner; std::string prefix; std::uint64_t last;
+            ProfileLaps(AIControlAdapterState& state, const char* sectionPrefix) : owner(state), prefix(sectionPrefix), last(profileNowUs()) {}
+            void mark(const char* name)
+            {
+                const std::uint64_t now = profileNowUs();
+                owner.recordProfileSection(prefix + name, now - last);
+                last = now;
+            }
+            ~ProfileLaps() { mark("tail"); }
+        };
+
         // Called at the end of each update with the whole-frame duration.
         void finishProfileFrame(std::uint64_t frameUs)
         {

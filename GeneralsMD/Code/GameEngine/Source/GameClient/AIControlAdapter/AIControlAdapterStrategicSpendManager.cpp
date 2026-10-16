@@ -69,17 +69,27 @@ AIControlAdapterStrategicSpendDecision AIControlAdapterStrategicSpendManager::Ev
 		case StrategicSpendCategory::DefensiveWmd:
 			// Preserve money for local counters when the standing defense is thin.
 			permitted = snapshot.activeWmdThreats > 0 && (!plan.threatResponse || snapshot.armySize >= 12);
+			decision.protectedCash += plan.openingIncomeReserve;
 			break;
 		case StrategicSpendCategory::StaticDefense:
 			permitted = !plan.threatResponse || snapshot.armySize >= 12;
+			decision.protectedCash += plan.openingIncomeReserve;
 			break;
 		case StrategicSpendCategory::ProductionGrowth:
-		case StrategicSpendCategory::Expansion:
 			permitted = !plan.threatResponse || surplusGrowth;
+			decision.protectedCash += plan.openingIncomeReserve;
+			break;
+		case StrategicSpendCategory::Expansion:
+			// Expansion first: new supply zones continue under pressure once the
+			// standing army meets the wave-sized floor, unless the main base is critical.
+			permitted = !plan.threatResponse || surplusGrowth || (plan.armyFloorMet && !snapshot.mainBaseCritical);
 			break;
 		case StrategicSpendCategory::TechPrerequisite:
+			permitted = !plan.threatResponse;
+			break;
 		case StrategicSpendCategory::LuxuryBaseline:
 			permitted = !plan.threatResponse;
+			decision.protectedCash += plan.openingIncomeReserve;
 			break;
 		}
 		decision.spendBudget = snapshot.money > decision.protectedCash ? snapshot.money - decision.protectedCash : 0u;
