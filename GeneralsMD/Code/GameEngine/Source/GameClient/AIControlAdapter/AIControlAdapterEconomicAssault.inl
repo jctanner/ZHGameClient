@@ -607,6 +607,20 @@
 				return unit == nullptr || unit->isEffectivelyDead() || unit->getContainedBy() != nullptr
 					|| unit->getPosition() == nullptr || !unit->isAbleToAttack();
 			}), units.end());
+			// Leave free infantry for capture (Rebels) and garrisons (RPG troopers): the
+			// assault otherwise recruits every unit and those systems never get any.
+			{
+				int rebelsToKeep = m_autonomy.state.captureInfantryReserve;
+				int rpgToKeep = m_autonomy.state.garrisonInfantryReserve;
+				units.erase(std::remove_if(units.begin(), units.end(), [&](Object* unit) {
+					const ThingTemplate* templ = unit->getTemplate();
+					if (templ == nullptr || !unit->isKindOf(KINDOF_INFANTRY)) return false;
+					const std::string name = templ->getName().str();
+					if (rpgToKeep > 0 && (containsIgnoreCase(name, "tunneldefender") || containsIgnoreCase(name, "rpg"))) { --rpgToKeep; return true; }
+					if (rebelsToKeep > 0 && containsIgnoreCase(name, "rebel")) { --rebelsToKeep; return true; }
+					return false;
+				}), units.end());
+			}
 			if (units.empty()) return;
 			// One bounded local cohort per pass avoids a single 1,000-unit
 			// selection/formation; every free cohort gets its turn, including infantry.

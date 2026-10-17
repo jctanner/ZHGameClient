@@ -1032,6 +1032,48 @@
 			}
 		}
 
+		// Our live structures (position, radius, spacing category), rebuilt at most once per
+		// logic frame. Placement searches test hundreds of candidates; scanning every owned
+		// object per candidate dominated large-sprawl frame time.
+		struct OwnedStructureEntry
+		{
+			Coord3D position;
+			Real radius;
+			const char* spacingCategory;
+		};
+
+		static void collectOwnedStructureCallback(Object* obj, void* userData)
+		{
+			if (obj == nullptr || userData == nullptr || obj->isEffectivelyDead() || !obj->isKindOf(KINDOF_STRUCTURE))
+			{
+				return;
+			}
+			const Coord3D* pos = obj->getPosition();
+			if (pos == nullptr)
+			{
+				return;
+			}
+			const ThingTemplate* tt = obj->getTemplate();
+			static_cast<std::vector<OwnedStructureEntry>*>(userData)->push_back(OwnedStructureEntry{
+				*pos, obj->getGeometryInfo().getBoundingCircleRadius(), tt != nullptr ? getBuildSpacingCategory(tt) : nullptr });
+		}
+
+		static const std::vector<OwnedStructureEntry>& ownedStructureIndex(Player* player)
+		{
+			static std::vector<OwnedStructureEntry> entries;
+			static UnsignedInt cachedFrame = 0xFFFFFFFFu;
+			static Int cachedPlayer = -1;
+			const UnsignedInt frame = TheGameLogic != nullptr ? TheGameLogic->getFrame() : 0u;
+			if (frame != cachedFrame || player->getPlayerIndex() != cachedPlayer)
+			{
+				entries.clear();
+				player->iterateObjects(collectOwnedStructureCallback, &entries);
+				cachedFrame = frame;
+				cachedPlayer = player->getPlayerIndex();
+			}
+			return entries;
+		}
+
 		static bool hasOwnedSameTypeStructureTooClose(Player* player, const Coord3D* pos, const ThingTemplate* templateToPlace)
 		{
 			if (player == nullptr || pos == nullptr || templateToPlace == nullptr)
@@ -1051,15 +1093,22 @@
 				candidateRadius = 40.0f;
 			}
 
-			NearbySameTypeStructureClearanceContext ctx = {
-				pos,
-				candidateRadius,
-				getSameTypeSpacingPadding(templateToPlace),
-				spacingCategory,
-				false
-			};
-			player->iterateObjects(findNearbySameTypeStructureClearanceCallback, &ctx);
-			return ctx.tooClose;
+			// Same rule as findNearbySameTypeStructureClearanceCallback, against the per-frame index.
+			const Real padding = getSameTypeSpacingPadding(templateToPlace);
+			for (const OwnedStructureEntry& entry : ownedStructureIndex(player))
+			{
+				if (entry.spacingCategory == nullptr || std::strcmp(entry.spacingCategory, spacingCategory) != 0)
+				{
+					continue;
+				}
+				const Real existingRadius = entry.radius < 1.0f ? 40.0f : entry.radius;
+				const Real required = candidateRadius + existingRadius + padding;
+				if (distanceSq2D(pos, &entry.position) <= required * required)
+				{
+					return true;
+				}
+			}
+			return false;
 		}
 
 		static void findNearbyStructureClearanceCallback(Object* obj, void* userData)
@@ -1106,9 +1155,16 @@
 				candidateRadius = 40.0f;
 			}
 
-			NearbyStructureClearanceContext ctx = { pos, candidateRadius, extraPadding, false };
-			player->iterateObjects(findNearbyStructureClearanceCallback, &ctx);
-			return ctx.tooClose;
+			// Same rule as findNearbyStructureClearanceCallback, against the per-frame index.
+			for (const OwnedStructureEntry& entry : ownedStructureIndex(player))
+			{
+				const Real required = candidateRadius + entry.radius + extraPadding;
+				if (distanceSq2D(pos, &entry.position) <= required * required)
+				{
+					return true;
+				}
+			}
+			return false;
 		}
 
 		std::string makeBuildExpansionKey(Player* player, const ThingTemplate* buildingTemplate) const
@@ -1203,8 +1259,8 @@
 		}
 
 		// Sprawl grows outward: nearest unclaimed source beyond the minimum ring first. A
-		// source we already hold is only reused while it has fewer than two of our claims
-		// (stacking stashes at one pile added income cost but no territory).
+		// source we already hold is never reused (one stash per supply source; stacking
+		// added cost but no territory).
 		Object* chooseRemoteSupplySource(
 			const std::vector<SupplySourceInfo>& sources,
 			const Coord3D* remoteOrigin,
@@ -1247,7 +1303,7 @@
 						bestUnclaimedDistSq = distSq;
 					}
 				}
-				else if (claims < 2)
+				else if (claims < 1)
 				{
 					if (bestLightlyClaimed == nullptr || distSq < bestLightlyClaimedDistSq)
 					{
@@ -1328,19 +1384,6 @@
 						candidate.y += std::sin(theta) * ring;
 						candidate.z = 0.0f;
 
-						if (TheBuildAssistant->isLocationLegalToBuild(&candidate, buildingTemplate, placeAngle, legalOpts, worker, nullptr) != LBC_OK)
-						{
-							continue;
-						}
-						if (isBuildLocationTemporarilyReserved(player, &candidate, buildingTemplate))
-						{
-							continue;
-						}
-						if (hasOwnedStructureTooClose(player, &candidate, buildingTemplate, 30.0f))
-						{
-							continue;
-						}
-
 						Real sidePenalty = 0.0f;
 						Real sideAlignment = 0.0f;
 						if (hasReferenceDir)
@@ -1371,6 +1414,19 @@
 								continue;
 							}
 						}
+						// Expensive engine legality/overlap checks only after the cheap filters.
+						if (isBuildLocationTemporarilyReserved(player, &candidate, buildingTemplate))
+						{
+							continue;
+						}
+						if (hasOwnedStructureTooClose(player, &candidate, buildingTemplate, 30.0f))
+						{
+							continue;
+						}
+						if (TheBuildAssistant->isLocationLegalToBuild(&candidate, buildingTemplate, placeAngle, legalOpts, worker, nullptr) != LBC_OK)
+						{
+							continue;
+						}
 						if (!found ||
 							pass < bestPass ||
 							(pass == bestPass && ring < bestRing) ||
@@ -1384,6 +1440,12 @@
 							bestWorkerDistSq = distSq;
 							best = candidate;
 						}
+					}
+					// A smaller ring always wins within a pass, so stop once a ring has a site
+					// (scanning every ring of every pass cost up to ~3,700 legality checks).
+					if (found)
+					{
+						break;
 					}
 				}
 			}

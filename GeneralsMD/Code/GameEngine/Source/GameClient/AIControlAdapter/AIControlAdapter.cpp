@@ -455,6 +455,8 @@ namespace
 		AIControlAdapterProfileSpendPlan profileSpendPlan;
 		DWORD profileThreatUntilTick = 0u;
 		int profileWavePeak = 0;            // largest recent count of enemies near our zones
+		int captureInfantryReserve = 0;     // capture sources the assault must leave free
+		int garrisonInfantryReserve = 0;    // RPG infantry the assault must leave free for garrisons
 		int profileArmsDealerTarget = 0;    // producer targets chosen by the macro planner; the
 		int profileBarracksTarget = 0;      // construction gate must not undercut them
 		DWORD profileWavePeakTick = 0u;
@@ -4272,6 +4274,17 @@ namespace
 							{"y", mainZoneCenter.y}
 						});
 					}
+					else if (m_autonomy.state.profileSpendPlan.active && !zones.empty())
+					{
+						// Economy-first sprawl always uses the claim-aware source chooser; the
+						// legacy nearest-source path stacked stashes at sources we already held.
+						const Coord3D origin = hasMainZoneForFootprint ? mainZoneCenter : zones.front().center;
+						args["prefer_remote"] = true;
+						args["remote_stage"] = "claim_aware";
+						args["remote_min_distance"] = 0.0f;
+						args["remote_max_distance"] = 0.0f;
+						args["remote_origin"] = nlohmann::json::object({{"x", origin.x}, {"y", origin.y}});
+					}
 					return tryCommand("auto_macro", "Game.BuildSupplyStashSmart", args, outReason);
 				};
 				AIControlAdapterStrategicSpendSnapshotOverrides macroSpendOverrides;
@@ -5196,14 +5209,15 @@ namespace
 						}
 					}
 					// 3. Development package for every non-main zone (one item per zone per pass),
-					//    rotating so all zones are reached: Tunnel, Stinger, Barracks, Arms Dealer, 2 markets.
+					//    rotating so all zones are reached: Tunnel, Stinger, Barracks, Arms Dealer, 1 market
+					//    (two per zone produced ~74 markets by 18 min, inflating placement cost).
 					struct DevelopmentItem { const char* command; const char* rule; Int AutonomyZoneCounts::*count; Int AutonomyZoneCounts::*inProgress; Int desired; };
 					static const DevelopmentItem developmentItems[] = {
 						{ "Game.BuildTunnelNetwork", "static_defense", &AutonomyZoneCounts::tunnels, &AutonomyZoneCounts::tunnelsInProgress, 1 },
 						{ "Game.BuildStingerSite", "static_defense", &AutonomyZoneCounts::stingers, &AutonomyZoneCounts::stingersInProgress, 1 },
 						{ "Game.BuildBarracksSmart", "capacity_growth", &AutonomyZoneCounts::barracks, &AutonomyZoneCounts::barracksInProgress, 1 },
 						{ "Game.BuildArmsDealerSmart", "capacity_growth", &AutonomyZoneCounts::armsDealers, &AutonomyZoneCounts::armsDealersInProgress, 1 },
-						{ "Game.BuildBlackMarketSmart", "market_growth", &AutonomyZoneCounts::blackMarkets, &AutonomyZoneCounts::blackMarketsInProgress, 2 },
+						{ "Game.BuildBlackMarketSmart", "market_growth", &AutonomyZoneCounts::blackMarkets, &AutonomyZoneCounts::blackMarketsInProgress, 1 },
 					};
 					const std::size_t zoneTotal = std::min(zones.size(), zoneCounts.size());
 					for (std::size_t step = 0; step < zoneTotal && jobBudget > 0; ++step)
@@ -7023,6 +7037,7 @@ namespace
 
 				// Phase 6.3: Log capture source policy
 				const bool productionNeeded = captureSourcesAvailable < desiredCaptureSources && desiredCaptureSources > 0;
+				m_autonomy.state.captureInfantryReserve = autonomyRuleEnabled("capture") ? std::max(0, desiredCaptureSources) : 0;
 				adapterLog(
 					"capture_source_policy live=%d reserved=%d available=%d desired=%d targets=%d max_concurrent=%d production_needed=%d reason=%s",
 					captureSourcesLive,
@@ -11880,6 +11895,10 @@ namespace
 				throughputDecision.infantryReserveHeld,
 				throughputDecision.reason);
 
+			// Garrison assignment itself holds back infantryReserveHeld before assigning, so the
+			// assault must leave that reserve plus the unmet garrison demand (bounded).
+			m_autonomy.state.garrisonInfantryReserve = autonomyRuleEnabled("garrisons")
+				? std::min(40, std::max(0, desiredInfantryTotal - assignedGarrisonInfantry) + std::max(0, throughputDecision.infantryReserveHeld)) : 0;
 			adapterLog(
 				"garrison_policy zone=%u structures=%d selected=%d filled=%d desired_infantry=%d assigned=%d available_infantry=%d reason=%s",
 				usefulZones.empty() ? 0u : usefulZones.front().anchorId,
