@@ -198,6 +198,29 @@
             }
         }
 
+        // Black Markets (built or under construction) plus pending market build tasks near a location.
+        int countOwnedMarketsNear(Player* player, const Coord3D& location, Real radius)
+        {
+            int markets = 0;
+            const Real radiusSq = radius * radius;
+            std::vector<AutomationOwnedObjectSnapshot> owned;
+            collectOwnedAutomationObjects(player, owned);
+            for (const auto& object : owned)
+            {
+                if (object.object == nullptr || object.object->getPosition() == nullptr || !containsIgnoreCase(object.name, "blackmarket")) continue;
+                const Real dx = object.object->getPosition()->x - location.x, dy = object.object->getPosition()->y - location.y;
+                if (dx * dx + dy * dy <= radiusSq) ++markets;
+            }
+            for (const auto* task : m_autonomy.taskReservationManager.findBuildTasks())
+            {
+                if (task == nullptr || task->targetObjectId != 0u || !containsIgnoreCase(task->expectedTemplate, "blackmarket")) continue;
+                if (task->state == SpecialTaskState::Complete || task->state == SpecialTaskState::Failed || task->state == SpecialTaskState::Expired) continue;
+                const Real dx = task->targetPosition.x - location.x, dy = task->targetPosition.y - location.y;
+                if (dx * dx + dy * dy <= radiusSq) ++markets;
+            }
+            return markets;
+        }
+
         // Expansion-off constrains new automated growth, not observed anchors.
         bool withinExistingAutonomyFootprint(const Coord3D& location) const
         {
@@ -234,6 +257,15 @@
                     if (task->targetObjectId == 0u) rule = "capacity_growth";
             }
             if (rule != nullptr && !requireAutonomyRule(rule, reason)) return false;
+            // Surplus mode: at most two Black Markets per zone across every market path
+            // (zones were reaching 6-9 markets and filling the market concurrency slots).
+            if (m_autonomy.state.profileSpendPlan.surplusMode && containsIgnoreCase(name, "blackmarket")
+                && countOwnedMarketsNear(player, location, 320.0f) >= 2)
+            {
+                reason = "zone_market_cap";
+                m_autonomy.state.ruleBlocks["market_growth"] = {reason, adapterGameplayTick()};
+                return false;
+            }
             if (!autonomyRuleEnabled("zone_expansion") && !withinExistingAutonomyFootprint(location))
             {
                 reason = "no_existing_zone_space";

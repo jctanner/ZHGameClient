@@ -683,28 +683,39 @@
 				return false;
 			}
 
-			const NameKeyType warehouseKey = TheNameKeyGenerator->nameToKey("SupplyWarehouseDockUpdate");
-			for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
+			// Scanning every game object for warehouse modules is expensive and several
+			// expansion jobs run per pass, so the full warehouse list is cached per logic frame.
+			static std::vector<SupplySourceInfo> frameSources;
+			static UnsignedInt frameSourcesFrame = 0xFFFFFFFFu;
+			const UnsignedInt frame = TheGameLogic->getFrame();
+			if (frame != frameSourcesFrame)
 			{
-				if (obj->isEffectivelyDead())
+				frameSources.clear();
+				const NameKeyType warehouseKey = TheNameKeyGenerator->nameToKey("SupplyWarehouseDockUpdate");
+				for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr; obj = obj->getNextObject())
 				{
-					continue;
-				}
+					if (obj->isEffectivelyDead())
+					{
+						continue;
+					}
 
-				SupplyWarehouseDockUpdate* warehouse = (SupplyWarehouseDockUpdate*)obj->findUpdateModule(warehouseKey);
-				if (warehouse == nullptr)
+					SupplyWarehouseDockUpdate* warehouse = (SupplyWarehouseDockUpdate*)obj->findUpdateModule(warehouseKey);
+					if (warehouse == nullptr)
+					{
+						continue;
+					}
+
+					const Int boxes = warehouse->getBoxesStored();
+					frameSources.push_back({ obj, boxes, boxes * static_cast<Int>(TheGlobalData->m_baseValuePerSupplyBox) });
+				}
+				frameSourcesFrame = frame;
+			}
+			for (const SupplySourceInfo& info : frameSources)
+			{
+				if (info.cashValue >= minimumCash)
 				{
-					continue;
+					outSources.push_back(info);
 				}
-
-				const Int boxes = warehouse->getBoxesStored();
-				const Int cash = boxes * static_cast<Int>(TheGlobalData->m_baseValuePerSupplyBox);
-				if (cash < minimumCash)
-				{
-					continue;
-				}
-
-				outSources.push_back({ obj, boxes, cash });
 			}
 
 			return true;
@@ -2353,9 +2364,13 @@
 			best.z = 0.0f;
 			const Real structurePadding = 36.0f;
 			const Real scanRadius = zoneRadius < 64.0f ? 64.0f : zoneRadius;
+			// Inner rings first; once a ring yields a site only two more rings are scanned
+			// (a full 450-unit scan ran ~900 legality checks, up to ~0.9 s per build).
+			Int ringsAfterFound = 0;
 
 			for (Real ring = 0.0f; ring <= scanRadius; ring += 24.0f)
 			{
+				if (found && ++ringsAfterFound > 2) break;
 				const Int slices = ring <= 0.01f ? 1 : 48;
 				for (Int i = 0; i < slices; ++i)
 				{
@@ -2371,10 +2386,7 @@
                     if (m_profileAutomaticSpendScope && isAutonomyModeActive()
                         && !autonomyRuleEnabled("zone_expansion") && !withinExistingAutonomyFootprint(candidate)) continue;
 
-					if (TheBuildAssistant->isLocationLegalToBuild(&candidate, buildingTemplate, placeAngle, legalOpts, worker, nullptr) != LBC_OK)
-					{
-						continue;
-					}
+					// Cheap indexed filters before the engine legality check.
 					if (isBuildLocationTemporarilyReserved(player, &candidate, buildingTemplate))
 					{
 						continue;
@@ -2384,6 +2396,10 @@
 						continue;
 					}
 					if (hasOwnedStructureTooClose(player, &candidate, buildingTemplate, structurePadding))
+					{
+						continue;
+					}
+					if (TheBuildAssistant->isLocationLegalToBuild(&candidate, buildingTemplate, placeAngle, legalOpts, worker, nullptr) != LBC_OK)
 					{
 						continue;
 					}
@@ -2482,10 +2498,6 @@
                     if (m_profileAutomaticSpendScope && isAutonomyModeActive()
                         && !autonomyRuleEnabled("zone_expansion") && !withinExistingAutonomyFootprint(candidate)) continue;
 
-							if (TheBuildAssistant->isLocationLegalToBuild(&candidate, buildingTemplate, placeAngle, legalOpts, worker, nullptr) != LBC_OK)
-							{
-								continue;
-							}
 							if (isBuildLocationTemporarilyReserved(player, &candidate, buildingTemplate))
 							{
 								continue;
@@ -2495,6 +2507,10 @@
 								continue;
 							}
 							if (hasOwnedStructureTooClose(player, &candidate, buildingTemplate, structurePadding))
+							{
+								continue;
+							}
+							if (TheBuildAssistant->isLocationLegalToBuild(&candidate, buildingTemplate, placeAngle, legalOpts, worker, nullptr) != LBC_OK)
 							{
 								continue;
 							}

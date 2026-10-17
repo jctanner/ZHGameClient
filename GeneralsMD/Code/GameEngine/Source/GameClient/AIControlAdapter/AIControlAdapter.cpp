@@ -3510,6 +3510,12 @@ namespace
 
 				bool ok = false;
 				const std::string cmdString = commandAlias.command;
+				// Per-command cost of autonomy-issued commands (profiler "auto:<cmd>:ok|fail").
+				struct AutoCommandTimer
+				{
+					AIControlAdapterState& owner; const std::string& command; const bool& result; std::uint64_t started;
+					~AutoCommandTimer() { owner.recordProfileSection("auto:" + command + (result ? ":ok" : ":fail"), AIControlAdapterState::profileNowUs() - started); }
+				} autoCommandTimer{*this, cmdString, ok, profileNowUs()};
 				if (cmdString == "Game.BuildSupplyStashSmart")
 				{
 					ok = executeGameBuildSupplyStashSmart(message, outReason);
@@ -4660,6 +4666,7 @@ namespace
 					counts.palacesInProgress,
 					palaceRecoveryResult.issued ? 1 : 0,
 					palaceRecoveryResult.reason);
+				macroLaps.mark("build/plan");
 				auto tryMacroBuildIntentScheduler = [&]() -> bool
 				{
 					for (const AIControlAdapterMacroBuildIntent& intent : macroBuildPlan.intents)
@@ -4829,6 +4836,7 @@ namespace
 					}
 				}
 
+				macroLaps.mark("build/dispatch");
 				// Phase 5.8: Non-supply expansion path for strategic/market footholds
 				// When supply expansion is blocked and economy is strong, allow Tunnel/Stinger foothold zones
 				const AIControlAdapterNonSupplyFootholdDecision footholdDecision =
@@ -4954,6 +4962,7 @@ namespace
 						static_cast<unsigned long>(money));
 				}
 
+				macroLaps.mark("build/foothold");
 				// Market sprawl (economy-first GLA): once Black Markets are available, zones no
 				// longer need supply. Place Black Market footholds around our territory: phase
 				// "safe" prefers sites far from known enemy structures; phase "forward" (8+
@@ -4972,7 +4981,10 @@ namespace
 					if (!sprawlPlan.active || !hasCompletedPalace || completedBlackMarkets < 2u) sprawlReason = "waiting_for_palace_and_markets";
 					else if (!autonomyRuleEnabled("zone_expansion") || !autonomyRuleEnabled("market_growth")) sprawlReason = "rule_disabled";
 					else if (macroSpendEconomy.mainBaseCritical) sprawlReason = "main_base_critical";
-					else if (!macroSpendPlan.economyGrowth.allowed) sprawlReason = macroSpendPlan.economyGrowth.reason != nullptr ? macroSpendPlan.economyGrowth.reason : "spend_blocked";
+					// Surplus mode: footholds have their own pending cap and are not held behind the
+					// shared market concurrency limit (zone development filled it continuously).
+					else if (!macroSpendPlan.economyGrowth.allowed
+						&& !(sprawlPlan.surplusMode && (!sprawlPlan.threatResponse || sprawlPlan.surplusUnderThreat))) sprawlReason = macroSpendPlan.economyGrowth.reason != nullptr ? macroSpendPlan.economyGrowth.reason : "spend_blocked";
 					else if (pendingMarketFootholds >= marketFootholdCap) sprawlReason = "pending_cap";
 					else if (AIControlAdapterIsTickInFuture(m_autonomy.state.nextMarketFootholdTick, sprawlNow)) sprawlReason = "cooldown";
 					else if (AutonomyState::PendingFootholdAnchor* unbuilt = [&]() -> AutonomyState::PendingFootholdAnchor*
@@ -4982,15 +4994,10 @@ namespace
 						for (auto& pending : m_autonomy.state.pendingFootholdAnchors)
 						{
 							if (pending.anchorType != ZoneAnchorType::MarketFoothold) continue;
-							bool hasMarket = false;
-							for (const AutonomyOwnedObjectSnapshot& owned : ownedObjects)
-							{
-								if (!owned.isBlackMarket || owned.object == nullptr || owned.object->getPosition() == nullptr) continue;
-								const Real dx = owned.object->getPosition()->x - pending.targetX;
-								const Real dy = owned.object->getPosition()->y - pending.targetY;
-								if (dx * dx + dy * dy < 300.0f * 300.0f) { hasMarket = true; break; }
-							}
-							if (!hasMarket) return &pending;
+							// Satisfied by any market or pending market task near the site (a worker
+							// still walking there counts; re-issuing hit zone_market_cap forever).
+							const Coord3D site = {pending.targetX, pending.targetY, 0.0f};
+							if (countOwnedMarketsNear(player, site, 320.0f) == 0) return &pending;
 						}
 						return nullptr;
 					}())
@@ -5013,6 +5020,14 @@ namespace
 							footholdZone, nlohmann::json::object(), followReason);
 						m_autonomy.state.nextMarketFootholdTick = sprawlNow + (sprawlPlan.surplusMode ? 2000u : 6000u);
 						sprawlReason = followIssued ? "pending_site_followup" : "pending_site_followup_failed";
+						if (!followIssued && followReason == "zone_market_cap")
+						{
+							const unsigned int dropId = unbuilt->syntheticAnchorId;
+							auto& pendings = m_autonomy.state.pendingFootholdAnchors;
+							pendings.erase(std::remove_if(pendings.begin(), pendings.end(),
+								[&](const AutonomyState::PendingFootholdAnchor& p) { return p.syntheticAnchorId == dropId; }), pendings.end());
+							sprawlReason = "pending_site_capped_dropped";
+						}
 						sprawlCandidateJson = {{"x", unbuilt->targetX}, {"y", unbuilt->targetY}, {"issued", followIssued}, {"detail", followReason}, {"followup", true}};
 						adapterLog("market_sprawl_foothold_followup x=%.1f y=%.1f issued=%d detail=%s",
 							unbuilt->targetX, unbuilt->targetY, followIssued ? 1 : 0, followReason.c_str());
@@ -5075,6 +5090,7 @@ namespace
 										const Real dx = candidate.x - entry.second.positionX, dy = candidate.y - entry.second.positionY;
 										if (dx * dx + dy * dy < 700.0f * 700.0f) rejected = true;
 									}
+									if (!rejected && sprawlPlan.surplusMode && countOwnedMarketsNear(player, candidate, 320.0f) >= 2) rejected = true;
 									if (rejected) continue;
 									Real nearestEnemy = 1.0e9f;
 									for (const Coord3D& enemyPos : enemyStructures)
@@ -5154,6 +5170,7 @@ namespace
 					};
 				}
 
+				macroLaps.mark("build/market_sprawl");
 				// Surplus mode bulk job pass (economy-first, available cash >= surplusModeCash):
 				// money is not the constraint, so issue many construction jobs per pass directly
 				// to the executors (each claims its own worker and placement), bypassing the
@@ -5172,12 +5189,16 @@ namespace
 					bool jobTimeBudgetHit = false;
 					int ccJobs = 0, expansionJobs = 0, zoneJobs = 0, jobFailures = 0;
 					std::map<std::string, int> zoneJobsByCommand;
+					std::uint64_t slowestJobUs = 0; std::string slowestJobKey, slowestJobReason;
 					auto runJob = [&](const std::string& key, const std::function<bool(std::string&)>& job) -> bool
 					{
 						if (jobBudget <= 0 || backoff.count(key) != 0u) return false;
 						if (profileNowUs() - jobPassStartUs > 25000u) { jobTimeBudgetHit = true; jobBudget = 0; return false; }
 						std::string jobReason;
+						const std::uint64_t jobStartUs = profileNowUs();
 						const bool ok = job(jobReason);
+						const std::uint64_t jobUs = profileNowUs() - jobStartUs;
+						if (jobUs > slowestJobUs) { slowestJobUs = jobUs; slowestJobKey = key; slowestJobReason = ok ? "ok" : jobReason; }
 						--jobBudget;
 						if (!ok)
 						{
@@ -5202,7 +5223,7 @@ namespace
 					//    and counts pending stash tasks as claims, so each call targets a new site.
 					if (autonomyRuleEnabled("zone_expansion"))
 					{
-						for (int i = 0; i < 4 && jobBudget > 0; ++i)
+						for (int i = 0; i < 2 && jobBudget > 0; ++i)
 						{
 							if (!runJob("supply_expansion_" + std::to_string(i), [&](std::string& r) { return trySupplyExpansionBuild(r); })) break;
 							++expansionJobs;
@@ -5256,6 +5277,7 @@ namespace
 						{"zone_jobs_by_command", zoneJobsByCommand},
 						{"backoff_entries", static_cast<int>(backoff.size())},
 						{"time_budget_hit", jobTimeBudgetHit},
+						{"slowest_job", {{"key", slowestJobKey}, {"ms", static_cast<double>(slowestJobUs) / 1000.0}, {"result", slowestJobReason}}},
 						{"pass_ms", static_cast<double>(profileNowUs() - jobPassStartUs) / 1000.0}
 					};
 					adapterLog("surplus_job_pass cc=%d expansion=%d zone=%d failures=%d budget_left=%d backoff=%d",
@@ -5266,6 +5288,7 @@ namespace
 					m_autonomy.state.surplusModeTelemetry = {{"active", false}};
 				}
 
+				macroLaps.mark("build/surplus_jobs");
 				if (!issued && reason.empty())
 				{
 					reason = macroBuildManager.EvaluateMacroHoldReason({
@@ -9958,6 +9981,14 @@ namespace
 			result["surplus_mode"] = m_autonomy.state.surplusModeTelemetry;
 			result["game_speed"] = buildGameSpeedState();
 			result["net_cash_per_minute"] = netCashPerMinute;
+			// Gross deposits over the engine's rolling 60 s window (markets, supply, captures);
+			// spend per minute is gross minus net.
+			if (Player* incomePlayer = resolveAutonomyPlayer(); incomePlayer != nullptr && incomePlayer->getMoney() != nullptr)
+			{
+				const int gross = static_cast<int>(incomePlayer->getMoney()->getCashPerMinute());
+				result["gross_income_per_minute"] = gross;
+				result["spend_per_minute"] = gross - netCashPerMinute;
+			}
 			const AIControlAdapterProfilePolicyConfig zoneTargetPolicyConfig = resolveAutonomyProfilePolicyConfig();
 			if (zoneTargetPolicyConfig.isSprawlStyle)
 			{

@@ -1483,8 +1483,14 @@ void W3DRadar::draw( Int pixelX, Int pixelY, Int width, Int height )
 	TheDisplay->drawImage( m_terrainImage, ul.x, ul.y, lr.x, lr.y );
 
 	// refresh the overlay texture once every so many frames
-	if( TheGameClient->getFrame() % OVERLAY_REFRESH_RATE == 0 )
+	// (elapsed-frame test: accelerated matches advance several logic frames per draw, and a
+	// fixed stride such as 15 never lands on a multiple of the rate, freezing the overlay)
+	static UnsignedInt s_lastOverlayRefreshFrame = 0;
+	const UnsignedInt overlayFrame = TheGameClient->getFrame();
+	if( overlayFrame < s_lastOverlayRefreshFrame || overlayFrame - s_lastOverlayRefreshFrame >= OVERLAY_REFRESH_RATE
+		|| overlayFrame % OVERLAY_REFRESH_RATE == 0 )
 	{
+		s_lastOverlayRefreshFrame = overlayFrame;
 		updateObjectTexture(m_overlayTexture);
 	}
 

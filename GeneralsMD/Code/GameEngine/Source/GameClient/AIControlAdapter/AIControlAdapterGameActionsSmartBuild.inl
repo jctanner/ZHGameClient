@@ -234,6 +234,13 @@
 				reason = "building_template_not_found";
 				return false;
 			}
+			// Profile capacity/budget gate before the placement search (the same check in
+			// executeConstructAtLocation otherwise rejects after a full search).
+			if (!profileConstructionAllowed(player, buildingTemplate,
+				static_cast<unsigned int>(std::max<Int>(0, buildingTemplate->calcCostToBuild(player))), reason))
+			{
+				return false;
+			}
 
 			Coord3D location;
 			Real angle = 0.0f;
@@ -381,6 +388,13 @@
 				reason = "building_template_not_found";
 				return false;
 			}
+			// Profile capacity/budget gate before the placement search (the same check in
+			// executeConstructAtLocation otherwise rejects after a full search).
+			if (!profileConstructionAllowed(player, buildingTemplate,
+				static_cast<unsigned int>(std::max<Int>(0, buildingTemplate->calcCostToBuild(player))), reason))
+			{
+				return false;
+			}
 
 			Object* anchor = nullptr;
 			if (requestedAnchorId > 0)
@@ -479,6 +493,13 @@
 			if (buildingTemplate == nullptr)
 			{
 				reason = "building_template_not_found";
+				return false;
+			}
+			// Profile capacity/budget gate before the placement search (the same check in
+			// executeConstructAtLocation otherwise rejects after a full search).
+			if (!profileConstructionAllowed(player, buildingTemplate,
+				static_cast<unsigned int>(std::max<Int>(0, buildingTemplate->calcCostToBuild(player))), reason))
+			{
 				return false;
 			}
 
@@ -586,6 +607,13 @@
 				reason = "building_template_not_found";
 				return false;
 			}
+			// Profile capacity/budget gate before the placement search (the same check in
+			// executeConstructAtLocation otherwise rejects after a full search).
+			if (!profileConstructionAllowed(player, buildingTemplate,
+				static_cast<unsigned int>(std::max<Int>(0, buildingTemplate->calcCostToBuild(player))), reason))
+			{
+				return false;
+			}
 
 			Object* anchor = nullptr;
 			if (requestedAnchorId > 0)
@@ -684,6 +712,13 @@
 			if (buildingTemplate == nullptr)
 			{
 				reason = "building_template_not_found";
+				return false;
+			}
+			// Profile capacity/budget gate before the placement search (the same check in
+			// executeConstructAtLocation otherwise rejects after a full search).
+			if (!profileConstructionAllowed(player, buildingTemplate,
+				static_cast<unsigned int>(std::max<Int>(0, buildingTemplate->calcCostToBuild(player))), reason))
+			{
 				return false;
 			}
 
@@ -786,6 +821,13 @@
 				reason = "building_template_not_found";
 				return false;
 			}
+			// Profile capacity/budget gate before the placement search (the same check in
+			// executeConstructAtLocation otherwise rejects after a full search).
+			if (!profileConstructionAllowed(player, buildingTemplate,
+				static_cast<unsigned int>(std::max<Int>(0, buildingTemplate->calcCostToBuild(player))), reason))
+			{
+				return false;
+			}
 
 			Object* anchor = nullptr;
 			if (requestedAnchorId > 0)
@@ -807,6 +849,14 @@
 				anchor = findPrimaryCommandCenter(player);
 			}
 
+			// Surplus per-zone market cap, checked before the placement search (a capped
+			// zone otherwise costs a full search that the construction gate then rejects).
+			if (zoneArgs.hasZoneCenter && m_profileAutomaticSpendScope && isAutonomyModeActive()
+				&& m_autonomy.state.profileSpendPlan.surplusMode && countOwnedMarketsNear(player, zoneArgs.zoneCenter, 320.0f) >= 2)
+			{
+				reason = "zone_market_cap";
+				return false;
+			}
 			Coord3D location;
 			Real angle = 0.0f;
 			bool foundLocation = false;
@@ -902,6 +952,13 @@
 			if (buildingTemplate == nullptr)
 			{
 				reason = "building_template_not_found";
+				return false;
+			}
+			// Profile capacity/budget gate before the placement search (the same check in
+			// executeConstructAtLocation otherwise rejects after a full search).
+			if (!profileConstructionAllowed(player, buildingTemplate,
+				static_cast<unsigned int>(std::max<Int>(0, buildingTemplate->calcCostToBuild(player))), reason))
+			{
 				return false;
 			}
 
