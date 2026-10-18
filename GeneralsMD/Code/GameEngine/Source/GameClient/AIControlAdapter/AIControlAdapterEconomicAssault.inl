@@ -540,11 +540,23 @@
 			std::vector<ObjectID> selected;
 			for (unsigned int id : (retarget || revealedObjective || stalled || task.lastCommandTick == 0u ? retained : std::vector<unsigned int>(idleIds.begin(), idleIds.end())))
 				selected.push_back(static_cast<ObjectID>(id));
+			// Attack-move by default so cohorts fight whatever they meet on the way (a direct
+			// attack order marches past defenders and gets picked off). Only units already
+			// close to a visible objective get the direct order; a retarget leaves units that
+			// are currently fighting alone unless the cohort has stalled.
+			const bool reissueAll = task.lastCommandTick == 0u || stalled;
 			std::vector<ObjectID> directIds, moveIds;
 			for (ObjectID id : selected)
 			{
 				Object* unit = TheGameLogic->findObjectByID(id);
-				if (visible && TheActionManager != nullptr && TheActionManager->getCanAttackObject(unit, target,
+				if (unit == nullptr || unit->getPosition() == nullptr) continue;
+				const Weapon* weapon = unit->getCurrentWeapon();
+				const bool fighting = weapon != nullptr && weapon->getLastShotFrame() > 0u
+					&& TheGameLogic->getFrame() - weapon->getLastShotFrame() <= 3u * LOGICFRAMES_PER_SECOND;
+				if (fighting && !reissueAll) continue;
+				const Real dx = unit->getPosition()->x - targetPosition.x, dy = unit->getPosition()->y - targetPosition.y;
+				const bool nearObjective = dx * dx + dy * dy <= 260.0f * 260.0f;
+				if (visible && nearObjective && TheActionManager != nullptr && TheActionManager->getCanAttackObject(unit, target,
 					CMD_FROM_PLAYER, ATTACK_NEW_TARGET) >= ATTACKRESULT_POSSIBLE_AFTER_MOVING) directIds.push_back(id);
 				else moveIds.push_back(id);
 			}
@@ -568,7 +580,9 @@
 			task.state = CombatTaskState::Attacking;
 			task.reason = visible ? "assault_visible_object" : "assault_remembered_position";
 			if (issued && !directIds.empty())
-				recordEconomicAssaultEvent(task, "assault_object_order", "visible_enemy");
+				recordEconomicAssaultEvent(task, "assault_object_order", "visible_enemy_near");
+			if (issued && !moveIds.empty())
+				recordEconomicAssaultEvent(task, "assault_attack_move", visible ? "visible_objective" : "remembered_position");
 			if (issued && stalled)
 				recordEconomicAssaultEvent(task, "assault_forward_recovery", "no_recent_shots_or_progress");
 			if (issued && retarget)

@@ -562,6 +562,9 @@ namespace
 		// Market sprawl (economy-first GLA): Black Market footholds away from supply.
 		struct FailedFootholdPoint { Real x; Real y; DWORD untilTick; };
 		std::vector<FailedFootholdPoint> failedMarketFootholdPoints;
+		std::map<std::string, int> frontierBlocks;       // worker jobs refused at the front line, by cause
+		int frontierRecalls = 0;                         // en-route workers recalled from new hazards
+		std::set<unsigned int> frontierSkippedFoundations; // foundations whose recovery was skipped
 		DWORD nextMarketFootholdTick = 0u;
 		nlohmann::json marketSprawlTelemetry = nlohmann::json::object();
 		// Surplus mode bulk job pass: per (zone anchor, command) failure backoff and a
@@ -1813,7 +1816,15 @@ namespace
 				}
 
 				++counts->mobileUnits;
-				if (!isDozer && !underConstruction && (obj->isKindOf(KINDOF_CAN_ATTACK) || obj->isAbleToAttack()))
+				// Units spawned by structures (Stinger Site soldiers) are slaves of the
+				// structure, not army: counting them filled the army target.
+				bool slaved = obj->getTemplate() != nullptr
+					&& containsIgnoreCase(obj->getTemplate()->getName().str(), "StingerSoldier");
+				for (BehaviorModule** module = obj->getBehaviorModules(); module != nullptr && *module != nullptr; ++module)
+				{
+					if ((*module)->getSlavedUpdateInterface() != nullptr) { slaved = true; break; }
+				}
+				if (!isDozer && !underConstruction && !slaved && (obj->isKindOf(KINDOF_CAN_ATTACK) || obj->isAbleToAttack()))
 				{
 					if (obj->getContainedBy() != nullptr) ++counts->containedCombatUnits;
 					else if (!obj->isKindOf(KINDOF_IMMOBILE) && obj->getAI() != nullptr) ++counts->mobileCombatUnits;
@@ -5091,6 +5102,7 @@ namespace
 										if (dx * dx + dy * dy < 700.0f * 700.0f) rejected = true;
 									}
 									if (!rejected && sprawlPlan.surplusMode && countOwnedMarketsNear(player, candidate, 320.0f) >= 2) rejected = true;
+									if (!rejected && frontierUnsafe(&origin.center, candidate)) rejected = true;
 									if (rejected) continue;
 									Real nearestEnemy = 1.0e9f;
 									for (const Coord3D& enemyPos : enemyStructures)
@@ -9770,7 +9782,7 @@ namespace
 				const ThingTemplate* tt = obj->getTemplate();
 				const std::string name = tt != nullptr ? tt->getName().str() : "";
 
-				if (containsIgnoreCase(name, "scudstorm"))
+				if (containsIgnoreCase(name, "scudstorm") && obj->isKindOf(KINDOF_STRUCTURE)) // not ScudStormMissile
 				{
 					++(ctx->liveCount);
 					const bool underConstruction = obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION);
@@ -9979,6 +9991,11 @@ namespace
 			result["income_rate"] = netCashPerMinute;
 			result["market_sprawl"] = m_autonomy.state.marketSprawlTelemetry;
 			result["surplus_mode"] = m_autonomy.state.surplusModeTelemetry;
+			result["frontier"] = {
+				{"hazards", static_cast<int>(frontierHazards().size())},
+				{"blocks", m_autonomy.state.frontierBlocks},
+				{"recalls", m_autonomy.state.frontierRecalls}
+			};
 			result["game_speed"] = buildGameSpeedState();
 			result["net_cash_per_minute"] = netCashPerMinute;
 			// Gross deposits over the engine's rolling 60 s window (markets, supply, captures);
@@ -12522,7 +12539,7 @@ namespace
 				}
 				const ThingTemplate* tt = obj->getTemplate();
 				const std::string name = tt != nullptr ? tt->getName().str() : "";
-				if (containsIgnoreCase(name, "scudstorm") && !obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
+				if (containsIgnoreCase(name, "scudstorm") && obj->isKindOf(KINDOF_STRUCTURE) && !obj->testStatus(OBJECT_STATUS_UNDER_CONSTRUCTION))
 				{
 					ReadyScudCountContext* ctx = static_cast<ReadyScudCountContext*>(userData);
 					++ctx->ready;
@@ -15534,7 +15551,7 @@ namespace
 				const ThingTemplate* tt = obj->getTemplate();
 				const std::string name = tt != nullptr ? tt->getName().str() : "";
 
-				if (containsIgnoreCase(name, "scudstorm"))
+				if (containsIgnoreCase(name, "scudstorm") && obj->isKindOf(KINDOF_STRUCTURE)) // not ScudStormMissile
 				{
 					++(ctx->liveCount);
 
@@ -15646,8 +15663,15 @@ namespace
 					hasWMDThreat ? StrategicSpendCategory::DefensiveWmd : StrategicSpendCategory::LuxuryBaseline,
 					5000u);
 			const bool profileScudGate = m_autonomy.state.profileSpendPlan.active;
+			// Concurrency counts foundations a worker is actually building plus pending build
+			// tasks: an idle foundation (builder lost, or past the front line) no longer holds
+			// the only slot and stops every further Storm. Surplus mode builds three at once.
+			int activeScudFoundations = 0;
+			for (const UnsignedInt foundationId : scudStormCtx.countedFoundationIds)
+				if (hasActiveBuilderForFoundation(player, static_cast<ObjectID>(foundationId))) ++activeScudFoundations;
+			const int scudConcurrency = m_autonomy.state.profileSpendPlan.surplusMode ? 3 : 1;
 			const bool scudSpendAllowed = centralScudSpend.allowed && (profileScudGate
-				? inProgressScudStorms < 1 : buildPolicy.spendAllowed);
+				? activeScudFoundations + scudStormBuildTasks < scudConcurrency : buildPolicy.spendAllowed);
 			const std::string policyReason =
 				scudSpendAllowed && !buildPolicy.highCashOverride ? reason :
 					(profileScudGate || buildPolicy.spendAllowed ? centralScudSpend.reason : buildPolicy.reason);
@@ -17907,6 +17931,17 @@ namespace
 				if (owned.isArmsDealer)
 				{
 					++counts.armsCount;
+					// Vans already in production count too; otherwise the rule queued one more
+					// on every evaluation while the first was building (38 vans in one match).
+					if (owned.object != nullptr && !owned.underConstruction)
+					{
+						const std::string vanTemplateName = inferRadarVanTemplateForProducer(owned.object);
+						const ThingTemplate* vanTemplate = vanTemplateName.empty() ? nullptr
+							: TheThingFactory->findTemplate(AsciiString(vanTemplateName.c_str()), false);
+						auto* queue = owned.object->getProductionUpdateInterface();
+						if (vanTemplate != nullptr && queue != nullptr)
+							counts.radarVanCount += static_cast<Int>(queue->countUnitTypeInQueue(vanTemplate));
+					}
 				}
 				if (owned.isRadarVan)
 				{

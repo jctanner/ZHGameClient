@@ -198,6 +198,86 @@
             }
         }
 
+        // Frontier hazards: points workers must not walk to or past until the threat is gone.
+        // Recent enemy army sightings, our zones currently under attack, and remembered
+        // enemy structures (bases and defenses). Rebuilt once per logic frame.
+        struct FrontierHazard { Real x; Real y; Real radius; const char* source; };
+        const std::vector<FrontierHazard>& frontierHazards()
+        {
+            static std::vector<FrontierHazard> hazards;
+            static UnsignedInt hazardsFrame = 0xFFFFFFFFu;
+            const UnsignedInt frame = TheGameLogic != nullptr ? TheGameLogic->getFrame() : 0u;
+            if (frame == hazardsFrame) return hazards;
+            hazardsFrame = frame;
+            hazards.clear();
+            const DWORD now = adapterGameplayTick();
+            for (const auto& cluster : m_autonomy.enemyMemory.getClusters())
+            {
+                if (cluster.kind == EnemyMemoryKind::Economy || now - cluster.lastSeenTick > 45000u) continue;
+                hazards.push_back({cluster.position.x, cluster.position.y,
+                    450.0f + 15.0f * static_cast<Real>(std::min(cluster.visibleCount, 20)), "enemy_army"});
+            }
+            for (const auto& entry : m_autonomy.state.zoneThreats)
+            {
+                if (entry.second.localEnemyCount <= 0 || now - entry.second.lastSeenTick > 30000u) continue;
+                hazards.push_back({entry.second.positionX, entry.second.positionY, 450.0f, "zone_under_attack"});
+            }
+            for (const auto& item : m_autonomy.enemyMemory.getItems())
+            {
+                if (!item.isStructure || item.kind == EnemyMemoryKind::Economy) continue;
+                hazards.push_back({item.position.x, item.position.y, 600.0f, "enemy_structure"});
+            }
+            return hazards;
+        }
+
+        // Unsafe when the target lies inside a hazard, or the straight route from `from`
+        // passes through one (a worker already inside a hazard is judged by its target only).
+        bool frontierUnsafe(const Coord3D* from, const Coord3D& to, std::string* detail = nullptr)
+        {
+            for (const FrontierHazard& hazard : frontierHazards())
+            {
+                const Real tx = to.x - hazard.x, ty = to.y - hazard.y;
+                if (tx * tx + ty * ty < hazard.radius * hazard.radius)
+                {
+                    if (detail != nullptr) *detail = std::string("target_") + hazard.source;
+                    return true;
+                }
+                if (from == nullptr) continue;
+                const Real fx = from->x - hazard.x, fy = from->y - hazard.y;
+                if (fx * fx + fy * fy < hazard.radius * hazard.radius) continue;
+                const Real sx = to.x - from->x, sy = to.y - from->y;
+                const Real lengthSq = sx * sx + sy * sy;
+                if (lengthSq < 1.0f) continue;
+                const Real t = std::max(0.0f, std::min(1.0f, (-fx * sx - fy * sy) / lengthSq));
+                const Real cx = fx + t * sx, cy = fy + t * sy;
+                const Real routeRadius = hazard.radius * 0.75f;
+                if (cx * cx + cy * cy < routeRadius * routeRadius)
+                {
+                    if (detail != nullptr) *detail = std::string("route_") + hazard.source;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // Autonomy worker jobs (construction, moves to build sites) stop at the front line.
+        // Targets inside the main base stay allowed so it can always be rebuilt.
+        bool frontierAllowsWorkerJob(Object* worker, const Coord3D& target, std::string& reason)
+        {
+            if (!m_profileAutomaticSpendScope || !isAutonomyModeActive() || worker == nullptr) return true;
+            Player* player = worker->getControllingPlayer();
+            if (player == nullptr || player != resolveAutonomyPlayer()) return true;
+            if (Object* commandCenter = findPrimaryCommandCenter(player))
+            {
+                if (commandCenter->getPosition() != nullptr && distanceSq2D(commandCenter->getPosition(), &target) < 500.0f * 500.0f) return true;
+            }
+            std::string detail;
+            if (!frontierUnsafe(worker->getPosition(), target, &detail)) return true;
+            reason = "frontier_unsafe";
+            ++m_autonomy.state.frontierBlocks[detail];
+            return false;
+        }
+
         // Black Markets (built or under construction) plus pending market build tasks near a location.
         int countOwnedMarketsNear(Player* player, const Coord3D& location, Real radius)
         {

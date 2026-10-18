@@ -1305,6 +1305,11 @@
 				{
 					continue;
 				}
+				// Never expand toward or past the front line.
+				if (isAutonomyModeActive() && frontierUnsafe(remoteOrigin, *info.source->getPosition()))
+				{
+					continue;
+				}
 				const int claims = countSupplyClaims(claimIndex, info.source, 430.0f);
 				if (claims == 0 && preferUnclaimed)
 				{
@@ -2302,6 +2307,7 @@
 				reason = "worker_not_found";
 				return false;
 			}
+			if (moveTarget != nullptr && !frontierAllowsWorkerJob(worker, *moveTarget, reason)) return false;
 			AIUpdateInterface* ai = worker->getAI();
 			if (ai == nullptr)
 			{
@@ -2572,6 +2578,7 @@
 			const UnsignedInt currentMoney = wallet != nullptr ? wallet->countMoney() : 0u;
 			const UnsignedInt buildCost = static_cast<UnsignedInt>(std::max<Int>(0, buildingTemplate->calcCostToBuild(player)));
 			if (!autonomousConstructionRuleAllowed(player, buildingTemplate, location, reason)) return false;
+			if (!frontierAllowsWorkerJob(worker, location, reason)) return false;
 			if (!profileConstructionAllowed(player, buildingTemplate, buildCost, reason)) return false;
 			if (buildCost > currentMoney)
 			{

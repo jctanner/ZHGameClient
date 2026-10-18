@@ -950,6 +950,20 @@ void attemptAbandonedFoundationRecovery(Player* player)
 			}
 		}
 
+		// Do not send a recovery worker to a foundation past the front line (the main base
+		// is exempt, as for every other worker job). Counted once per foundation.
+		if (bestWorker != nullptr && foundation->getPosition() != nullptr)
+		{
+			Object* commandCenter = findPrimaryCommandCenter(player);
+			const bool inMainBase = commandCenter != nullptr && commandCenter->getPosition() != nullptr
+				&& distanceSq2D(commandCenter->getPosition(), foundation->getPosition()) < 500.0f * 500.0f;
+			if (!inMainBase && frontierUnsafe(bestWorker->getPosition(), *foundation->getPosition()))
+			{
+				if (m_autonomy.state.frontierSkippedFoundations.insert(static_cast<unsigned int>(foundation->getID())).second)
+					++m_autonomy.state.frontierBlocks["recovery_skipped"];
+				bestWorker = nullptr;
+			}
+		}
 		if (bestWorker != nullptr)
 		{
 			// Attempt to reassign worker to complete the foundation
@@ -1255,6 +1269,39 @@ void logStrategicFoundationHealth(Player* player)
 	}
 }
 
+// A build task whose worker has not reached the site yet is abandoned when the
+// site or the remaining route now crosses a frontier hazard; the worker stops.
+void recallFrontierWorkers(Player* player)
+{
+	static DWORD nextCheckTick = 0u;
+	const DWORD now = adapterGameplayTick();
+	if (AIControlAdapterIsTickInFuture(nextCheckTick, now)) return;
+	nextCheckTick = now + 1000u;
+	Object* commandCenter = findPrimaryCommandCenter(player);
+	for (SpecialTaskReservation* task : m_autonomy.taskReservationManager.findBuildTasks())
+	{
+		if (task == nullptr || task->sourceObjectId == 0u) continue;
+		if (task->state == SpecialTaskState::Complete || task->state == SpecialTaskState::Failed || task->state == SpecialTaskState::Expired) continue;
+		Object* worker = TheGameLogic->findObjectByID(static_cast<ObjectID>(task->sourceObjectId));
+		if (worker == nullptr || worker->isEffectivelyDead() || worker->getPosition() == nullptr) continue;
+		if (distanceSq2D(worker->getPosition(), &task->targetPosition) <= 250.0f * 250.0f) continue;
+		if (commandCenter != nullptr && commandCenter->getPosition() != nullptr
+			&& distanceSq2D(commandCenter->getPosition(), &task->targetPosition) < 500.0f * 500.0f) continue;
+		std::string detail;
+		if (!frontierUnsafe(worker->getPosition(), task->targetPosition, &detail)) continue;
+		std::string stopReason;
+		executeScopedSelectionCommand(player, std::vector<ObjectID>(1, worker->getID()), stopReason, [&]() -> bool
+		{
+			return appendPlayerMessage(player, GameMessage::MSG_DO_STOP) != nullptr;
+		});
+		m_autonomy.taskReservationManager.failTask(task->taskId, "frontier_recalled");
+		++m_autonomy.state.frontierRecalls;
+		adapterLog("frontier_recall task=%u template=%s worker=%u detail=%s target=(%.1f,%.1f)",
+			task->taskId, task->expectedTemplate.c_str(), static_cast<unsigned int>(worker->getID()), detail.c_str(),
+			task->targetPosition.x, task->targetPosition.y);
+	}
+}
+
 void updateSpecialTaskReservations(Player* player)
 {
 	if (!isAutonomyModeActive())
@@ -1274,6 +1321,9 @@ void updateSpecialTaskReservations(Player* player)
 
 	// Use protected worker-shuttle Technicals for far remote GLA build tasks.
 	updateWorkerShuttleAssignments(player);
+
+	// Recall workers still walking to a build site that a new threat has cut off.
+	recallFrontierWorkers(player);
 
 	// Attempt recovery for abandoned foundations
 	attemptAbandonedFoundationRecovery(player);
