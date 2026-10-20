@@ -44,6 +44,7 @@
 #include "GameLogic/SidesList.h"
 #include "GameLogic/AIPathfind.h"
 #include "GameLogic/Weapon.h"
+#include "GameClient/AIControlAdapter/AIControlAdapter.h"
 
 extern void addIcon(const Coord3D *pos, Real width, Int numFramesDuration, RGBColor color);
 
@@ -649,6 +650,21 @@ Object *AI::findClosestEnemy( const Object *me, Real range, UnsignedInt qualifie
 	// (optional) only stuff clear of fog
 	PartitionFilterFreeOfFog filterFogged(me->getControllingPlayer()->getPlayerIndex());
 
+	// AI control adapter: skip buildings this player's Rebels are capturing.
+	class PartitionFilterAdapterCaptureProtected : public PartitionFilter
+	{
+		int m_playerIndex;
+	public:
+		explicit PartitionFilterAdapterCaptureProtected(int playerIndex) : m_playerIndex(playerIndex) {}
+		virtual Bool allow(Object *objOther) override
+		{
+			return objOther == nullptr || !AIControlAdapterIsCaptureProtected(m_playerIndex, static_cast<unsigned int>(objOther->getID()));
+		}
+#if defined(RTS_DEBUG)
+		virtual const char* debugGetName() override { return "PartitionFilterAdapterCaptureProtected"; }
+#endif
+	} filterCaptureProtected(me->getControllingPlayer()->getPlayerIndex());
+
 	PartitionFilter *filters[16];
 	Int numFilters = 0;
 
@@ -686,6 +702,9 @@ Object *AI::findClosestEnemy( const Object *me, Real range, UnsignedInt qualifie
 		filters[numFilters++] = &filterInsignificant;
 
 	filters[numFilters++] = &filterStealth;
+
+	if (qualifiers & ATTACK_BUILDINGS)
+		filters[numFilters++] = &filterCaptureProtected;
 
 	if (optionalFilter)
 	{

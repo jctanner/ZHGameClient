@@ -123,3 +123,11 @@ void AIControlAdapterReset();
  * LOGICFRAMES_PER_SECOND * multiplier of wall time. Ignored for network games.
  */
 int AIControlAdapterSpeedMultiplier();
+
+/**
+ * True while the adapter is capturing this structure for this player: the player's
+ * units then skip it when auto-acquiring targets (AI::findClosestEnemy), so the rest
+ * of an assault group does not destroy a building its Rebels are capturing.
+ * Explicit attack orders are unaffected.
+ */
+bool AIControlAdapterIsCaptureProtected(int playerIndex, unsigned int objectId);

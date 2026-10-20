@@ -1438,6 +1438,12 @@
 						{
 							continue;
 						}
+						// The dock gap applies to every supply source: with two docks side by
+						// side a stash 159 from its target sat 42 from the neighbouring dock.
+						if (isWithinSupplyClearance(candidate, buildingTemplate, 30.0f))
+						{
+							continue;
+						}
 						if (hasOwnedStructureTooClose(player, &candidate, buildingTemplate, 30.0f))
 						{
 							continue;
@@ -2345,6 +2351,47 @@
 			});
 		}
 
+		// Keep non-supply structures off supply docks and warehouses. The engine overlap test
+		// uses the dock's small collision footprint, so an Arms Dealer was placed 64 from a
+		// dock centre (dock bounding radius 79), partly inside it and in the workers' path.
+		bool isTooCloseToSupplySource(const Coord3D& candidate, const ThingTemplate* buildingTemplate)
+		{
+			// Supply centers/stashes use the wider dock gap in findBuildLocationNearSupply.
+			if (buildingTemplate == nullptr || buildingTemplate->isKindOf(KINDOF_CANNOT_BUILD_NEAR_SUPPLIES)) return false;
+			return isWithinSupplyClearance(candidate, buildingTemplate, 20.0f);
+		}
+
+		// True when the candidate's footprint comes within `gap` of any supply source's
+		// bounding circle.
+		bool isWithinSupplyClearance(const Coord3D& candidate, const ThingTemplate* buildingTemplate, Real gap)
+		{
+			if (buildingTemplate == nullptr) return false;
+			// Positions and radii cached per logic frame (called per placement candidate).
+			struct SourceDisc { Real x; Real y; Real radius; };
+			static std::vector<SourceDisc> discs;
+			static UnsignedInt discsFrame = 0xFFFFFFFFu;
+			const UnsignedInt frame = TheGameLogic != nullptr ? TheGameLogic->getFrame() : 0u;
+			if (frame != discsFrame)
+			{
+				discsFrame = frame;
+				discs.clear();
+				std::vector<SupplySourceInfo> sources;
+				collectSupplySources(0, sources);
+				for (const SupplySourceInfo& info : sources)
+					if (info.source != nullptr && info.source->getPosition() != nullptr)
+						discs.push_back({info.source->getPosition()->x, info.source->getPosition()->y,
+							info.source->getGeometryInfo().getBoundingCircleRadius()});
+			}
+			const Real templateRadius = buildingTemplate->getTemplateGeometryInfo().getBoundingCircleRadius();
+			for (const SourceDisc& disc : discs)
+			{
+				const Real clearance = disc.radius + templateRadius + gap;
+				const Real dx = candidate.x - disc.x, dy = candidate.y - disc.y;
+				if (dx * dx + dy * dy < clearance * clearance) return true;
+			}
+			return false;
+		}
+
 		bool findBuildLocationInZone(
 			Player* player,
 			Object* worker,
@@ -2357,6 +2404,14 @@
 			if (player == nullptr || worker == nullptr || buildingTemplate == nullptr || TheBuildAssistant == nullptr)
 			{
 				return false;
+			}
+
+			// Front-line check before the search: a refused site otherwise cost a full
+			// ring scan (~100 ms) before the construct gate rejected it.
+			if (m_profileAutomaticSpendScope && isAutonomyModeActive())
+			{
+				std::string frontierReason;
+				if (!frontierAllowsWorkerJob(worker, zoneCenter, frontierReason)) return false;
 			}
 
 			const Real placeAngle = buildingTemplate->getPlacementViewAngle();
@@ -2397,6 +2452,10 @@
 
 					// Cheap indexed filters before the engine legality check.
 					if (isBuildLocationTemporarilyReserved(player, &candidate, buildingTemplate))
+					{
+						continue;
+					}
+					if (isTooCloseToSupplySource(candidate, buildingTemplate))
 					{
 						continue;
 					}
@@ -2508,6 +2567,10 @@
                         && !autonomyRuleEnabled("zone_expansion") && !withinExistingAutonomyFootprint(candidate)) continue;
 
 							if (isBuildLocationTemporarilyReserved(player, &candidate, buildingTemplate))
+							{
+								continue;
+							}
+							if (isTooCloseToSupplySource(candidate, buildingTemplate))
 							{
 								continue;
 							}

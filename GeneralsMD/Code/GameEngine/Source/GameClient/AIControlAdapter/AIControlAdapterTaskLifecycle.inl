@@ -957,7 +957,7 @@ void attemptAbandonedFoundationRecovery(Player* player)
 			Object* commandCenter = findPrimaryCommandCenter(player);
 			const bool inMainBase = commandCenter != nullptr && commandCenter->getPosition() != nullptr
 				&& distanceSq2D(commandCenter->getPosition(), foundation->getPosition()) < 500.0f * 500.0f;
-			if (!inMainBase && frontierUnsafe(bestWorker->getPosition(), *foundation->getPosition()))
+			if (!inMainBase && frontierUnsafe(bestWorker->getPosition(), *foundation->getPosition(), nullptr, insideOwnSafeZone(*foundation->getPosition())))
 			{
 				if (m_autonomy.state.frontierSkippedFoundations.insert(static_cast<unsigned int>(foundation->getID())).second)
 					++m_autonomy.state.frontierBlocks["recovery_skipped"];
@@ -1288,7 +1288,7 @@ void recallFrontierWorkers(Player* player)
 		if (commandCenter != nullptr && commandCenter->getPosition() != nullptr
 			&& distanceSq2D(commandCenter->getPosition(), &task->targetPosition) < 500.0f * 500.0f) continue;
 		std::string detail;
-		if (!frontierUnsafe(worker->getPosition(), task->targetPosition, &detail)) continue;
+		if (!frontierUnsafe(worker->getPosition(), task->targetPosition, &detail, insideOwnSafeZone(task->targetPosition))) continue;
 		std::string stopReason;
 		executeScopedSelectionCommand(player, std::vector<ObjectID>(1, worker->getID()), stopReason, [&]() -> bool
 		{

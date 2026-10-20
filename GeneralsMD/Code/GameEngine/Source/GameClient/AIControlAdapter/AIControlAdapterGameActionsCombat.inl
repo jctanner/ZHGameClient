@@ -495,6 +495,32 @@
 			msg->appendObjectIDArgument(target->getID());
 			msg->appendIntegerArgument(0);
 			msg->appendObjectIDArgument(source->getID());
+			protectCaptureTarget(player, target, 25u);
+			return true;
+		}
+
+		// Capture order for one unit (Rebel or Black Lotus) on one building; false when the
+		// unit cannot capture it right now (no upgrade, power recharging, not capturable).
+		bool issueCaptureOrder(Player* player, Object* source, Object* target)
+		{
+			if (player == nullptr || source == nullptr || target == nullptr || TheActionManager == nullptr || TheSpecialPowerStore == nullptr) return false;
+			if (!TheActionManager->canCaptureBuilding(source, target, CMD_FROM_PLAYER)) return false;
+			SpecialPowerType powerType = SPECIAL_INFANTRY_CAPTURE_BUILDING;
+			if (source->findSpecialPowerModuleInterface(powerType) == nullptr)
+			{
+				powerType = SPECIAL_BLACKLOTUS_CAPTURE_BUILDING;
+				if (source->findSpecialPowerModuleInterface(powerType) == nullptr) return false;
+			}
+			const SpecialPowerTemplate* powerTemplate = TheSpecialPowerStore->findSpecialPowerTemplate(
+				powerType == SPECIAL_BLACKLOTUS_CAPTURE_BUILDING ? "SpecialAbilityBlackLotusCaptureBuilding" : "SpecialAbilityRebelCaptureBuilding");
+			if (powerTemplate == nullptr || !TheActionManager->canDoSpecialPowerAtObject(source, target, CMD_FROM_PLAYER, powerTemplate, 0u)) return false;
+			GameMessage* msg = appendPlayerMessage(player, GameMessage::MSG_DO_SPECIAL_POWER_AT_OBJECT);
+			if (msg == nullptr) return false;
+			msg->appendIntegerArgument(static_cast<Int>(powerTemplate->getID()));
+			msg->appendObjectIDArgument(target->getID());
+			msg->appendIntegerArgument(0);
+			msg->appendObjectIDArgument(source->getID());
+			protectCaptureTarget(player, target, 25u);
 			return true;
 		}
 

@@ -213,9 +213,11 @@
             const DWORD now = adapterGameplayTick();
             for (const auto& cluster : m_autonomy.enemyMemory.getClusters())
             {
-                if (cluster.kind == EnemyMemoryKind::Economy || now - cluster.lastSeenTick > 45000u) continue;
+                // Recent sightings only, and a tighter radius: on a crowded 1v7 map 45 s and
+                // up to 750 units blanketed our own zones and stalled market growth.
+                if (cluster.kind == EnemyMemoryKind::Economy || now - cluster.lastSeenTick > 20000u) continue;
                 hazards.push_back({cluster.position.x, cluster.position.y,
-                    450.0f + 15.0f * static_cast<Real>(std::min(cluster.visibleCount, 20)), "enemy_army"});
+                    350.0f + 10.0f * static_cast<Real>(std::min(cluster.visibleCount, 20)), "enemy_army"});
             }
             for (const auto& entry : m_autonomy.state.zoneThreats)
             {
@@ -232,12 +234,20 @@
 
         // Unsafe when the target lies inside a hazard, or the straight route from `from`
         // passes through one (a worker already inside a hazard is judged by its target only).
-        bool frontierUnsafe(const Coord3D* from, const Coord3D& to, std::string* detail = nullptr)
+        // ownSafeZoneTarget: the target lies in one of our zones with no enemies present.
+        // Remembered structures are ignored entirely; armies only block the route there
+        // (an army inside the zone is a zone threat, which still blocks).
+        bool frontierUnsafe(const Coord3D* from, const Coord3D& to, std::string* detail = nullptr, bool ownSafeZoneTarget = false)
         {
             for (const FrontierHazard& hazard : frontierHazards())
             {
+                if (ownSafeZoneTarget && std::strcmp(hazard.source, "enemy_structure") == 0) continue;
+                const bool skipTargetTest = ownSafeZoneTarget && std::strcmp(hazard.source, "enemy_army") == 0;
                 const Real tx = to.x - hazard.x, ty = to.y - hazard.y;
-                if (tx * tx + ty * ty < hazard.radius * hazard.radius)
+                // An army hazard covering an own-zone target is not a route block either:
+                // the walk necessarily ends inside it.
+                if (skipTargetTest && tx * tx + ty * ty < hazard.radius * hazard.radius) continue;
+                if (!skipTargetTest && tx * tx + ty * ty < hazard.radius * hazard.radius)
                 {
                     if (detail != nullptr) *detail = std::string("target_") + hazard.source;
                     return true;
@@ -260,6 +270,25 @@
             return false;
         }
 
+        // A point inside one of our zones that has no enemies present now. Remembered enemy
+        // structures do not make our own territory off-limits (on crowded maps their 600
+        // radius reached into our zones and blocked market growth); live armies still do.
+        bool insideOwnSafeZone(const Coord3D& point)
+        {
+            if (!m_autonomy.state.telemetryZones.is_array()) return false;
+            const DWORD now = adapterGameplayTick();
+            for (const auto& zone : m_autonomy.state.telemetryZones)
+            {
+                const Real dx = point.x - zone.value("center_x", 0.0f), dy = point.y - zone.value("center_y", 0.0f);
+                if (dx * dx + dy * dy > 400.0f * 400.0f) continue;
+                const auto threat = m_autonomy.state.zoneThreats.find(zone.value("anchor_id", 0u));
+                const bool threatened = threat != m_autonomy.state.zoneThreats.end()
+                    && now - threat->second.lastSeenTick <= 30000u && threat->second.localEnemyCount > 0;
+                if (!threatened) return true;
+            }
+            return false;
+        }
+
         // Autonomy worker jobs (construction, moves to build sites) stop at the front line.
         // Targets inside the main base stay allowed so it can always be rebuilt.
         bool frontierAllowsWorkerJob(Object* worker, const Coord3D& target, std::string& reason)
@@ -272,7 +301,7 @@
                 if (commandCenter->getPosition() != nullptr && distanceSq2D(commandCenter->getPosition(), &target) < 500.0f * 500.0f) return true;
             }
             std::string detail;
-            if (!frontierUnsafe(worker->getPosition(), target, &detail)) return true;
+            if (!frontierUnsafe(worker->getPosition(), target, &detail, insideOwnSafeZone(target))) return true;
             reason = "frontier_unsafe";
             ++m_autonomy.state.frontierBlocks[detail];
             return false;

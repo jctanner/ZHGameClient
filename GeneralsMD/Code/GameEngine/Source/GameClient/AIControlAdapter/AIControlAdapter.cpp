@@ -565,6 +565,7 @@ namespace
 		std::map<std::string, int> frontierBlocks;       // worker jobs refused at the front line, by cause
 		int frontierRecalls = 0;                         // en-route workers recalled from new hazards
 		std::set<unsigned int> frontierSkippedFoundations; // foundations whose recovery was skipped
+		std::map<unsigned int, DWORD> assaultCapturersUntil; // unit -> tick: capturing, do not re-order
 		DWORD nextMarketFootholdTick = 0u;
 		nlohmann::json marketSprawlTelemetry = nlohmann::json::object();
 		// Surplus mode bulk job pass: per (zone anchor, command) failure backoff and a
@@ -644,6 +645,24 @@ namespace
 		}
 
 		int engineSpeedMultiplier() const { return activeSpeedMultiplier(); }
+
+		// Buildings being captured for a player, with expiry (logic frames).
+		struct CaptureProtection { int playerIndex; UnsignedInt untilFrame; };
+		std::unordered_map<unsigned int, CaptureProtection> m_captureProtected;
+		void protectCaptureTarget(const Player* player, const Object* target, UnsignedInt seconds)
+		{
+			if (player == nullptr || target == nullptr || TheGameLogic == nullptr) return;
+			m_captureProtected[static_cast<unsigned int>(target->getID())] =
+				{player->getPlayerIndex(), TheGameLogic->getFrame() + seconds * LOGICFRAMES_PER_SECOND};
+		}
+		bool isCaptureProtected(int playerIndex, unsigned int objectId)
+		{
+			if (m_captureProtected.empty() || TheGameLogic == nullptr) return false;
+			const auto it = m_captureProtected.find(objectId);
+			if (it == m_captureProtected.end()) return false;
+			if (TheGameLogic->getFrame() > it->second.untilFrame) { m_captureProtected.erase(it); return false; }
+			return it->second.playerIndex == playerIndex;
+		}
 
 		void update()
 		{
@@ -5272,6 +5291,32 @@ namespace
 							++barracksJobs;
 						}
 					}
+					// 1c. Markets in parallel: up to four per pass in the safest zones with the fewest
+					//     markets (zone cap of two still applies at the construction gate). One
+					//     macro market at a time grew 7 markets in 6.8 min with $820k banked.
+					int marketJobs = 0;
+					if (hasCompletedPalace && autonomyRuleEnabled("market_growth"))
+					{
+						std::vector<std::pair<int, std::size_t>> marketZones;
+						const std::size_t zoneLimit = std::min(zones.size(), zoneCounts.size());
+						for (std::size_t z = 0; z < zoneLimit; ++z)
+						{
+							const int have = zoneCounts[z].blackMarkets + zoneCounts[z].blackMarketsInProgress;
+							if (have >= 2) continue;
+							const auto zt = m_autonomy.state.zoneThreats.find(static_cast<UnsignedInt>(zones[z].anchorId));
+							if (zt != m_autonomy.state.zoneThreats.end() && jobNow - zt->second.lastSeenTick <= 30000u && zt->second.localEnemyCount > 0) continue;
+							marketZones.push_back({have, z});
+						}
+						std::sort(marketZones.begin(), marketZones.end());
+						for (const auto& entry : marketZones)
+						{
+							if (marketJobs >= 4 || jobBudget <= 0) break;
+							const AutonomyZone& zone = zones[entry.second];
+							const std::string key = std::to_string(static_cast<unsigned int>(zone.anchorId)) + ":surplus_market";
+							if (runJob(key, [&](std::string& r) { return trySpecificZoneCommand("auto_surplus_market", "Game.BuildBlackMarketSmart", zone, nlohmann::json::object({{"strict_zone", true}}), r); }))
+								++marketJobs;
+						}
+					}
 					// 2. Parallel supply expansion: the chooser takes the nearest unclaimed source
 					//    and counts pending stash tasks as claims, so each call targets a new site.
 					if (autonomyRuleEnabled("zone_expansion"))
@@ -5320,13 +5365,13 @@ namespace
 						}
 					}
 					if (zoneTotal > 0u) m_autonomy.state.surplusZoneCursor = (m_autonomy.state.surplusZoneCursor + 3u) % zoneTotal;
-					if (ccJobs + armsJobs + barracksJobs + expansionJobs + zoneJobs > 0) issued = true;
+					if (ccJobs + armsJobs + barracksJobs + marketJobs + expansionJobs + zoneJobs > 0) issued = true;
 					m_autonomy.state.surplusModeTelemetry = {
 						{"active", true},
 						{"worker_limit", m_autonomy.state.profileSpendPlan.workerLimit},
 						{"command_centers", commandCenters},
 						{"desired_command_centers", desiredCommandCenters},
-						{"jobs_last_pass", {{"command_center", ccJobs}, {"arms_dealer", armsJobs}, {"barracks", barracksJobs},
+						{"jobs_last_pass", {{"command_center", ccJobs}, {"arms_dealer", armsJobs}, {"barracks", barracksJobs}, {"black_market", marketJobs},
 							{"supply_expansion", expansionJobs}, {"zone_development", zoneJobs}, {"failures", jobFailures}}},
 						{"zone_jobs_by_command", zoneJobsByCommand},
 						{"backoff_entries", static_cast<int>(backoff.size())},
@@ -6673,7 +6718,8 @@ namespace
 				int captureSourcesLive = captureSources;
 				int captureSourcesReserved = 0;
 				int capturableTargetsRemaining = 0;
-				int maxCaptureConcurrent = m_automation.captureRule.maxConcurrent;
+				int maxCaptureConcurrent = m_autonomy.state.profileSpendPlan.surplusMode
+					? std::max<int>(m_automation.captureRule.maxConcurrent, 10) : m_automation.captureRule.maxConcurrent;
 
 				// Count reserved capture sources (units in active capture tasks)
 				std::vector<SpecialTaskReservation*> captureTasks = m_autonomy.taskReservationManager.findCaptureTasks();
@@ -9616,7 +9662,8 @@ namespace
 					? TheUpgradeCenter->findUpgrade("Upgrade_InfantryCaptureBuilding")
 					: nullptr;
 				const bool hasCaptureUpgrade = captureUpgrade != nullptr && player->hasUpgradeComplete(captureUpgrade);
-				const int maxCaptureConcurrent = m_automation.captureRule.maxConcurrent;
+				const int maxCaptureConcurrent = m_autonomy.state.profileSpendPlan.surplusMode
+					? std::max<int>(m_automation.captureRule.maxConcurrent, 10) : m_automation.captureRule.maxConcurrent;
 
 				int desiredCaptureSources = 0;
 				bool productionNeeded = false;
@@ -18029,7 +18076,12 @@ namespace
 				(m_autonomy.state.lastDecisionCategory == "production" && m_autonomy.state.lastDecisionReason == "army_cap_reached")
 			});
 
-			if (!radarDecision.shouldQueue)
+			// Surplus mode: radar and scouting should not wait for the opening-economy pause
+			// (2 stashes or a Black Market), which delayed the first van to ~4.5 min with
+			// $850k banked. Still needs an Arms Dealer and respects the van count.
+			const bool surplusRadarVan = !radarDecision.shouldQueue && m_autonomy.state.profileSpendPlan.surplusMode
+				&& armsCount > 0 && radarVanCount < m_automation.radarVanRule.minCount;
+			if (!radarDecision.shouldQueue && !surplusRadarVan)
 			{
 				return;
 			}
@@ -18443,10 +18495,13 @@ namespace
 
 			// Phase 6.2: Check active capture task count instead of simple pending map
 			const Int pendingCount = m_autonomy.taskReservationManager.getCaptureTaskCount();
+			// Surplus mode runs more capture missions at once (cash is not the limit).
+			const Int captureConcurrency = m_autonomy.state.profileSpendPlan.surplusMode
+				? std::max<Int>(m_automation.captureRule.maxConcurrent, 10) : m_automation.captureRule.maxConcurrent;
 			const AIControlAdapterCaptureAssignmentBudgetDecision assignmentBudget =
 				AIControlAdapterCaptureManager::ChooseAssignmentBudget(
 					pendingCount,
-					m_automation.captureRule.maxConcurrent);
+					captureConcurrency);
 			if (!assignmentBudget.canAssign)
 			{
 				adapterLog(
@@ -18505,8 +18560,21 @@ namespace
 				}
 			}
 
+			// Factories and tech first (they add production and abilities), then distance.
+			auto captureValue = [](const Object* obj) -> int
+			{
+				if (obj == nullptr || obj->getTemplate() == nullptr) return 0;
+				const std::string name = obj->getTemplate()->getName().str();
+				static const char* const kProducers[] = {"warfactory", "barracks", "airfield", "armsdealer", "factory", "palace", "commandcenter"};
+				static const char* const kTech[] = {"tech", "oilderrick", "hospital", "reinforcement", "artillery", "repair", "refinery", "propaganda"};
+				for (const char* key : kProducers) if (containsIgnoreCase(name, key)) return 2;
+				for (const char* key : kTech) if (containsIgnoreCase(name, key)) return 1;
+				return 0;
+			};
 			std::sort(targets.begin(), targets.end(), [&](const Object* lhs, const Object* rhs) -> bool
 			{
+				const int lv = captureValue(lhs), rv = captureValue(rhs);
+				if (lv != rv) return lv > rv;
 				const Coord3D* lp = lhs != nullptr ? lhs->getPosition() : nullptr;
 				const Coord3D* rp = rhs != nullptr ? rhs->getPosition() : nullptr;
 				if (!hasAnchor || lp == nullptr || rp == nullptr)
@@ -19411,4 +19479,9 @@ void AIControlAdapterReset()
 int AIControlAdapterSpeedMultiplier()
 {
 	return g_adapterState.engineSpeedMultiplier();
+}
+
+bool AIControlAdapterIsCaptureProtected(int playerIndex, unsigned int objectId)
+{
+	return g_adapterState.isCaptureProtected(playerIndex, objectId);
 }

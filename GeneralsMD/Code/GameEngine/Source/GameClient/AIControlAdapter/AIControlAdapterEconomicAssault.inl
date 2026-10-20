@@ -545,18 +545,60 @@
 			// close to a visible objective get the direct order; a retarget leaves units that
 			// are currently fighting alone unless the cohort has stalled.
 			const bool reissueAll = task.lastCommandTick == 0u || stalled;
+			// Capture before destroy: Rebels near a visible capturable enemy building take it
+			// (factories and tech feed the sprawl and our army); at most three per building.
+			const bool capturableObjective = visible && target->isKindOf(KINDOF_STRUCTURE) && target->isKindOf(KINDOF_CAPTURABLE);
+			// Capture orders first, so no unit in this pass gets a direct attack order on a
+			// building that is being captured.
+			// Units already capturing are not re-ordered (a reissued attack-move cancelled the
+			// capture), and the objective stays protected while the cohort can still capture it.
+			int captureOrders = 0, newCaptureOrders = 0;
+			std::set<ObjectID> capturers;
+			bool cohortCanCapture = false;
+			auto& capturersUntil = m_autonomy.state.assaultCapturersUntil;
+			for (auto it = capturersUntil.begin(); it != capturersUntil.end(); )
+				it = AIControlAdapterIsTickInFuture(it->second, now) ? std::next(it) : capturersUntil.erase(it);
+			if (capturableObjective)
+			{
+				for (unsigned int id : retained)
+				{
+					Object* unit = TheGameLogic->findObjectByID(static_cast<ObjectID>(id));
+					if (unit == nullptr) continue;
+					if (unit->findSpecialPowerModuleInterface(SPECIAL_INFANTRY_CAPTURE_BUILDING) != nullptr
+						|| unit->findSpecialPowerModuleInterface(SPECIAL_BLACKLOTUS_CAPTURE_BUILDING) != nullptr) cohortCanCapture = true;
+					if (capturersUntil.count(id) != 0u) { capturers.insert(static_cast<ObjectID>(id)); ++captureOrders; }
+				}
+				for (ObjectID id : selected)
+				{
+					if (captureOrders >= 3) break;
+					if (capturers.count(id) != 0u) continue;
+					Object* unit = TheGameLogic->findObjectByID(id);
+					if (unit == nullptr || unit->getPosition() == nullptr) continue;
+					const Real cdx = unit->getPosition()->x - targetPosition.x, cdy = unit->getPosition()->y - targetPosition.y;
+					if (cdx * cdx + cdy * cdy <= 450.0f * 450.0f && issueCaptureOrder(player, unit, target))
+					{
+						++captureOrders; ++newCaptureOrders;
+						capturers.insert(id);
+						capturersUntil[static_cast<unsigned int>(id)] = now + 20000u;
+					}
+				}
+				if (cohortCanCapture) protectCaptureTarget(player, target, 25u);
+			}
 			std::vector<ObjectID> directIds, moveIds;
 			for (ObjectID id : selected)
 			{
 				Object* unit = TheGameLogic->findObjectByID(id);
-				if (unit == nullptr || unit->getPosition() == nullptr) continue;
+				if (unit == nullptr || unit->getPosition() == nullptr || capturers.count(id) != 0u) continue;
 				const Weapon* weapon = unit->getCurrentWeapon();
 				const bool fighting = weapon != nullptr && weapon->getLastShotFrame() > 0u
 					&& TheGameLogic->getFrame() - weapon->getLastShotFrame() <= 3u * LOGICFRAMES_PER_SECOND;
 				if (fighting && !reissueAll) continue;
 				const Real dx = unit->getPosition()->x - targetPosition.x, dy = unit->getPosition()->y - targetPosition.y;
 				const bool nearObjective = dx * dx + dy * dy <= 260.0f * 260.0f;
-				if (visible && nearObjective && TheActionManager != nullptr && TheActionManager->getCanAttackObject(unit, target,
+				// Never order a direct attack on a building being (or about to be) captured.
+				const bool captureInProgress = captureOrders > 0 || (capturableObjective && cohortCanCapture)
+					|| AIControlAdapterIsCaptureProtected(player->getPlayerIndex(), static_cast<unsigned int>(target != nullptr ? target->getID() : 0));
+				if (visible && nearObjective && !captureInProgress && TheActionManager != nullptr && TheActionManager->getCanAttackObject(unit, target,
 					CMD_FROM_PLAYER, ATTACK_NEW_TARGET) >= ATTACKRESULT_POSSIBLE_AFTER_MOVING) directIds.push_back(id);
 				else moveIds.push_back(id);
 			}
@@ -579,6 +621,11 @@
 			if (issued) task.lastCommandTick = now;
 			task.state = CombatTaskState::Attacking;
 			task.reason = visible ? "assault_visible_object" : "assault_remembered_position";
+			if (newCaptureOrders > 0)
+			{
+				issued = true;
+				recordEconomicAssaultEvent(task, "assault_capture_order", target->getTemplate() != nullptr ? target->getTemplate()->getName().str() : "structure");
+			}
 			if (issued && !directIds.empty())
 				recordEconomicAssaultEvent(task, "assault_object_order", "visible_enemy_near");
 			if (issued && !moveIds.empty())
