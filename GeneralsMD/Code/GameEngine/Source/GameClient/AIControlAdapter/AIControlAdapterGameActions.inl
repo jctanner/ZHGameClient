@@ -1331,7 +1331,8 @@
 			return bestUnclaimed != nullptr ? bestUnclaimed : bestLightlyClaimed;
 		}
 
-		bool findBuildLocationNearSupply(Player* player, Object* worker, Object* supplySource, const ThingTemplate* buildingTemplate, Coord3D& outLocation, Real& outAngle)
+		bool findBuildLocationNearSupply(Player* player, Object* worker, Object* supplySource, const ThingTemplate* buildingTemplate, Coord3D& outLocation, Real& outAngle,
+			bool requireRevealed = true)
 		{
 			if (player == nullptr || worker == nullptr || supplySource == nullptr || buildingTemplate == nullptr || TheBuildAssistant == nullptr)
 			{
@@ -1350,7 +1351,7 @@
 				BuildAssistant::TERRAIN_RESTRICTIONS |
 				BuildAssistant::CLEAR_PATH |
 				BuildAssistant::NO_OBJECT_OVERLAP |
-				BuildAssistant::SHROUD_REVEALED;
+				(requireRevealed ? BuildAssistant::SHROUD_REVEALED : 0u);
 			const Coord3D* workerPos = worker->getPosition();
 			const Coord3D* commandCenterPos = nullptr;
 			Object* commandCenter = findPrimaryCommandCenter(player);
@@ -1385,12 +1386,19 @@
 			Coord3D best = *supplyPos;
 			best.z = 0.0f;
 
+			// Leave a walking gap between the dock and the stash (about 30 units between
+			// footprints): a stash pressed against the dock (85 from centre) forced workers
+			// around one of the buildings on every trip.
+			const Real minRing = std::max(baseRadius,
+				supplySource->getGeometryInfo().getBoundingCircleRadius() + buildingTemplate->getTemplateGeometryInfo().getBoundingCircleRadius() + 30.0f);
 			static const Real ringLimits[] = { 60.0f, 110.0f, 170.0f, 250.0f };
 			for (Int pass = 0; pass < static_cast<Int>(sizeof(ringLimits) / sizeof(ringLimits[0])) && !found; ++pass)
 			{
-				const Real maxRing = baseRadius + ringLimits[pass];
-				const bool preferReferenceSideOnly = hasReferenceDir && pass < 3;
-				for (Real ring = baseRadius; ring <= maxRing; ring += 12.0f)
+				const Real maxRing = minRing + ringLimits[pass];
+				// Base-facing side only in the two tightest passes; a blocked near side then tries
+				// the other sides of the dock before moving further out.
+				const bool preferReferenceSideOnly = hasReferenceDir && pass < 2;
+				for (Real ring = minRing; ring <= maxRing; ring += 12.0f)
 				{
 					for (Int i = 0; i < 72; ++i)
 					{
@@ -1421,15 +1429,10 @@
 							continue;
 						}
 
+						// Worker distance is only a tie-breaker: the stash-to-dock distance is what
+						// every supply trip pays (rejecting near rings for a far worker placed the
+						// first stash ~277 from its dock).
 						const Real distSq = workerPos != nullptr ? distanceSq2D(&candidate, workerPos) : 0.0f;
-						if (workerPos != nullptr)
-						{
-							const Real workerDist = std::sqrt(std::max<Real>(0.0f, distSq));
-							if (pass < 2 && workerDist > (ring * 3.0f))
-							{
-								continue;
-							}
-						}
 						// Expensive engine legality/overlap checks only after the cheap filters.
 						if (isBuildLocationTemporarilyReserved(player, &candidate, buildingTemplate))
 						{
@@ -3846,6 +3849,93 @@
 				reason = lastReason;
 				return false;
 			}
+			return true;
+		}
+
+		// Diagnostic: why are supply stash sites near a dock rejected? Probes the same rings
+		// as findBuildLocationNearSupply and reports engine legality codes per ring.
+		bool executeGameDebugSupplyPlacement(const nlohmann::json& message, nlohmann::json& result, std::string& reason)
+		{
+			Player* player = resolvePlayerFromArgs(message, reason);
+			if (player == nullptr) return false;
+			if (TheBuildAssistant == nullptr || TheGameLogic == nullptr) { reason = "logic_not_ready"; return false; }
+			Object* commandCenter = findPrimaryCommandCenter(player);
+			Object* worker = nullptr;
+			for (Object* obj = TheGameLogic->getFirstObject(); obj != nullptr && worker == nullptr; obj = obj->getNextObject())
+				if (obj->getControllingPlayer() == player && obj->isKindOf(KINDOF_DOZER) && !obj->isEffectivelyDead()) worker = obj;
+			if (worker == nullptr) { reason = "no_worker"; return false; }
+			std::vector<SupplySourceInfo> sources;
+			collectSupplySources(1, sources);
+			Object* dock = nullptr;
+			Int requestedId = -1;
+			const auto argsIt = message.find("args");
+			if (argsIt != message.end() && argsIt->is_object() && argsIt->contains("supply_source_id") && (*argsIt)["supply_source_id"].is_number_integer())
+				requestedId = (*argsIt)["supply_source_id"].get<Int>();
+			const Coord3D* origin = commandCenter != nullptr ? commandCenter->getPosition() : worker->getPosition();
+			Real bestDistSq = 1.0e30f;
+			for (const SupplySourceInfo& info : sources)
+			{
+				if (info.source == nullptr || info.source->getPosition() == nullptr) continue;
+				if (requestedId > 0) { if (static_cast<Int>(info.source->getID()) == requestedId) dock = info.source; continue; }
+				const Real d = distanceSq2D(info.source->getPosition(), origin);
+				if (d < bestDistSq) { bestDistSq = d; dock = info.source; }
+			}
+			if (dock == nullptr) { reason = "supply_source_not_found"; return false; }
+			const std::string templateName = inferSupplyBuildingTemplateForPlayer(player, worker);
+			const ThingTemplate* templ = templateName.empty() ? nullptr : TheThingFactory->findTemplate(AsciiString(templateName.c_str()), false);
+			if (templ == nullptr) { reason = "template_not_found"; return false; }
+			const Coord3D* dockPos = dock->getPosition();
+			const Real baseRadius = dock->getGeometryInfo().getBoundingCircleRadius() + 6.0f;
+			const Real placeAngle = templ->getPlacementViewAngle();
+			const UnsignedInt legalOpts = BuildAssistant::TERRAIN_RESTRICTIONS | BuildAssistant::CLEAR_PATH
+				| BuildAssistant::NO_OBJECT_OVERLAP | BuildAssistant::SHROUD_REVEALED;
+			static const char* codeNames[] = {"ok", "restricted_terrain", "not_flat", "objects_in_way", "no_clear_path", "shroud", "too_close_to_supplies", "generic"};
+			Real dirX = 0.0f, dirY = 0.0f;
+			if (origin != nullptr)
+			{
+				dirX = origin->x - dockPos->x; dirY = origin->y - dockPos->y;
+				const Real len = std::sqrt(dirX * dirX + dirY * dirY);
+				if (len > 1.0f) { dirX /= len; dirY /= len; }
+			}
+			nlohmann::json rings = nlohmann::json::array();
+			Real firstLegal = -1.0f, firstLegalBaseSide = -1.0f;
+			for (Real ring = baseRadius; ring <= baseRadius + 300.0f; ring += 12.0f)
+			{
+				int counts[8] = {}; int reserved = 0, ownedTooClose = 0, legal = 0, legalBaseSide = 0;
+				for (Int i = 0; i < 72; ++i)
+				{
+					const Real theta = static_cast<Real>(i) * (6.28318530717958647692f / 72.0f);
+					Coord3D c = *dockPos; c.x += std::cos(theta) * ring; c.y += std::sin(theta) * ring; c.z = 0.0f;
+					const Real align = std::cos(theta) * dirX + std::sin(theta) * dirY;
+					const LegalBuildCode code = TheBuildAssistant->isLocationLegalToBuild(&c, templ, placeAngle, legalOpts, worker, nullptr);
+					const int idx = static_cast<int>(code) >= 0 && static_cast<int>(code) < 8 ? static_cast<int>(code) : 7;
+					++counts[idx];
+					if (code != LBC_OK) continue;
+					if (isBuildLocationTemporarilyReserved(player, &c, templ)) { ++reserved; continue; }
+					if (hasOwnedStructureTooClose(player, &c, templ, 30.0f)) { ++ownedTooClose; continue; }
+					++legal;
+					if (align >= 0.65f) ++legalBaseSide;
+				}
+				if (legal > 0 && firstLegal < 0.0f) firstLegal = ring;
+				if (legalBaseSide > 0 && firstLegalBaseSide < 0.0f) firstLegalBaseSide = ring;
+				nlohmann::json codes = nlohmann::json::object();
+				for (int k = 0; k < 8; ++k) if (counts[k] > 0) codes[codeNames[k]] = counts[k];
+				rings.push_back({{"ring", ring}, {"codes", codes}, {"reserved", reserved}, {"owned_too_close", ownedTooClose},
+					{"legal", legal}, {"legal_base_side", legalBaseSide}});
+			}
+			if (TheTerrainVisual != nullptr) TheTerrainVisual->removeAllBibs();
+			Coord3D chosen = {}; Real chosenAngle = 0.0f;
+			const bool found = findBuildLocationNearSupply(player, worker, dock, templ, chosen, chosenAngle);
+			result = {
+				{"dock_id", static_cast<unsigned int>(dock->getID())}, {"dock_template", dock->getTemplate()->getName().str()},
+				{"dock", {{"x", dockPos->x}, {"y", dockPos->y}}}, {"dock_bounding_radius", dock->getGeometryInfo().getBoundingCircleRadius()},
+				{"base_radius", baseRadius}, {"supply_build_border", TheGlobalData != nullptr ? TheGlobalData->m_SupplyBuildBorder : 0.0f},
+				{"template", templateName}, {"template_radius", templ->getTemplateGeometryInfo().getBoundingCircleRadius()},
+				{"first_legal_ring", firstLegal}, {"first_legal_base_side_ring", firstLegalBaseSide},
+				{"chosen_found", found}, {"chosen", {{"x", chosen.x}, {"y", chosen.y}}},
+				{"chosen_distance", found ? std::sqrt(distanceSq2D(&chosen, dockPos)) : -1.0f},
+				{"rings", rings}
+			};
 			return true;
 		}
 

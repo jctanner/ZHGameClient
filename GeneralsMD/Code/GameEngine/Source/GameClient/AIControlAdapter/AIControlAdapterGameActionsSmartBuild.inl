@@ -151,6 +151,28 @@
 				return false;
 			}
 
+			// Resume a recent reveal walk: same dock, same worker.
+			Object* revealWorker = nullptr;
+			{
+				const auto revealIt = m_pendingSupplyRevealByPlayer.find(player->getPlayerIndex());
+				if (revealIt != m_pendingSupplyRevealByPlayer.end())
+				{
+					const bool fresh = adapterGameplayTick() - revealIt->second.tick <= 30000u;
+					Object* candidate = fresh ? TheGameLogic->findObjectByID(revealIt->second.worker) : nullptr;
+					Object* revealSupply = fresh ? TheGameLogic->findObjectByID(revealIt->second.supply) : nullptr;
+					if (candidate != nullptr && !candidate->isEffectivelyDead() && candidate->getControllingPlayer() == player
+						&& revealSupply != nullptr && requestedSupplyId <= 0 && !preferRemoteSupply)
+					{
+						revealWorker = candidate;
+						requestedSupplyId = static_cast<Int>(revealSupply->getID());
+					}
+					else
+					{
+						m_pendingSupplyRevealByPlayer.erase(revealIt);
+					}
+				}
+			}
+
 			if (requestedSupplyId <= 0)
 			{
 				const auto lastSupplyIt = m_lastAutoSupplySourceByPlayer.find(player->getPlayerIndex());
@@ -160,7 +182,7 @@
 				}
 			}
 
-			Object* worker = resolveWorkerFromArgs(player, message, true, reason);
+			Object* worker = revealWorker != nullptr ? revealWorker : resolveWorkerFromArgs(player, message, true, reason);
 			if (worker == nullptr)
 			{
 				return false;
@@ -244,7 +266,40 @@
 
 			Coord3D location;
 			Real angle = 0.0f;
-			if (findBuildLocationNearSupply(player, worker, selectedSupply, buildingTemplate, location, angle))
+			const bool foundRevealed = findBuildLocationNearSupply(player, worker, selectedSupply, buildingTemplate, location, angle);
+			// Early in a match the ground right next to a dock is often still shrouded, and
+			// the engine refuses player builds on shrouded ground, so the search settled
+			// ~300 from the dock. When a much closer site is legal apart from the shroud,
+			// walk the worker there to reveal it; the build is reissued on a later pass.
+			{
+				Coord3D ideal; Real idealAngle = 0.0f;
+				const Coord3D* supplyPos = selectedSupply->getPosition();
+				const Coord3D* workerPos = worker->getPosition();
+				if (supplyPos != nullptr && workerPos != nullptr
+					&& findBuildLocationNearSupply(player, worker, selectedSupply, buildingTemplate, ideal, idealAngle, false))
+				{
+					const Real idealDist = std::sqrt(distanceSq2D(&ideal, supplyPos));
+					const Real foundDist = foundRevealed ? std::sqrt(distanceSq2D(&location, supplyPos)) : 1.0e9f;
+					if (foundDist > idealDist + 40.0f && distanceSq2D(workerPos, &ideal) > 150.0f * 150.0f)
+					{
+						adapterLog("supply_stash_reveal_move worker=%d supply=%d ideal=(%.1f,%.1f) ideal_dist=%.1f revealed_dist=%.1f",
+							static_cast<int>(worker->getID()), static_cast<int>(selectedSupply->getID()), ideal.x, ideal.y, idealDist, foundDist);
+						if (requestId.rfind("auto_", 0) == 0)
+							recordAutonomyTelemetryEvent("build", "supply_site_reveal_move", "shrouded_near_site", &ideal);
+						const bool moved = moveWorkerToPosition(worker, &ideal, reason);
+						if (moved)
+						{
+							PendingSupplyReveal& pending = m_pendingSupplyRevealByPlayer[player->getPlayerIndex()];
+							if (pending.worker != worker->getID() || pending.supply != selectedSupply->getID())
+								pending.tick = adapterGameplayTick();
+							pending.worker = worker->getID();
+							pending.supply = selectedSupply->getID();
+						}
+						return moved;
+					}
+				}
+			}
+			if (foundRevealed)
 			{
 				const Coord3D* workerPos = worker->getPosition();
 				const Coord3D* supplyPos = selectedSupply->getPosition();
@@ -285,6 +340,7 @@
 				{
 					recordAutonomyTelemetryEvent("build", "build_supply_stash_construct", "supply_zone", &location);
 				}
+				m_pendingSupplyRevealByPlayer.erase(player->getPlayerIndex());
 				return executeConstructAtLocation(worker, buildingTemplate, location, angle, reason);
 			}
 
@@ -855,6 +911,13 @@
 				&& m_autonomy.state.profileSpendPlan.surplusMode && countOwnedMarketsNear(player, zoneArgs.zoneCenter, 320.0f) >= 2)
 			{
 				reason = "zone_market_cap";
+				return false;
+			}
+			// Front-line check before the placement search (the construct gate would refuse
+			// the site after a full search otherwise).
+			if (zoneArgs.hasZoneCenter && m_profileAutomaticSpendScope && isAutonomyModeActive()
+				&& !frontierAllowsWorkerJob(worker, zoneArgs.zoneCenter, reason))
+			{
 				return false;
 			}
 			Coord3D location;

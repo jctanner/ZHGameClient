@@ -741,6 +741,10 @@ namespace
 		void sendQueryResult(const std::string& requestId, const nlohmann::json& result) { ProfileScope profileScope(*this, "send_reply"); m_transport.sendQueryResult(requestId, result); }
 		void sendQueryError(const std::string& requestId, const char* code, const char* reason) { m_transport.sendQueryError(requestId, code, reason); }
 		std::unordered_map<Int, Int> m_lastAutoSupplySourceByPlayer;
+		// A worker sent to reveal a shrouded stash site: the next stash build reuses that
+		// worker and dock (instead of a fresh worker and the "avoid last dock" rotation).
+		struct PendingSupplyReveal { ObjectID worker = INVALID_ID; ObjectID supply = INVALID_ID; DWORD tick = 0u; };
+		std::unordered_map<Int, PendingSupplyReveal> m_pendingSupplyRevealByPlayer;
 		AdapterWorkersState m_workers;
 		bool m_profileAutomaticSpendScope = false;
 		bool m_ruleExpansionConstructionScope = false;
@@ -934,6 +938,19 @@ namespace
 				return false;
 			}
 			return true;
+		}
+
+		// GLA infantry names: the Rebel is the basic soldier (GLAInfantryRebel) and the RPG
+		// trooper is GLAInfantryTunnelDefender. Stinger Site soldiers (GLAInfantryStingerSoldier)
+		// are neither; matching "soldier"/"rpg" alone counted them as Rebels and found no RPGs.
+		static bool isBasicSoldierTemplate(const std::string& name)
+		{
+			return containsIgnoreCase(name, "rebel")
+				|| (containsIgnoreCase(name, "soldier") && !containsIgnoreCase(name, "stinger"));
+		}
+		static bool isRpgTemplate(const std::string& name)
+		{
+			return containsIgnoreCase(name, "rpg") || containsIgnoreCase(name, "tunneldefender");
 		}
 
 		struct AutomationOwnedObjectSnapshot
@@ -1448,11 +1465,11 @@ namespace
 
 					const ThingTemplate* tt = obj->getTemplate();
 					const std::string name = tt != nullptr ? tt->getName().str() : "";
-					if (containsIgnoreCase(name, "soldier"))
+					if (isBasicSoldierTemplate(name))
 					{
 						++counts->soldiers;
 					}
-					if (containsIgnoreCase(name, "rpg"))
+					if (isRpgTemplate(name))
 					{
 						++counts->rpg;
 					}
@@ -1669,8 +1686,8 @@ namespace
 				const bool isWarFactoryLike = containsIgnoreCase(name, "warfactory") || isArmsDealer;
 				const bool isDozer = obj->isKindOf(KINDOF_DOZER);
 				const bool isRadarVan = containsIgnoreCase(name, "radarvan");
-				const bool isSoldier = containsIgnoreCase(name, "soldier");
-				const bool isRpg = containsIgnoreCase(name, "rpg");
+				const bool isSoldier = isBasicSoldierTemplate(name);
+				const bool isRpg = isRpgTemplate(name);
 					const bool isTechnical = containsIgnoreCase(name, "technical");
 					const bool isQuad = containsIgnoreCase(name, "quad");
 					const bool isScorpion = containsIgnoreCase(name, "scorpion");
@@ -4194,6 +4211,7 @@ namespace
 				macroSnapshotInput.palaceBuildCooldownReady = isBuildCooldownReady("Game.BuildPalaceSmart");
 				macroSnapshotInput.wantsBaselineTwoMarkets =
 					AIControlAdapterProfilePolicyManager().WantsBaselineTwoMarkets(policyConfig);
+				macroLaps.mark("build/inputs");
 				AIControlAdapterMacroBuildSnapshot macroBuildSnapshotBase =
 					AIControlAdapterMacroBuildSnapshotBuilder().Build(macroSnapshotInput);
 				macroBuildSnapshotBase.survivalRecovery = survivalRecovery;
@@ -4347,6 +4365,7 @@ namespace
 						decision);
 				}
 
+				macroLaps.mark("build/spend_policy");
 				// Evaluate zone expansion arbitration
 				AIControlAdapterZoneExpansionArbitrationResult expansionDecision = macroBuildPolicyDecisions.expansionDecision;
 				const AIControlAdapterStrategicSpendDecision expansionSpend = macroSpendPlan.expansion;
@@ -4535,6 +4554,7 @@ namespace
 						}
 					}
 				}
+				macroLaps.mark("build/zone_defense_scan");
 				macroRuntimeInput.staticDefenseZoneIndex = staticDefenseZoneIndex;
 				macroRuntimeInput.staticDefenseCommand = !staticDefenseCommand.empty() ? staticDefenseCommand.c_str() : nullptr;
 				macroRuntimeInput.staticDefenseReason = staticDefenseReason.c_str();
@@ -5231,6 +5251,27 @@ namespace
 					if (commandCenters < desiredCommandCenters && autonomyRuleEnabled("worker_recruitment")
 						&& runJob("command_center", [&](std::string& r) { return tryMacroBuildWithFallback("Game.BuildCommandCenterSmart", true, r); }))
 						++ccJobs;
+					// 1b. Producer capacity in parallel (up to two Arms Dealers and two Barracks per
+					//     pass) while below the planner targets. Zone development skips zones under
+					//     attack, so under heavy pressure this is the only parallel producer path; one
+					//     recovery build at a time could not replace losses (7-enemy run lost with
+					//     $870k banked and 3-4 Arms Dealers against a target of 20).
+					int armsJobs = 0, barracksJobs = 0;
+					if (autonomyRuleEnabled("capacity_growth"))
+					{
+						const int armsHave = counts.armsDealers + counts.armsDealersInProgress;
+						const int barracksHave = counts.barracks + counts.barracksInProgress;
+						for (int i = 0; i < 2 && armsHave + armsJobs < m_autonomy.state.profileArmsDealerTarget && jobBudget > 0; ++i)
+						{
+							if (!runJob("producer_arms_" + std::to_string(i), [&](std::string& r) { return tryMacroBuildWithFallback("Game.BuildArmsDealerSmart", true, r); })) break;
+							++armsJobs;
+						}
+						for (int i = 0; i < 2 && barracksHave + barracksJobs < m_autonomy.state.profileBarracksTarget && jobBudget > 0; ++i)
+						{
+							if (!runJob("producer_barracks_" + std::to_string(i), [&](std::string& r) { return tryMacroBuildWithFallback("Game.BuildBarracksSmart", true, r); })) break;
+							++barracksJobs;
+						}
+					}
 					// 2. Parallel supply expansion: the chooser takes the nearest unclaimed source
 					//    and counts pending stash tasks as claims, so each call targets a new site.
 					if (autonomyRuleEnabled("zone_expansion"))
@@ -5279,13 +5320,14 @@ namespace
 						}
 					}
 					if (zoneTotal > 0u) m_autonomy.state.surplusZoneCursor = (m_autonomy.state.surplusZoneCursor + 3u) % zoneTotal;
-					if (ccJobs + expansionJobs + zoneJobs > 0) issued = true;
+					if (ccJobs + armsJobs + barracksJobs + expansionJobs + zoneJobs > 0) issued = true;
 					m_autonomy.state.surplusModeTelemetry = {
 						{"active", true},
 						{"worker_limit", m_autonomy.state.profileSpendPlan.workerLimit},
 						{"command_centers", commandCenters},
 						{"desired_command_centers", desiredCommandCenters},
-						{"jobs_last_pass", {{"command_center", ccJobs}, {"supply_expansion", expansionJobs}, {"zone_development", zoneJobs}, {"failures", jobFailures}}},
+						{"jobs_last_pass", {{"command_center", ccJobs}, {"arms_dealer", armsJobs}, {"barracks", barracksJobs},
+							{"supply_expansion", expansionJobs}, {"zone_development", zoneJobs}, {"failures", jobFailures}}},
 						{"zone_jobs_by_command", zoneJobsByCommand},
 						{"backoff_entries", static_cast<int>(backoff.size())},
 						{"time_budget_hit", jobTimeBudgetHit},
@@ -11892,7 +11934,8 @@ namespace
 					{
 						continue;
 					}
-					if (resolveAutonomyProfilePolicyConfig().isBalancedSprawl)
+					// Shallow queues for every profile: unbounded garrison orders filled each
+					// Barracks with RPG troopers and starved the main refill (Rebel/Angry Mob mix).
 					{
 						auto* queue = producer->getProductionUpdateInterface();
 						if (queue == nullptr) continue;
@@ -11900,7 +11943,10 @@ namespace
 						for (const auto& pending : m_pendingUnitQueues) if (pending.producerId == producer->getID()) ++depth;
 						if (depth >= 2) { productionReason = "shallow_queue_full"; continue; }
 					}
-					const std::string unitTemplate = inferRpgTemplateForProducer(producer);
+					// Garrison fill: two RPG troopers, then one Rebel.
+					static unsigned int garrisonOrderCounter = 0u;
+					const std::string unitTemplate = (++garrisonOrderCounter % 3u) == 0u
+						? inferSoldierTemplateForPlayer(player, producer) : inferRpgTemplateForProducer(producer);
 					std::string issueReason = productionDecision.reason;
 					const bool issued = queueUnit(player, producer,
 						unitTemplate.empty() ? std::string(productionDecision.unitTemplate) : unitTemplate,
@@ -17542,6 +17588,9 @@ namespace
 			{
 				return;
 			}
+			// Evaluate at most once per second; the full owned-object scan ran every frame
+			// whenever there was nothing to do (the cooldown was only set after acting).
+			m_automation.stashWorkerRule.nextAllowedTick = now + 1000u;
 
 			Player* player = nullptr;
 			if (m_automation.stashWorkerRule.hasExplicitPlayerIndex)
@@ -17885,6 +17934,9 @@ namespace
 			{
 				return;
 			}
+			// Evaluate at most once per second; the full owned-object scan ran every frame
+			// whenever there was nothing to do (the cooldown was only set after acting).
+			m_automation.radarVanRule.nextAllowedTick = now + 1000u;
 
 			Player* player = nullptr;
 			if (m_automation.radarVanRule.hasExplicitPlayerIndex)
@@ -18297,8 +18349,14 @@ namespace
 
 		void evaluateCaptureAutomationRule()
 		{
-			// Existing capture reservations still complete/release while new missions are disabled.
-			updateCaptureTaskLifecycle();
+			// Existing capture reservations still complete/release while new missions are disabled
+			// (reconciled four times a second rather than every frame).
+			static DWORD nextCaptureLifecycleTick = 0u;
+			if (!AIControlAdapterIsTickInFuture(nextCaptureLifecycleTick, adapterGameplayTick()))
+			{
+				nextCaptureLifecycleTick = adapterGameplayTick() + 250u;
+				updateCaptureTaskLifecycle();
+			}
 			if (!m_automation.captureRule.enabled)
 			{
 				if (!m_automation.captureRule.disabledLogEmitted)
@@ -18317,6 +18375,9 @@ namespace
 			{
 				return;
 			}
+			// Evaluate at most once per second; the full owned-object scan ran every frame
+			// whenever there was nothing to do (the cooldown was only set after acting).
+			m_automation.captureRule.nextAllowedTick = now + 1000u;
 
 			Player* player = nullptr;
 			if (m_automation.captureRule.hasExplicitPlayerIndex)

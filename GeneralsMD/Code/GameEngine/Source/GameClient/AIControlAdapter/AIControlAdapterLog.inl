@@ -109,16 +109,16 @@ public:
     bool configurePath(const std::string& path, bool truncateExisting)
     {
         if (path.empty() || path.size() >= sizeof(m_path)) return false;
-        std::unique_lock<std::mutex> lock(m_mutex, std::try_to_lock);
-        if (!lock.owns_lock()) return false;
+        // Rare control call: wait for the writer's brief batch copy instead of failing
+        // (try_to_lock made launches fail at random with log_configure_failed).
+        std::unique_lock<std::mutex> lock(m_mutex);
         std::memcpy(m_path, path.c_str(), path.size() + 1);
         m_configurePending = true; m_truncatePending = truncateExisting;
         lock.unlock(); m_ready.notify_one(); return true;
     }
     bool resetFile(bool truncateExisting)
     {
-        std::unique_lock<std::mutex> lock(m_mutex, std::try_to_lock);
-        if (!lock.owns_lock()) return false;
+        std::unique_lock<std::mutex> lock(m_mutex);
         m_configurePending = true; m_truncatePending = truncateExisting;
         lock.unlock(); m_ready.notify_one(); return true;
     }

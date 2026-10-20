@@ -1002,6 +1002,19 @@
 			// GAME BUILDING COMMANDS (smart construction)
 			// =========================================================================
 
+			if (cmd == "Game.DebugSupplyPlacement")
+			{
+				nlohmann::json result;
+				std::string reason;
+				if (!executeGameDebugSupplyPlacement(message, result, reason))
+				{
+					sendQueryError(requestId, "invalid_state", reason.c_str());
+					return;
+				}
+				sendQueryResult(requestId, result);
+				return;
+			}
+
 			if (cmd == "Game.FindSupplySources")
 			{
 				nlohmann::json result;

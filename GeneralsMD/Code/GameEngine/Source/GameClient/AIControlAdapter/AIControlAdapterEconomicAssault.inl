@@ -714,6 +714,9 @@
 				? (input.economicVictory ? std::max(4, (quads + scorpions + scuds + 9) / 10)
 					: std::min(6, std::max(2, (quads + scorpions + scuds + 9) / 10))) : 0;
 			int infantry = input.soldiers + input.rpg;
+			// Barracks mix: about one Rebel per two RPG troopers (Rebels cover enemy infantry
+			// and capture; RPGs cover vehicles and air). Queued infantry is not split by type.
+			int rebelCount = input.soldiers, rpgCount = input.rpg;
 			int queuedInfantry = 0;
 			for (const auto& producer : producers)
 			{
@@ -732,6 +735,42 @@
 			const UnsignedInt protectedCash = profilePlan.active ? profilePlan.combatProtectedCash : emergencyPulse ? (input.money < 4000u ? 600u : 3000u)
 				: input.reserveCash + (input.money >= input.reserveCash + 20000u ? 5000u : 3000u);
 			int issued = 0; int siegeIssued = 0; int counterIssued = 0;
+			// Jarmen Kell (hero, one at a time, Palace prerequisite): keep one alive. He snipes
+			// vehicle crews, leaving empty vehicles for our infantry. Replaced when he dies.
+			if (input.hasCompletedPalace && autonomyRuleEnabled("combat_production"))
+			{
+				static const char* kJarmenTemplate = "GLAInfantryJarmenKell";
+				const ThingTemplate* jarmen = TheThingFactory->findTemplate(AsciiString(kJarmenTemplate), false);
+				bool haveJarmen = false;
+				for (Object* obj = TheGameLogic->getFirstObject(); jarmen != nullptr && obj != nullptr && !haveJarmen; obj = obj->getNextObject())
+				{
+					if (obj->getControllingPlayer() != player || obj->isEffectivelyDead() || obj->getTemplate() == nullptr) continue;
+					if (obj->getTemplate()->isEquivalentTo(jarmen)) haveJarmen = true;
+					else if (auto* queue = obj->getProductionUpdateInterface())
+						haveJarmen = queue->countUnitTypeInQueue(jarmen) > 0;
+				}
+				for (const auto& pending : m_pendingUnitQueues)
+					if (pending.playerIndex == player->getPlayerIndex() && pending.templateName == kJarmenTemplate) haveJarmen = true;
+				if (jarmen != nullptr && !haveJarmen)
+				{
+					const UnsignedInt cost = static_cast<UnsignedInt>(std::max<Int>(0, jarmen->calcCostToBuild(player)));
+					const Money* wallet = player->getMoney();
+					for (const auto& producer : producers)
+					{
+						Object* obj = producer.object;
+						if (!producer.isBarracks || obj == nullptr || producer.underConstruction || obj->isEffectivelyDead()) continue;
+						if (TheBuildAssistant->canMakeUnit(obj, jarmen) != CANMAKE_OK) continue;
+						if (wallet == nullptr || committed + cost + protectedCash > wallet->countMoney()) break;
+						if (queueUnit(player, obj, kJarmenTemplate, 1, "barracks", reason, ""))
+						{
+							committed += cost; ++issued; ++infantry;
+							m_autonomy.state.productionTelemetry["jarmen_queued_tick"] = static_cast<unsigned int>(adapterGameplayTick());
+						}
+						break;
+					}
+				}
+				m_autonomy.state.productionTelemetry["jarmen_alive_or_queued"] = haveJarmen;
+			}
 			std::sort(producers.begin(), producers.end(), [](const ProductionProducerSnapshot& a, const ProductionProducerSnapshot& b) {
 				return a.objectId < b.objectId;
 			});
@@ -770,9 +809,19 @@
 					{
 						if (autonomyRuleEnabled("siege_production") && profilePlan.active && scuds < std::min(2, desiredScuds)) continue;
 						const int infantryFloor = profilePlan.active && !profilePlan.sustainedOffense ? (profilePlan.threatResponse ? 8 : 4) : input.economicVictory ? 20 : 12;
-						if (infantry >= std::max(infantryFloor, input.armyCount / 5)) continue;
-						unit = preferredCommand == "Game.QueueSoldiersAllBarracks"
-							? inferSoldierTemplateForPlayer(player, obj) : inferRpgTemplateForProducer(obj);
+						// Surplus mode: every Barracks keeps its queue full (the ratio cap left them
+						// idle with a large bank while the army was being destroyed).
+						if (!profilePlan.surplusMode && infantry >= std::max(infantryFloor, input.armyCount / 5)) continue;
+						const bool rebelOrder = preferredCommand == "Game.QueueSoldiersAllBarracks" || rebelCount * 2 < rpgCount;
+						unit = rebelOrder ? inferSoldierTemplateForPlayer(player, obj) : inferRpgTemplateForProducer(obj);
+						// About one Barracks order in six is an Angry Mob (strong against infantry
+						// and structures) once the Barracks can build it; otherwise the mix above.
+						static unsigned int barracksOrderCounter = 0u;
+						if (preferredCommand.empty() && (++barracksOrderCounter % 6u) == 0u)
+						{
+							const ThingTemplate* mob = TheThingFactory->findTemplate(AsciiString("GLAInfantryAngryMob"), false);
+							if (mob != nullptr && TheBuildAssistant->canMakeUnit(obj, mob) == CANMAKE_OK) unit = "GLAInfantryAngryMob";
+						}
 					}
 					else if (quads < quadFloor && (counterIssued == 0 || scuds >= desiredScuds || quads < 6))
 						unit = inferQuadTemplateForProducer(obj);
@@ -798,7 +847,12 @@
 					if (!queueUnit(player, obj, unit, 1, producer.isBarracks ? "barracks" : "arms_dealer", reason, utilityOrder && producer.isBarracks ? "capture" : "")) continue;
 					if (utilityOrder) utilityIssued = true;
 					committed += cost; --remaining; ++issued;
-					if (producer.isBarracks) ++infantry;
+					if (producer.isBarracks)
+					{
+						++infantry;
+						if (!utilityOrder && unit == inferSoldierTemplateForPlayer(player, obj)) ++rebelCount;
+						else if (!utilityOrder && unit != "GLAInfantryAngryMob") ++rpgCount;
+					}
 					if (containsIgnoreCase(unit, "scudlauncher")) { ++scuds; ++siegeIssued; }
 					else if (containsIgnoreCase(unit, "quad")) { ++quads; ++counterIssued; }
 					else if (containsIgnoreCase(unit, "scorpion")) { ++scorpions; ++counterIssued; }
